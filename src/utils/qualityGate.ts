@@ -6,14 +6,17 @@
  * factory grades itself on -- and deterministically fixes what can be fixed
  * without another model round-trip:
  *
- *  - musicality: measured on a real musical signal (the same chord arp the
- *    preview engine plays). Gain staging is corrected with an output trim the
- *    audio engine applies; silent output and dead ("decorative") parameters
- *    are detected and reported as repair evidence.
+ *  - musicality: measured across a BANK of realistic signals (a chord arp --
+ *    the same one the preview plays -- plus a plucked note, a sustained tone,
+ *    and percussive bursts). Gain staging is corrected with an output trim
+ *    the audio engine applies; silent output, cross-signal dead spots, and
+ *    dead ("decorative") parameters are detected and reported as evidence.
  *  - looks: every parameter is guaranteed a controlType, layout coordinates,
  *    and a category-matched color theme via polishPluginVisuals().
  *  - performance: static real-time-safety analysis of the DSP body.
- *  - latency: scored from measured generation wall-time.
+ *  - latency: scored from measured generation wall-time (see scoreLatency --
+ *    this is generation responsiveness, not the plugin's audio latency, which
+ *    is ~0 in this per-sample engine).
  */
 
 import { AudioPlugin, BuildReport, PluginParameter } from "../types";
@@ -50,6 +53,11 @@ export interface MusicalityMeasurement {
   audibleParams: string[];
   /** Parameter ids whose min or max setting made the DSP throw or emit NaN. */
   unstableParams: string[];
+  /** Names of non-primary test signals on which the plugin goes silent while
+   *  it is audible on the arp -- a real dead-spot (e.g. chokes plucks or
+   *  sustains). Reported, and penalized by the refinement loop, but NOT
+   *  scored into the four headline dimensions. */
+  silentOnSignals: string[];
   /** Human-readable failure evidence for the repair loop ("" when ok). */
   evidence: string;
   /**
@@ -70,12 +78,16 @@ export interface QualityGateResult {
 }
 
 const SAMPLE_RATE = 44100;
+/** Window for the per-signal cross-liveness check (0.5s = 2 burst periods). */
+const CROSS_SIGNAL_WINDOW = 22050;
 
 /**
  * The identical musical program material the preview engine's "synth" source
  * plays, so measurements predict exactly what the user will hear on Play.
+ * This is the PRIMARY signal -- the deterministic gain/DC/silence fixes are
+ * computed on it so they match the preview exactly.
  */
-function musicalInputAt(index: number): number {
+function arpAt(index: number): number {
   const t = index / SAMPLE_RATE;
   const bar = Math.floor(t * 3.5);
   const notes = [220, 261.63, 329.63, 392, 440, 523.25, 659.25, 783.99];
@@ -86,6 +98,74 @@ function musicalInputAt(index: number): number {
   const chorusOsc = Math.sin(2 * Math.PI * (rootFreq * 1.01) * t) * 0.25;
   return (baseOsc + subOsc + chorusOsc) * 0.18;
 }
+
+/**
+ * A plucked, decaying note (guitar/bass-like): fast attack, exponential
+ * decay, re-triggered every 0.5s across a low register. Exercises transient
+ * response and attack/release behaviour that a legato arp never reveals --
+ * an attack-time or transient-shaper knob is dead on the arp but alive here.
+ */
+function pluckAt(index: number): number {
+  const t = index / SAMPLE_RATE;
+  const period = 0.5;
+  const phase = t % period;
+  const bar = Math.floor(t / period);
+  const notes = [82.41, 110, 146.83, 196, 246.94, 329.63]; // E2..E4, guitar range
+  const f = notes[bar % notes.length];
+  const attack = Math.min(1, phase / 0.003); // ~3 ms attack
+  const env = attack * Math.exp(-phase * 6);
+  const osc = Math.sin(2 * Math.PI * f * t) + 0.5 * Math.sin(2 * Math.PI * 2 * f * t) + 0.25 * Math.sin(2 * Math.PI * 3 * f * t);
+  return osc * env * 0.18;
+}
+
+/**
+ * A steady sustained tone with light vibrato -- equilibrium behaviour for
+ * filters, EQ, drive, and anything whose character only settles after the
+ * transient has passed.
+ */
+function sustainAt(index: number): number {
+  const t = index / SAMPLE_RATE;
+  const f = 196; // G3
+  const vib = 1 + Math.sin(2 * Math.PI * 5 * t) * 0.006;
+  const osc = Math.sin(2 * Math.PI * f * vib * t) + 0.4 * Math.sin(2 * Math.PI * 2 * f * t) + 0.2 * Math.sin(2 * Math.PI * 3 * f * t);
+  return osc * 0.2;
+}
+
+/** Deterministic value-noise hash (no Math.random -- measurements must be
+ *  reproducible so scores are stable across runs). */
+function hashNoise(index: number): number {
+  const s = Math.sin(index * 12.9898) * 43758.5453;
+  return (s - Math.floor(s)) * 2 - 1;
+}
+
+/**
+ * Staccato percussive hits with silence gaps -- 60 ms bursts every 250 ms.
+ * Exercises gates, transient shapers, compressor attack, and how a plugin
+ * behaves during SILENCE between hits (a reverb should ring on, a gate
+ * should close) -- none of which a continuous signal tests.
+ */
+function burstAt(index: number): number {
+  const t = index / SAMPLE_RATE;
+  const period = 0.25;
+  const phase = t % period;
+  if (phase > 0.06) return 0; // silence between hits
+  const bar = Math.floor(t / period);
+  const f = [110, 220, 165, 330][bar % 4];
+  const attack = Math.min(1, phase / 0.002);
+  const env = attack * Math.exp(-phase * 30);
+  const osc = Math.sin(2 * Math.PI * f * t) + hashNoise(index) * 0.3; // tonal + noisy transient edge
+  return osc * env * 0.25;
+}
+
+/** The signal bank the gate measures across. Index 0 is PRIMARY (the arp);
+ *  it must stay first because the deterministic fixes key off it. */
+const TEST_SIGNALS: { name: string; at: (i: number) => number }[] = [
+  { name: "arp", at: arpAt },
+  { name: "pluck", at: pluckAt },
+  { name: "sustain", at: sustainAt },
+  { name: "burst", at: burstAt },
+];
+const PRIMARY_SIGNAL = TEST_SIGNALS[0];
 
 function compileDspBody(dspFunction: string): ((i: number, p: any, s: any) => number) | null {
   try {
@@ -115,7 +195,8 @@ interface RenderStats {
 function renderPass(
   dspFunc: (i: number, p: any, s: any) => number,
   params: Record<string, number>,
-  length: number
+  length: number,
+  signal: (i: number) => number = PRIMARY_SIGNAL.at
 ): RenderStats {
   const out = new Float32Array(length);
   const state: any = {};
@@ -126,7 +207,7 @@ function renderPass(
   for (let i = 0; i < length; i++) {
     let y = 0;
     try {
-      y = dspFunc(musicalInputAt(i), params, state);
+      y = dspFunc(signal(i), params, state);
     } catch {
       return { rms: 0, dcOffset: 0, clippingRatio: 0, failed: true, samples: out };
     }
@@ -174,6 +255,7 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
     deadParams: [],
     audibleParams: [],
     unstableParams: [],
+    silentOnSignals: [],
     evidence,
     fatal: true,
   });
@@ -187,7 +269,7 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
   const FULL = SAMPLE_RATE;
   let inSumSq = 0;
   for (let i = 0; i < FULL; i++) {
-    const x = musicalInputAt(i);
+    const x = PRIMARY_SIGNAL.at(i);
     inSumSq += x * x;
   }
   const inputRms = Math.sqrt(inSumSq / FULL);
@@ -200,11 +282,39 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
   const gainOffsetDb = isSilent ? -60 : 20 * Math.log10(outputRms / inputRms);
   const suggestedTrim = isSilent ? 1 : Math.min(8, Math.max(0.125, inputRms / outputRms));
 
-  // --- 2. Per-parameter audibility: min vs max must actually change the sound ---
-  // 1.5s per pass: long enough for delay/reverb tails (a 350ms default delay
-  // needs several repeats before feedback becomes audible), still <100ms of
-  // compute for a 7-parameter plugin.
+  // Cross-signal liveness: a plugin that's audible on the arp but goes silent
+  // on plucks or sustained notes has a real hole (a gate that chokes quiet
+  // sustains, an effect that only works on continuous tones). Reported as a
+  // weakness and fed to the refinement loop -- deliberately NOT scored into
+  // the four headline dimensions, so the >=97 floor stays provable.
+  const silentOnSignals: string[] = [];
+  if (!isSilent) {
+    for (const sig of TEST_SIGNALS) {
+      if (sig === PRIMARY_SIGNAL) continue;
+      let sigInSq = 0;
+      for (let i = 0; i < CROSS_SIGNAL_WINDOW; i++) {
+        const x = sig.at(i);
+        sigInSq += x * x;
+      }
+      const sigInputRms = Math.sqrt(sigInSq / CROSS_SIGNAL_WINDOW);
+      if (sigInputRms < 1e-4) continue; // signal itself is near-silent; nothing to compare
+      const sigOut = renderPass(dspFunc, defaults, CROSS_SIGNAL_WINDOW, sig.at);
+      if (!sigOut.failed && sigOut.rms < sigInputRms * 0.02) silentOnSignals.push(sig.name);
+    }
+  }
+
+  // --- 2. Per-parameter audibility ACROSS THE SIGNAL BANK ---
+  // A knob is AUDIBLE if moving min->max changes the sound on ANY realistic
+  // signal (an attack-time knob is dead on a legato arp but alive on plucks/
+  // bursts -- measuring across signals rescues genuinely-useful knobs the
+  // single-signal test wrongly called dead). A knob is UNSTABLE if it makes
+  // the DSP throw/NaN on ANY signal (a divide-by-envelope that only blows up
+  // during the silence gaps of the burst is still a real bug a user hits).
+  // Primary (arp) uses the full 1.5s window for delay/reverb tails; the extra
+  // signals use 0.5s (transient differences reveal fast) to keep it cheap.
   const SHORT = 66150;
+  const EXTRA_SHORT = 22050;
+  const AUDIBLE_THRESHOLD = 0.003;
   const deadParams: string[] = [];
   const audibleParams: string[] = [];
   const unstableParams: string[] = [];
@@ -214,26 +324,28 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
 
     const atMin = { ...defaults, [p.id]: p.min };
     const atMax = { ...defaults, [p.id]: p.max };
-    const a = renderPass(dspFunc, atMin, SHORT);
-    const b = renderPass(dspFunc, atMax, SHORT);
+    let audible = false;
+    let unstable = false;
 
-    if (a.failed || b.failed) {
-      // The knob breaks the DSP somewhere in its legal range -- a user WILL
-      // find that spot. Hard evidence for the repair loop.
-      unstableParams.push(p.id);
-      continue;
+    for (const sig of TEST_SIGNALS) {
+      const len = sig === PRIMARY_SIGNAL ? SHORT : EXTRA_SHORT;
+      const a = renderPass(dspFunc, atMin, len, sig.at);
+      const b = renderPass(dspFunc, atMax, len, sig.at);
+      if (a.failed || b.failed) {
+        unstable = true;
+        break; // a hard failure on any signal dominates
+      }
+      if (audible) continue; // already proven audible; keep scanning only for instability
+      let diffSum = 0;
+      for (let i = 0; i < len; i++) diffSum += Math.abs(a.samples[i] - b.samples[i]);
+      if (diffSum / len >= AUDIBLE_THRESHOLD || Math.abs(a.rms - b.rms) >= AUDIBLE_THRESHOLD) {
+        audible = true;
+      }
     }
 
-    let diffSum = 0;
-    for (let i = 0; i < SHORT; i++) diffSum += Math.abs(a.samples[i] - b.samples[i]);
-    const meanDiff = diffSum / SHORT;
-    const rmsDiff = Math.abs(a.rms - b.rms);
-
-    if (meanDiff < 0.003 && rmsDiff < 0.003) {
-      deadParams.push(p.id);
-    } else {
-      audibleParams.push(p.id);
-    }
+    if (unstable) unstableParams.push(p.id);
+    else if (audible) audibleParams.push(p.id);
+    else deadParams.push(p.id);
   }
 
   // --- 3. Aggregate evidence for the repair loop ---
@@ -245,12 +357,22 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
   }
   if (deadParams.length > 0) {
     problems.push(
-      `these parameters have NO audible effect between their min and max on 1.5s of musical material: ${deadParams.join(", ")} -- the DSP must actually read params.<id> and the value must influence the output math`
+      `these parameters have NO audible effect between their min and max on ANY of the four test signals (arp, plucked, sustained, percussive): ${deadParams.join(", ")} -- the DSP must actually read params.<id> and the value must influence the output math`
     );
   }
   if (unstableParams.length > 0) {
     problems.push(
       `the DSP produced NaN/Infinity or threw when these parameters were set to their min or max: ${unstableParams.join(", ")} -- every value in a parameter's declared [min, max] range must be safe (clamp coefficients, guard divisions, wrap indices)`
+    );
+  }
+
+  // Soft weaknesses: surfaced in the evidence and penalized by the refinement
+  // loop, but NOT counted toward `ok` (they don't trigger the hard repair
+  // loop) or the four headline scores (the >=97 floor stays provable).
+  const weaknesses: string[] = [];
+  if (silentOnSignals.length > 0) {
+    weaknesses.push(
+      `goes essentially SILENT on the ${silentOnSignals.join(", ")} signal(s) while audible on the arp -- the plugin has a dead spot on that kind of material (e.g. chokes plucked or sustained notes)`
     );
   }
 
@@ -266,7 +388,8 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
     deadParams,
     audibleParams,
     unstableParams,
-    evidence: problems.join("; "),
+    silentOnSignals,
+    evidence: [...problems, ...weaknesses].join("; "),
   };
 }
 
@@ -309,25 +432,28 @@ function spectralBandDistribution(samples: Float32Array, sampleRate: number): nu
   return energies.map((e) => e / total);
 }
 
-export function measureCharacterIndex(dspFunction: string, parameters: PluginParameter[]): number {
-  const dspFunc = compileDspBody(dspFunction);
-  if (!dspFunc) return 0;
-
-  const defaults = defaultParamsMap(parameters);
+/** Spectral reshaping of ONE signal (0 = unchanged/silent, 1 = maximally
+ *  reshaped). Averaged across the bank by measureCharacterIndex. */
+function characterOnSignal(dspFunc: (i: number, p: any, s: any) => number, defaults: Record<string, number>, signal: (i: number) => number): number {
   const dry = new Float32Array(CHARACTER_WINDOW);
-  for (let i = 0; i < CHARACTER_WINDOW; i++) dry[i] = musicalInputAt(i);
+  for (let i = 0; i < CHARACTER_WINDOW; i++) dry[i] = signal(i);
 
-  const wet = renderPass(dspFunc, defaults, CHARACTER_WINDOW);
+  const wet = renderPass(dspFunc, defaults, CHARACTER_WINDOW, signal);
   if (wet.failed) return 0;
 
   // Silent output has no spectral distribution to compare (the all-zero
   // fallback in spectralBandDistribution would otherwise read as "maximally
   // different from dry" -- the opposite of the intended meaning). Treat it
-  // the same as "nothing measurable": 0. Silence is already penalized
-  // separately and heavily by scoreMusicality's isSilent check.
+  // as "nothing measurable": 0.
   let wetEnergy = 0;
   for (let i = 0; i < wet.samples.length; i++) wetEnergy += wet.samples[i] * wet.samples[i];
   if (wetEnergy <= 1e-9) return 0;
+
+  // The dry burst is mostly silence; a near-zero-energy dry signal makes the
+  // distribution comparison meaningless, so skip it in the average.
+  let dryEnergy = 0;
+  for (let i = 0; i < dry.length; i++) dryEnergy += dry[i] * dry[i];
+  if (dryEnergy <= 1e-9) return -1; // sentinel: "not comparable", excluded from the mean
 
   const dryDist = spectralBandDistribution(dry, SAMPLE_RATE);
   const wetDist = spectralBandDistribution(wet.samples, SAMPLE_RATE);
@@ -336,6 +462,26 @@ export function measureCharacterIndex(dspFunction: string, parameters: PluginPar
   for (let i = 0; i < dryDist.length; i++) l1 += Math.abs(dryDist[i] - wetDist[i]);
   // L1 distance between two distributions that each sum to 1 maxes at 2.
   return Math.max(0, Math.min(1, l1 / 2));
+}
+
+export function measureCharacterIndex(dspFunction: string, parameters: PluginParameter[]): number {
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return 0;
+
+  const defaults = defaultParamsMap(parameters);
+  // Average the spectral reshaping across every comparable signal, so the
+  // character score reflects how the plugin behaves on plucks and sustains,
+  // not just the arp.
+  let sum = 0;
+  let count = 0;
+  for (const sig of TEST_SIGNALS) {
+    const c = characterOnSignal(dspFunc, defaults, sig.at);
+    if (c >= 0) {
+      sum += c;
+      count++;
+    }
+  }
+  return count === 0 ? 0 : sum / count;
 }
 
 /**
@@ -651,6 +797,9 @@ export function runQualityGate(
   if (m.unstableParams.length > 0) {
     notes.push(`Parameters that break the DSP at range extremes: ${m.unstableParams.join(", ")}.`);
   }
+  if (m.silentOnSignals.length > 0) {
+    notes.push(`Cross-signal dead spot: silent on ${m.silentOnSignals.join(", ")} while audible on the arp.`);
+  }
   if (m.audibleParams.length > 0) {
     notes.push(`Verified audible on musical material: ${m.audibleParams.length}/${m.audibleParams.length + m.deadParams.length} parameters.`);
   }
@@ -705,6 +854,7 @@ export function runQualityGate(
     audibleParams: m.audibleParams,
     deadParams: m.deadParams,
     unstableParams: m.unstableParams,
+    silentOnSignals: m.silentOnSignals,
     fixes: notes.slice(),
     confidence,
     characterIndex,
@@ -738,6 +888,9 @@ export function formatBuildReport(r: BuildReport): string {
   }
   if (r.unstableParams.length > 0) {
     lines.push(`- ⚠️ Unstable at range extremes: ${r.unstableParams.join(", ")}`);
+  }
+  if (r.silentOnSignals && r.silentOnSignals.length > 0) {
+    lines.push(`- ⚠️ Silent on ${r.silentOnSignals.join(", ")} material (dead on plucks/sustains, alive on the arp)`);
   }
 
   const repairFixes = r.fixes.filter((f) => /corrected|trim|DC/i.test(f));

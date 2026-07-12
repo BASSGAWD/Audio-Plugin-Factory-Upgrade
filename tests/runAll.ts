@@ -30,6 +30,7 @@ const TEST_FILES = [
   "nativeBuildTest.ts",
   "refinementLoopTest.ts",
   "uiRenderTest.tsx",
+  "signalBankTest.ts",
 ];
 
 let failed = 0;

@@ -109,6 +109,10 @@ export interface BuildReport {
   audibleParams: string[];
   deadParams: string[];
   unstableParams: string[];
+  /** Non-primary test signals the plugin goes silent on while audible on the
+   *  arp -- a cross-signal dead spot (chokes plucks/sustains). Reported and
+   *  penalized by the refinement loop; not part of the four headline scores. */
+  silentOnSignals?: string[];
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /** 0-100: min score minus penalties for dead/unstable controls. */

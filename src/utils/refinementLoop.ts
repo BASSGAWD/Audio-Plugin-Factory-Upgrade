@@ -44,17 +44,19 @@ export interface RefinementResult {
 /**
  * One number to climb: all four gate dimensions plus confidence, minus a
  * small penalty per deterministic correction the gate had to apply (a build
- * that needs no gain trim beats one that does, even at equal scores), plus a
- * small bonus for characterIndex — a tie-breaker only. It cannot make an
- * incorrect build win: the correctness terms (scores, confidence) dominate
- * the range (0-800), while the character bonus tops out at 3, just enough to
- * separate otherwise-equal candidates in favor of the more transformative one.
+ * that needs no gain trim beats one that does, even at equal scores) and per
+ * cross-signal dead spot (a build that works on plucks AND sustains beats one
+ * that dies on some material), plus a small bonus for characterIndex. These
+ * last terms are tie-breakers only: the correctness terms (scores,
+ * confidence) dominate the ~0-800 range, so they refine ranking among
+ * otherwise-equal candidates without ever letting an incorrect build win.
  */
 export function refinementScore(gate: QualityGateResult): number {
   const s = gate.scores;
   const corrections = gate.report.fixes.filter((f) => /corrected/i.test(f)).length;
   const characterBonus = 3 * gate.report.characterIndex;
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus;
+  const deadSpotPenalty = 5 * (gate.report.silentOnSignals?.length ?? 0);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty;
 }
 
 /* ------------------------------------------------------------------ */

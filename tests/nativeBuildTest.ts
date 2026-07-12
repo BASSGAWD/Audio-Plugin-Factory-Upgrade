@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { extractCompileErrors, executeBuildPipeline, BuildJob } from "../server/nativeBuild";
+import { extractCompileErrors, executeBuildPipeline, scaffoldNativeProject, BuildJob } from "../server/nativeBuild";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -153,6 +153,22 @@ function fakeVst3(projectDir: string): void {
       },
     });
     check("configure failure: fails before compiling", job.status === "failed" && job.attempts === 0, `attempts=${job.attempts}`);
+  }
+
+  /* f. Scaffold identifiers must be legal C++/CMake identifiers even when
+   *    the plugin name starts with a digit (e.g. "8-pad Drum Sampler" ->
+   *    slug "8_pad_drum_sampler" -> a naive PascalCase produces
+   *    "8PadDrumSampler", which is not a valid class name and fails to
+   *    compile with cascading syntax errors from the very first token). */
+  {
+    const scaffold = await scaffoldNativeProject(
+      { name: "8-pad Drum Sampler", category: "synthesizer", parameters: [{ id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.5 }], dspFunction: "return inputSample;" },
+      { provider: "ollama", ollamaUrl: "http://127.0.0.1:1", ollamaModel: "none", lmStudioUrl: "http://127.0.0.1:1", lmStudioModel: "none" }
+    );
+    const processorHeader = fs.readFileSync(path.join(scaffold.projectDir, "Source", "PluginProcessor.h"), "utf8");
+    const classNameMatch = processorHeader.match(/class\s+(\S+)AudioProcessor\b/);
+    check("scaffold: class name never starts with a digit", !!classNameMatch && !/^[0-9]/.test(classNameMatch[1]), `name=${classNameMatch?.[1]}`);
+    check("scaffold: project name still reflects the slug", !!classNameMatch && /PadDrumSampler/.test(classNameMatch[1]), `name=${classNameMatch?.[1]}`);
   }
 
   console.log(failures === 0 ? "\nNATIVE BUILD: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);

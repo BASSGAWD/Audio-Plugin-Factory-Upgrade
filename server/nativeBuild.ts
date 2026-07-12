@@ -57,11 +57,18 @@ function slugify(name: string): string {
 }
 
 function pascalCase(slug: string): string {
-  return slug
-    .split("_")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("") || "AudioPlugin";
+  const name =
+    slug
+      .split("_")
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join("") || "AudioPlugin";
+  // This becomes a C++ class name (${projectName}AudioProcessor, etc.) and
+  // the CMake project()/PLUGIN_NAME identifier -- both illegal if they start
+  // with a digit (e.g. "8-pad sampler" -> slug "8_pad_sampler" -> "8PadSampler",
+  // which fails to compile with cascading syntax errors from the very first
+  // token). Prefix with a letter, matching cppIdentifier's guard for params.
+  return /^[0-9]/.test(name) ? `Plugin${name}` : name;
 }
 
 // JUCE convention: 4 chars, first uppercase, at least one lowercase, deterministic per slug.

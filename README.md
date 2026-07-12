@@ -57,20 +57,30 @@ generation. For richer LLM-driven builds, add any of:
 ## Scripts
 
 ```bash
-npm run dev     # dev server (tsx server.ts + Vite)
-npm run build   # production build (vite build + esbuild server bundle)
-npm start       # run the production bundle
-npm run lint    # TypeScript type check
-npm test        # regression suite (9 suites)
+npm run dev      # dev server (tsx server.ts + Vite)
+npm run build    # production build (vite build + esbuild server bundle)
+npm start        # run the production bundle
+npm run lint     # TypeScript type check
+npm test         # regression suite (13 suites, pure functions + SSR markup)
+npm run test:e2e # real-browser smoke test (needs `npm run dev` already running)
 ```
 
 ## Testing
 
-`npm test` runs the quality contract: every recipe and every offline build
-path is pushed through the quality gate and must score ≥97 on all four
-dimensions; intent classification (including hybrid splitting), family
-coverage, model-output normalization, and control math are asserted too. Any
-new recipe or generation path must pass the gate **before** it ships.
+`npm test` runs the quality contract: every recipe, every offline/primitive
+build path, and the job-graph planner is pushed through the quality gate and
+must score ≥97 on all four dimensions; intent classification (including
+hybrid splitting), family coverage, model-output normalization, and control
+math are asserted too. Any new recipe or generation path must pass the gate
+**before** it ships. These 13 suites run pure functions and SSR markup only —
+no browser, no server.
+
+`npm run test:e2e` is the one suite that drives the actual running app in a
+real (headless) browser via Playwright: builds a plugin through the chat UI,
+verifies the generative faceplate and controls render, presses play, checks
+Pro mode loads, and asserts no unexpected console errors. It needs
+`npm run dev` running first and saves screenshots to
+`tests/.e2e-screenshots/` for visual review.
 
 ## Export
 

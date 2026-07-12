@@ -245,7 +245,7 @@ target_link_libraries(${projectName} PRIVATE
 `;
 }
 
-function generateProcessorCoreHeader(translation: TranslationResult, paramIds: string[]): string {
+function generateProcessorCoreHeader(translation: TranslationResult): string {
   const members = translation.memberDeclarations.map((d) => `    ${d}`).join("\n");
   return `// Auto-generated from the tested in-browser JS DSP function.
 // Params is a plain struct (one float per plugin parameter, see PluginProcessor.h)
@@ -298,7 +298,7 @@ ${fields}
 `;
 }
 
-function generatePluginProcessorHeader(projectName: string, parameters: NativeParameter[]): string {
+function generatePluginProcessorHeader(projectName: string): string {
   return `#pragma once
 #include <JuceHeader.h>
 #include "Parameters.h"
@@ -452,7 +452,7 @@ function generatePluginEditorCpp(
   const columns = Math.max(1, Math.min(4, parameters.length));
   const buildSliders = parameters
     .map(
-      (p, i) => `    {
+      (p) => `    {
         auto* label = labels.add (new juce::Label ({}, "${p.name}"));
         label->setJustificationType (juce::Justification::centred);
         label->setColour (juce::Label::textColourId, juce::Colour::fromString ("ff${textColor.replace("#", "")}"));
@@ -544,8 +544,8 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
 
   fs.writeFileSync(path.join(projectDir, "CMakeLists.txt"), generateCMakeLists(projectName, pluginCode));
   fs.writeFileSync(path.join(projectDir, "Source", "Parameters.h"), generateParametersHeader(plugin.parameters));
-  fs.writeFileSync(path.join(projectDir, "Source", "dsp", "ProcessorCore.h"), generateProcessorCoreHeader(translation, paramIds));
-  fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.h"), generatePluginProcessorHeader(projectName, plugin.parameters));
+  fs.writeFileSync(path.join(projectDir, "Source", "dsp", "ProcessorCore.h"), generateProcessorCoreHeader(translation));
+  fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.h"), generatePluginProcessorHeader(projectName));
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.cpp"), generatePluginProcessorCpp(projectName, plugin.parameters));
   fs.writeFileSync(path.join(projectDir, "Source", "PluginEditor.h"), generatePluginEditorHeader(projectName));
   fs.writeFileSync(
@@ -646,7 +646,7 @@ async function repairProcessorCore(
   );
   const translation = parseTranslation(raw);
   if (!translation.methodBody || translation.methodBody.length < 10) return null;
-  fs.writeFileSync(corePath, generateProcessorCoreHeader(translation, []));
+  fs.writeFileSync(corePath, generateProcessorCoreHeader(translation));
   return `model rewrote the DSP core against ${errors.length} compiler error(s)`;
 }
 
@@ -714,7 +714,7 @@ function findBundledNinja(vcvars64: string): string | null {
 function writePassthroughCore(projectDir: string): void {
   fs.writeFileSync(
     path.join(projectDir, "Source", "dsp", "ProcessorCore.h"),
-    generateProcessorCoreHeader(fallbackTranslation(), [])
+    generateProcessorCoreHeader(fallbackTranslation())
   );
 }
 

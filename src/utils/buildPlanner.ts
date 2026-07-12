@@ -16,14 +16,14 @@
  * is always shown as evidence, never claimed.
  */
 
-import { AudioPlugin, BuildReport, PluginParameter } from "../types";
+import { AudioPlugin, PluginParameter } from "../types";
 import { AudioPluginSpec, classifyPluginIntent, familyToCategory, formatSpecContext, generatePluginSpec } from "./pluginSpec";
 import { buildRecipeContext, scoreRecipes } from "./dspRecipes";
 import { buildOfflinePlugin } from "./offlineBuilder";
 import { DSP_PRIMITIVES, composePrimitiveGraph } from "./dspPrimitives";
 import { LLMConfig, callLocalLLM, isLocalProvider } from "./llmGateway";
 import { DSP_CODING_RULES, PARAMETER_DESIGN_RULES, RESPONSE_STYLE_RULES, SOUND_QUALITY_RULES } from "./dspPromptKit";
-import { checkDsp, verifyAndRepairDsp } from "./pluginVerifier";
+import { verifyAndRepairDsp } from "./pluginVerifier";
 import { normalizeModelDspCode } from "./healthcheckRunner";
 import { QualityGateResult, runQualityGate } from "./qualityGate";
 

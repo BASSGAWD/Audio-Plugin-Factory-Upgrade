@@ -272,51 +272,11 @@ return Math.tanh((speaker_tone * 0.76 + comb_delayed * 0.24) * 1.1);`,
   pitfalls: [],
 };
 
-/** Generic fallback chain for prompts matching NO known family: input drive
- *  (compensated soft clip) -> tone lowpass -> damped 120 ms space echo ->
- *  dry/wet blend. Built entirely from the verified idioms in the golden
- *  recipes so it stays gate-passing on any material. */
-const CHARACTER_CHAIN: DspRecipe = {
-  id: "character",
-  title: "Character channel (drive -> tone -> space -> blend)",
-  match: /.^/,
-  parameters: [
-    { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 6, unit: "dB" },
-    { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 5000, unit: "Hz" },
-    { id: "space", name: "Space", min: 0, max: 0.6, defaultValue: 0.25, unit: "ratio" },
-    { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.8, unit: "ratio" },
-  ],
-  body: `if (!state.init) {
-  state.lp = 0;
-  state.buf = new Float32Array(13230);
-  state.ptr = 0;
-  state.damp = 0;
-  state.smDrive = 6;
-  state.init = true;
-}
-let drive = params.drive !== undefined ? params.drive : 6;
-let tone = params.tone !== undefined ? params.tone : 5000;
-let space = params.space !== undefined ? params.space : 0.25;
-let mix = params.mix !== undefined ? params.mix : 0.8;
-
-state.smDrive += 0.002 * (drive - state.smDrive);
-let g = Math.pow(10, state.smDrive / 20);
-let shaped = Math.tanh(inputSample * g) / Math.pow(g, 0.65);
-
-let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
-state.lp += a * (shaped - state.lp);
-let toned = state.lp;
-
-let read = (state.ptr - 5292 + 13230) % 13230;
-let echo = state.buf[read];
-state.damp += 0.35 * (echo - state.damp);
-state.buf[state.ptr] = toned + state.damp * Math.min(0.85, space * 1.2);
-state.ptr = (state.ptr + 1) % 13230;
-let wet = toned + echo * space;
-
-return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
-  pitfalls: [],
-};
+/* Prompts matching NO known family used to fall back to a fixed
+ * "character chain" recipe here; that was replaced by buildPrimitiveGraph
+ * (dspPrimitives.ts), which composes a request-specific chain of verified
+ * primitive stages instead. The generic recipe is gone -- see the no-recipe
+ * branch of buildOfflinePlugin below. */
 
 /* ------------------------------------------------------------------ */
 /* Two-stage hybrid composition                                        */
@@ -446,7 +406,6 @@ const FRIENDLY_STRUCTURE: Record<string, string> = {
   pitch: "a click-free pitch shifter with two crossfaded read heads",
   synth: "a detuned two-oscillator pad voice through a resonant lowpass",
   amp_channel: "a gated multi-stage tube-style preamp into a tone stack and a 4x12-style cab",
-  character: "a drive → tone → space character chain",
 };
 
 /** Openers rotated deterministically so consecutive builds don't read identically. */

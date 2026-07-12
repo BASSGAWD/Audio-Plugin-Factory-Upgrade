@@ -1,0 +1,224 @@
+export interface PluginParameter {
+  id: string;
+  name: string;
+  min: number;
+  max: number;
+  defaultValue: number;
+  value: number; // Active live value
+  unit: string;
+  controlType?: "slider" | "knob" | "toggle" | "button" | "number" | "label" | "meter" | "eq" | "waveform" | "pad" | "amp" | "cab" | "mic" | "mic_stand";
+  width?: "full" | "half" | "third";
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+
+  // Custom visual properties for high-end customization
+  bgColor?: string;
+  borderColor?: string;
+  accentColor?: string;
+  textColor?: string;
+  customText?: string; // Brand/custom overlay text for amp, cab, label
+  customStyle?: string; // vintage, metal, cyberpunk, sleek, grid
+  fontStyle?: "sans" | "mono" | "serif" | "grotesk" | "orbitron";
+  valX?: number; // secondary parameter coordinate (e.g. mic positioning X coordinate 0-100)
+  valY?: number; // secondary parameter coordinate (e.g. mic positioning Y coordinate 0-100)
+  eqFreqs?: number[]; // custom frequencies for EQ visualizer nodes
+
+  // Extended amp/cab customizer properties
+  ampTolexPattern?: "leather" | "carbon" | "tweed" | "wood" | "snakeskin" | "metalgrid";
+  ampKnobStyle?: "chickenhead" | "silvercap" | "pointer" | "neonring" | "vintage";
+  ampChannelType?: "clean" | "crunch" | "lead" | "modern";
+  ampTubeGlow?: boolean;
+  cabGrillStyle?: "weave" | "metalgrid" | "stripes" | "pinstripe" | "retro";
+  cabSize?: "1x12" | "2x12" | "4x12" | "8x10";
+  cabMicModel?: "SM57" | "R-121" | "MD421" | "C414";
+
+  // IR (Impulse Response) properties for cabinet modeling
+  irFiles?: { id: string; name: string; size: string; data: string }[];
+  activeIrId?: string;
+}
+
+export interface AudioPlugin {
+  id: string;
+  name: string;
+  category: "distortion" | "delay" | "filter" | "synthesizer" | "dynamics" | "modulation" | "reverb";
+  description: string;
+  parameters: PluginParameter[];
+  dspFunction: string; // JavaScript body for: function(input, params, contextState) { ... return output; }
+  faustCode: string;
+  cppJuceCode: string;
+  createdAt: string;
+
+  /**
+   * Linear post-DSP gain applied by the audio engine. Set by the quality gate
+   * to restore unity loudness when the generated code's internal gain staging
+   * is off. 1 (or undefined) = no correction.
+   */
+  outputTrim?: number;
+
+  /**
+   * When true the audio engine runs a one-pole DC blocker after the DSP --
+   * set by the quality gate when the generated code accumulates DC offset.
+   */
+  dcBlock?: boolean;
+
+  /** Quality gate scores (0-100 per dimension) from the last generation. */
+  quality?: {
+    looks: number;
+    performance: number;
+    latency: number;
+    musicality: number;
+  };
+
+  /** Structured build report from the last quality-gate run: measured facts
+   *  (what compiled, which controls verified audible, fixes applied,
+   *  confidence) — the antidote to claiming success without evidence. */
+  buildReport?: BuildReport;
+
+  // Overall faceplate skin configuration properties
+  customSkin?: {
+    bgImage?: string; // Base64 dataURL or background image URL
+    bgColor?: string; // faceplate background
+    borderColor?: string; // faceplate border
+    textColor?: string; // faceplate text
+    accentColor?: string; // knobs and sliders glow color
+    fontStyle?: "sans" | "mono" | "serif" | "grotesk" | "orbitron";
+    glowStyle?: "none" | "neon" | "vintage" | "flat" | "shadow";
+    borderWidth?: number;
+    bgOpacity?: number; // overlay alpha
+  };
+}
+
+/**
+ * Measured build evidence emitted by the quality gate for every generation.
+ * Intent/plan claims live elsewhere; everything in here was actually
+ * observed: compilation, per-knob audibility, applied fixes, scores.
+ */
+export interface BuildReport {
+  /** What the build set out to do (spec goal or prompt excerpt). */
+  intent: string;
+  /** Detected design attributes driving the theme (may be empty). */
+  attributes: string[];
+  layout: "focus" | "grid";
+  primaryControls: string[];
+  secondaryControls: string[];
+  /** False when the DSP failed to compile or NaN'd on the default render. */
+  compiled: boolean;
+  scores: { looks: number; performance: number; latency: number; musicality: number };
+  audibleParams: string[];
+  deadParams: string[];
+  unstableParams: string[];
+  /** Deterministic repairs and polish applied by the gate. */
+  fixes: string[];
+  /** 0-100: min score minus penalties for dead/unstable controls. */
+  confidence: number;
+  /**
+   * 0..1: how much the DSP reshapes the dry signal's spectral balance
+   * (silence/passthrough ~0, heavily transformed ~1). A correctness signal
+   * never substitutes for the gate above — used only as a tie-breaker so
+   * the perfecting loop's search can prefer more characterful builds among
+   * otherwise-equal candidates.
+   */
+  characterIndex: number;
+  /** Planner job trace (repair history) when the build ran through the
+   *  job-graph planner: one entry per worker with acceptance outcome. */
+  jobs?: Array<{
+    id: string;
+    title: string;
+    worker: string;
+    status: "passed" | "repaired" | "fallback" | "failed";
+    attempts: number;
+    ms: number;
+    confidence: number;
+    evidence: string;
+  }>;
+  /** Perfecting-loop trace when the user enabled refinement: one entry per
+   *  rework iteration, accepted only when it scored strictly higher. */
+  refinement?: Array<{
+    iteration: number;
+    action: string;
+    accepted: boolean;
+    score: number;
+  }>;
+}
+
+export interface Agent {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  systemInstruction: string;
+  avatarColor: string;
+  temperature: number;
+  isBuiltIn: boolean;
+}
+
+export interface ChatMessage {
+  id: string;
+  senderId: string; // agent id or 'user'
+  senderName: string;
+  role: "user" | "model";
+  text: string;
+  timestamp: string;
+}
+
+export interface DspCritiqueItem {
+  category: string; // e.g. "Clipping Danger", "Mathematical Bug", "Feedback Overflow", "Efficiency"
+  snippet: string;
+  issue: string;
+  recommendationCode: string;
+}
+
+export interface DSPAnalysisResult {
+  purityScore: number; // 0-100 indicating clean arithmetic
+  stabilityAssessment: string; // e.g. "Highly Stable", "Vulnerable to Blowup", "Feedback Overload Risk"
+  mathCritique: string;
+  suggestions: DspCritiqueItem[];
+  performanceEstimate: string; // e.g. "Low CPU (O(1))", "Moderate CPU (Float64 states)", etc.
+}
+
+// Visual Signal Canvas Types matching canvas_to_code
+export type CanvasNodeType =
+  | "input"
+  | "gain"
+  | "saturator"
+  | "ladder_filter"
+  | "comb_delay"
+  | "chorus"
+  | "tremolo"
+  | "output";
+
+export interface CanvasNode {
+  id: string;
+  type: CanvasNodeType;
+  title: string;
+  active: boolean;
+  settings: Record<string, number>; // settings mapped to param values or bounds
+}
+
+// Healthcheck Report Types matching beta_healthcheck
+export interface SignalMetrics {
+  maxAmplitude: number;
+  dcOffset: number;
+  clippingSamples: number;
+  totalSamples: number;
+  clippingRatio: number;
+  isStable: boolean;
+  hasNaN: boolean;
+}
+
+export interface DiagnosticsReport {
+  timestamp: string;
+  overallHealthStatus: "PRISTINE" | "WARNING" | "CRITICAL";
+  unstableTonesDetected: boolean;
+  dcAccumulatorRisk: boolean;
+  clippingSevereRisk: boolean;
+  testSignals: {
+    impulse: SignalMetrics;
+    lowFrequencySweep: SignalMetrics;
+    extremeFeedback: SignalMetrics;
+  };
+  recommedSummary: string;
+}
+

@@ -56,7 +56,10 @@ export function refinementScore(gate: QualityGateResult): number {
   const corrections = gate.report.fixes.filter((f) => /corrected/i.test(f)).length;
   const characterBonus = 3 * gate.report.characterIndex;
   const deadSpotPenalty = 5 * (gate.report.silentOnSignals?.length ?? 0);
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty;
+  // Harshness: only when the gate judged it a defect for this family (harsh),
+  // scaled by how bad. Tops out at ~5, another tie-breaker among correct builds.
+  const harshnessPenalty = gate.report.harsh ? 5 * (gate.report.aliasingIndex ?? 0) : 0;
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty;
 }
 
 /* ------------------------------------------------------------------ */

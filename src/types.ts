@@ -113,6 +113,15 @@ export interface BuildReport {
    *  arp -- a cross-signal dead spot (chokes plucks/sustains). Reported and
    *  penalized by the refinement loop; not part of the four headline scores. */
   silentOnSignals?: string[];
+  /** 0..1 inharmonic-energy ratio on a clean tone -- aliasing/harshness for a
+   *  processor, or intended character for a ring-mod/pitch/generator. Raw,
+   *  informational. */
+  aliasingIndex?: number;
+  /** True when aliasingIndex is high AND the family is one that should stay
+   *  spectrally clean (drive, filter, EQ, dynamics, delay, reverb...) -- i.e.
+   *  genuine digital fizz, not intended grit. Drives the refinement penalty;
+   *  never a headline score. */
+  harsh?: boolean;
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /** 0-100: min score minus penalties for dead/unstable controls. */

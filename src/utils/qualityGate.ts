@@ -484,6 +484,111 @@ export function measureCharacterIndex(dspFunction: string, parameters: PluginPar
   return count === 0 ? 0 : sum / count;
 }
 
+/** In-place iterative radix-2 Cooley-Tukey FFT (length must be a power of 2).
+ *  Forward transform; re/im are overwritten with the spectrum. */
+function fftInPlace(re: Float64Array, im: Float64Array): void {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const tr = re[i]; re[i] = re[j]; re[j] = tr;
+      const ti = im[i]; im[i] = im[j]; im[j] = ti;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cwr = 1;
+      let cwi = 0;
+      for (let k = 0; k < len >> 1; k++) {
+        const a = i + k;
+        const b = a + (len >> 1);
+        const vr = re[b] * cwr - im[b] * cwi;
+        const vi = re[b] * cwi + im[b] * cwr;
+        re[b] = re[a] - vr; im[b] = im[a] - vi;
+        re[a] += vr; im[a] += vi;
+        const ncwr = cwr * wr - cwi * wi;
+        cwi = cwr * wi + cwi * wr;
+        cwr = ncwr;
+      }
+    }
+  }
+}
+
+/**
+ * Aliasing / harshness index: 0 = clean, 1 = severely aliased. Nonlinear DSP
+ * (distortion, waveshaping, bitcrush, cheap pitch/sample-rate tricks) creates
+ * harmonics above Nyquist that FOLD BACK to INHARMONIC frequencies -- the
+ * digital "fizz" that separates an amateur clipper from an oversampled one.
+ *
+ * Measured on a dedicated clean sine (NOT the musical bank -- a single tone
+ * makes the harmonic bookkeeping unambiguous), chosen to land exactly on an
+ * FFT bin so its true harmonics do too. Take the windowed power spectrum;
+ * energy sitting ON a harmonic bin (+/-2 bins for window leakage) is
+ * legitimate, everything else is aliasing/noise. index = inharmonic / total.
+ */
+/** Families expected to stay spectrally clean -- a high aliasing index here
+ *  is a real defect (digital fizz), not intended character. Excludes the
+ *  inharmonic-by-design families (modulation, pitch, synthesizer, sampler,
+ *  hybrid_other, utility). */
+const CLEAN_FAMILIES = new Set<PluginFamily>([
+  "distortion", "saturator", "multiband_saturator", "amp_sim", "filter", "eq", "dynamics", "delay", "reverb",
+]);
+/** Above this inharmonic ratio a clean-family build is "harsh". Clean golden
+ *  recipes top out ~0.02, strong aliasers (bitcrush, sample-rate reduction)
+ *  read 0.6+, so this cleanly separates defect from noise floor. */
+const ALIAS_DEFECT_THRESHOLD = 0.05;
+
+const ALIAS_N = 8192;
+const ALIAS_BIN = 464; // fundamental bin -> 464 * 44100/8192 = 2497.9 Hz
+const ALIAS_FUNDAMENTAL = (ALIAS_BIN * SAMPLE_RATE) / ALIAS_N;
+function cleanToneAt(index: number): number {
+  return Math.sin((2 * Math.PI * ALIAS_FUNDAMENTAL * index) / SAMPLE_RATE) * 0.5;
+}
+
+export function measureAliasing(dspFunction: string, parameters: PluginParameter[]): number {
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return 0;
+
+  const defaults = defaultParamsMap(parameters);
+  const wet = renderPass(dspFunc, defaults, ALIAS_N, cleanToneAt);
+  if (wet.failed) return 0;
+
+  // Hann-window to contain spectral leakage, then FFT.
+  const re = new Float64Array(ALIAS_N);
+  const im = new Float64Array(ALIAS_N);
+  let energy = 0;
+  for (let i = 0; i < ALIAS_N; i++) {
+    energy += wet.samples[i] * wet.samples[i];
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (ALIAS_N - 1));
+    re[i] = wet.samples[i] * w;
+  }
+  if (energy <= 1e-9) return 0; // silent -- nothing to judge
+
+  fftInPlace(re, im);
+
+  const half = ALIAS_N >> 1;
+  const isHarmonic = new Uint8Array(half);
+  for (let h = 1; h * ALIAS_BIN < half - 3; h++) {
+    for (let d = -2; d <= 2; d++) isHarmonic[h * ALIAS_BIN + d] = 1;
+  }
+
+  let total = 0;
+  let inharmonic = 0;
+  // Skip DC and the lowest few bins (windowing smears energy there).
+  for (let k = 3; k < half; k++) {
+    const power = re[k] * re[k] + im[k] * im[k];
+    total += power;
+    if (!isHarmonic[k]) inharmonic += power;
+  }
+  if (total <= 1e-12) return 0;
+  return Math.max(0, Math.min(1, inharmonic / total));
+}
+
 /**
  * Static real-time-safety scan of the DSP body. Returns repair-worthy
  * evidence ("" when clean) plus a performance score.
@@ -843,6 +948,18 @@ export function runQualityGate(
     ? 0
     : Math.max(0, Math.min(100, minScore - m.deadParams.length * 5 - m.unstableParams.length * 10));
   const characterIndex = m.fatal ? 0 : measureCharacterIndex(plugin.dspFunction, plugin.parameters);
+
+  // Aliasing/harshness: measured always (informational), but only counted a
+  // DEFECT for families that are supposed to stay spectrally clean -- a
+  // ring-mod, pitch shifter, chorus, or generator is inharmonic by design, so
+  // a high index there is character, not a bug. `harsh` drives the refinement
+  // penalty and a report warning; it never touches the four headline scores.
+  const aliasingIndex = m.fatal ? 0 : measureAliasing(plugin.dspFunction, plugin.parameters);
+  const harsh = !m.fatal && !!opts.family && CLEAN_FAMILIES.has(opts.family) && aliasingIndex > ALIAS_DEFECT_THRESHOLD;
+  if (harsh) {
+    notes.push(`Aliasing/harshness: ${aliasingIndex.toFixed(2)} inharmonic energy on a clean tone -- a ${opts.family} should stay smooth; this has audible digital fizz (oversample or lowpass the nonlinearity).`);
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -858,6 +975,8 @@ export function runQualityGate(
     fixes: notes.slice(),
     confidence,
     characterIndex,
+    aliasingIndex,
+    harsh,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };
@@ -896,6 +1015,10 @@ export function formatBuildReport(r: BuildReport): string {
   const repairFixes = r.fixes.filter((f) => /corrected|trim|DC/i.test(f));
   if (repairFixes.length > 0) {
     lines.push(`- Fixes applied: ${repairFixes.map((f) => f.replace(/\.$/, "")).join("; ")}`);
+  }
+
+  if (r.harsh) {
+    lines.push(`- ⚠️ Aliasing/harshness: ${(r.aliasingIndex ?? 0).toFixed(2)} inharmonic on a clean tone — audible digital fizz for a processor that should stay smooth`);
   }
 
   lines.push(`- ${formatQualityBadge(r.scores).replace(/\*\*/g, "")}`);

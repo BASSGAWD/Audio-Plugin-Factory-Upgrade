@@ -89,11 +89,23 @@ function KnobControl({ param, onChange }: ControlProps) {
   const range = param.max - param.min || 1;
   const pct = Math.max(0, Math.min(1, (param.value - param.min) / range));
   const accent = param.accentColor || ACCENT_FALLBACK;
-  const R = 38;
   const CX = 50;
   const CY = 50;
+  const TRACK_R = 44;
   const valueAngle = KNOB_START_ANGLE + pct * (KNOB_END_ANGLE - KNOB_START_ANGLE);
-  const pointerEnd = polarPoint(CX, CY, R - 4, valueAngle);
+  // Unique gradient/filter ids so multiple knobs in the DOM don't cross-wire.
+  const uid = param.id.replace(/[^a-zA-Z0-9]/g, "") || "k";
+  const grooveEnd = polarPoint(CX, CY, 25, valueAngle);
+  const grooveStart = polarPoint(CX, CY, 9, valueAngle);
+  const tipDot = polarPoint(CX, CY, 26, valueAngle);
+
+  // Tick ring: dim graduations, brightening up to the current value.
+  const TICKS = 11;
+  const ticks = Array.from({ length: TICKS }, (_, i) => {
+    const a = KNOB_START_ANGLE + (i / (TICKS - 1)) * (KNOB_END_ANGLE - KNOB_START_ANGLE);
+    const lit = a <= valueAngle + 0.5;
+    return { p1: polarPoint(CX, CY, 40, a), p2: polarPoint(CX, CY, 36, a), lit };
+  });
 
   const handleDrag = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -115,24 +127,59 @@ function KnobControl({ param, onChange }: ControlProps) {
   };
 
   return (
-    <div className="flex flex-col items-center gap-1 select-none">
-      <div className="relative w-16 h-16 cursor-ns-resize" onMouseDown={handleDrag}>
-        <svg viewBox="0 0 100 100" className="w-full h-full">
-          <path d={knobArcPath(CX, CY, R, KNOB_START_ANGLE, KNOB_END_ANGLE)} fill="none" stroke="#27272a" strokeWidth="8" strokeLinecap="round" />
+    <div className="flex flex-col items-center gap-1.5 select-none">
+      <div className="relative w-16 h-16 cursor-ns-resize" onMouseDown={handleDrag} title="Drag up/down">
+        <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible">
+          <defs>
+            {/* Domed brushed-metal cap: light from top-left. */}
+            <radialGradient id={`cap-${uid}`} cx="38%" cy="30%" r="72%">
+              <stop offset="0%" stopColor="#4a4a54" />
+              <stop offset="45%" stopColor="#2b2b32" />
+              <stop offset="100%" stopColor="#111114" />
+            </radialGradient>
+            {/* Beveled rim. */}
+            <radialGradient id={`rim-${uid}`} cx="50%" cy="22%" r="80%">
+              <stop offset="0%" stopColor="#5a5a66" />
+              <stop offset="60%" stopColor="#2a2a30" />
+              <stop offset="100%" stopColor="#0c0c0e" />
+            </radialGradient>
+            <filter id={`sh-${uid}`} x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="2.5" stdDeviation="2.5" floodColor="#000" floodOpacity="0.55" />
+            </filter>
+          </defs>
+
+          {/* Value track + glowing fill */}
+          <path d={knobArcPath(CX, CY, TRACK_R, KNOB_START_ANGLE, KNOB_END_ANGLE)} fill="none" stroke="#242429" strokeWidth="4.5" strokeLinecap="round" />
           <path
-            d={knobArcPath(CX, CY, R, KNOB_START_ANGLE, valueAngle)}
+            d={knobArcPath(CX, CY, TRACK_R, KNOB_START_ANGLE, valueAngle)}
             fill="none"
             stroke={accent}
-            strokeWidth="8"
+            strokeWidth="4.5"
             strokeLinecap="round"
-            style={{ filter: `drop-shadow(0 0 3px ${accent}88)` }}
+            style={{ filter: `drop-shadow(0 0 4px ${accent}cc)` }}
           />
-          <line x1={CX} y1={CY} x2={pointerEnd.x} y2={pointerEnd.y} stroke="#fff" strokeWidth="3" strokeLinecap="round" />
-          <circle cx={CX} cy={CY} r="3" fill="#fff" />
+
+          {/* Graduation ticks */}
+          {ticks.map((t, i) => (
+            <line key={i} x1={t.p1.x} y1={t.p1.y} x2={t.p2.x} y2={t.p2.y}
+              stroke={t.lit ? accent : "#3a3a42"} strokeWidth="1.5" strokeLinecap="round"
+              opacity={t.lit ? 0.9 : 0.6} />
+          ))}
+
+          {/* Rim + cap (with elevation shadow) */}
+          <circle cx={CX} cy={CY} r="31" fill={`url(#rim-${uid})`} filter={`url(#sh-${uid})`} />
+          <circle cx={CX} cy={CY} r="27" fill={`url(#cap-${uid})`} />
+          {/* Specular highlight near the light source */}
+          <ellipse cx="44" cy="37" rx="13" ry="8" fill="#ffffff" opacity="0.1" />
+
+          {/* Indicator: dark groove + bright line + accent tip */}
+          <line x1={grooveStart.x} y1={grooveStart.y} x2={grooveEnd.x} y2={grooveEnd.y} stroke="#0a0a0c" strokeWidth="4.5" strokeLinecap="round" />
+          <line x1={grooveStart.x} y1={grooveStart.y} x2={grooveEnd.x} y2={grooveEnd.y} stroke="#f2f2f6" strokeWidth="2" strokeLinecap="round" />
+          <circle cx={tipDot.x} cy={tipDot.y} r="2.4" fill={accent} style={{ filter: `drop-shadow(0 0 3px ${accent})` }} />
         </svg>
       </div>
-      <span className="text-[10px] font-medium text-neutral-300 truncate max-w-[76px] text-center leading-tight">{param.name}</span>
-      <span className="text-[9px] font-mono text-neutral-500">
+      <span className="text-[10px] font-semibold text-neutral-200 truncate max-w-[76px] text-center leading-tight tracking-tight">{param.name}</span>
+      <span className="text-[9px] font-mono text-neutral-400 tabular-nums bg-neutral-900/60 border border-neutral-800/80 rounded px-1.5 py-0.5">
         {Number(param.value.toFixed(2))} {param.unit}
       </span>
     </div>
@@ -149,12 +196,20 @@ function ToggleControl({ param, onChange }: ControlProps) {
       aria-pressed={on}
     >
       <div
-        className={`w-12 h-6 rounded-full p-0.5 transition-colors ${on ? "bg-orange-600" : "bg-neutral-800"}`}
-        style={on && param.accentColor ? { backgroundColor: param.accentColor } : undefined}
+        className="w-12 h-6 rounded-full p-0.5 transition-colors duration-150"
+        style={{
+          background: on ? `linear-gradient(180deg, ${(param.accentColor || "#f97316")}, ${(param.accentColor || "#c2410c")}bb)` : "#18181b",
+          boxShadow: on
+            ? `inset 0 1px 2px rgba(0,0,0,0.35), 0 0 10px ${(param.accentColor || "#f97316")}66`
+            : "inset 0 1.5px 3px rgba(0,0,0,0.7)",
+        }}
       >
-        <div className={`w-5 h-5 rounded-full bg-white shadow transition-transform ${on ? "translate-x-6" : "translate-x-0"}`} />
+        <div
+          className={`w-5 h-5 rounded-full transition-transform duration-150 ${on ? "translate-x-6" : "translate-x-0"}`}
+          style={{ background: "radial-gradient(circle at 35% 28%, #fdfdff, #d4d4d8 70%, #a1a1aa)", boxShadow: "0 1.5px 3px rgba(0,0,0,0.5)" }}
+        />
       </div>
-      <span className="text-[10px] font-medium text-neutral-300 truncate max-w-[80px] text-center">{param.name}</span>
+      <span className="text-[10px] font-semibold text-neutral-200 truncate max-w-[80px] text-center tracking-tight">{param.name}</span>
     </button>
   );
 }
@@ -188,12 +243,20 @@ function PadControl({ param, onChange }: ControlProps) {
   return (
     <button
       type="button"
-      className={`aspect-square w-full rounded-xl border-2 flex flex-col items-center justify-center gap-1 select-none transition-all duration-75 cursor-pointer ${
-        active
-          ? "bg-orange-500 border-orange-400 text-white scale-95 shadow-[0_0_16px_rgba(249,115,22,0.7)]"
-          : "bg-neutral-900 hover:bg-neutral-850 border-neutral-750 text-neutral-400"
+      className={`aspect-square w-full rounded-xl border flex flex-col items-center justify-center gap-1 select-none transition-all duration-75 cursor-pointer ${
+        active ? "scale-95 text-white border-white/20" : "text-neutral-400 border-white/5 hover:border-white/10"
       }`}
-      style={active && param.accentColor ? { backgroundColor: param.accentColor, borderColor: param.accentColor } : undefined}
+      style={
+        active
+          ? {
+              background: `radial-gradient(circle at 40% 30%, ${(param.accentColor || "#f97316")}, ${(param.accentColor || "#c2410c")} 70%)`,
+              boxShadow: `0 0 22px ${(param.accentColor || "#f97316")}aa, inset 0 1px 3px rgba(255,255,255,0.25)`,
+            }
+          : {
+              background: "radial-gradient(circle at 40% 28%, #26262c, #161619 70%)",
+              boxShadow: "inset 0 1px 2px rgba(255,255,255,0.05), 0 2px 4px rgba(0,0,0,0.4)",
+            }
+      }
       onMouseDown={() => onChange(param.id, param.max)}
       onMouseUp={() => onChange(param.id, param.min)}
       onMouseLeave={() => {
@@ -392,26 +455,63 @@ function WaveformControl({ param, onChange }: ControlProps) {
 }
 
 function SliderControl({ param, onChange }: ControlProps) {
+  const range = param.max - param.min || 1;
+  const pct = Math.max(0, Math.min(1, (param.value - param.min) / range));
+  const accent = param.accentColor || ACCENT_FALLBACK;
+
+  const handleDrag = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const bound = e.currentTarget.getBoundingClientRect();
+    const update = (clientX: number) => {
+      const ratio = Math.max(0, Math.min(1, (clientX - bound.left) / bound.width));
+      onChange(param.id, parseFloat((param.min + ratio * range).toFixed(4)));
+    };
+    update(e.clientX);
+    const onMove = (ev: MouseEvent) => update(ev.clientX);
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   return (
-    <label className="block">
-      <div className="flex items-baseline justify-between mb-1">
-        <span className="text-[11px] font-medium text-neutral-300 truncate pr-2">{param.name}</span>
-        <span className="text-[10px] font-mono text-neutral-500 shrink-0">
+    <div className="block select-none">
+      <div className="flex items-baseline justify-between mb-1.5">
+        <span className="text-[11px] font-semibold text-neutral-200 truncate pr-2 tracking-tight">{param.name}</span>
+        <span className="text-[10px] font-mono text-neutral-400 tabular-nums shrink-0 bg-neutral-900/60 border border-neutral-800/80 rounded px-1.5 py-0.5">
           {Number(param.value.toFixed(2))} {param.unit}
         </span>
       </div>
-      <input
-        type="range"
-        min={param.min}
-        max={param.max}
-        step={(param.max - param.min) / 200 || 0.01}
-        value={param.value}
-        onChange={(e) => onChange(param.id, parseFloat(e.target.value))}
-        className="w-full cursor-pointer"
-        style={param.accentColor ? ({ accentColor: param.accentColor } as React.CSSProperties) : { accentColor: ACCENT_FALLBACK }}
+      {/* Recessed track with inner shadow, glowing accent fill, metallic grip */}
+      <div
+        className="relative h-6 flex items-center cursor-ew-resize group"
+        onMouseDown={handleDrag}
+        role="slider"
+        aria-valuemin={param.min}
+        aria-valuemax={param.max}
+        aria-valuenow={param.value}
         aria-label={param.name}
-      />
-    </label>
+      >
+        <div
+          className="absolute inset-x-0 h-2 rounded-full bg-neutral-950 border border-black/60"
+          style={{ boxShadow: "inset 0 1.5px 3px rgba(0,0,0,0.8)" }}
+        />
+        <div
+          className="absolute left-0 h-2 rounded-full"
+          style={{ width: `${pct * 100}%`, background: `linear-gradient(90deg, ${accent}88, ${accent})`, boxShadow: `0 0 8px ${accent}99` }}
+        />
+        <div
+          className="absolute w-4 h-4 rounded-full -translate-x-1/2 border border-black/50 transition-transform group-active:scale-110"
+          style={{
+            left: `${pct * 100}%`,
+            background: "radial-gradient(circle at 35% 28%, #56565f, #26262c 60%, #131316)",
+            boxShadow: `0 1.5px 3px rgba(0,0,0,0.6), 0 0 0 1.5px ${accent}55`,
+          }}
+        />
+      </div>
+    </div>
   );
 }
 

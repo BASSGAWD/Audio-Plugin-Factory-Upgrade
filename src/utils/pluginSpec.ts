@@ -116,6 +116,19 @@ const FAMILY_SIGNALS: FamilySignal[] = [
 const UI_METAPHOR_MARKERS = /looks? like|styled? (?:like|as)|ui (?:of|like)|interface (?:of|like)|shaped like|appears? (?:like|as)|-style|disguised as/i;
 
 /**
+ * Per-family DSP identity for a single-family (non-hybrid) request. Most
+ * families are self-describing, but a few carry a mandatory behavior that the
+ * naive reading would flatten -- pitch especially, which must be a real tuner
+ * (detect -> snap -> correct) and not degrade into a manual pitch shifter.
+ */
+function dspIdentityFor(family: PluginFamily): string {
+  if (family === "pitch") {
+    return "real-time pitch CORRECTION (autotune): detect the input's fundamental via autocorrelation, snap it to the selected key + scale, and resynthesize at the corrected pitch with formant preservation -- expose Key (with an Auto key-detect mode), Scale, Retune Speed, and Formant. This is a tuner, NOT a fixed/manual pitch shift.";
+  }
+  return `${family} processing as described`;
+}
+
+/**
  * Deterministic classification. Instant and offline; also the ground truth
  * fallback whenever the LLM spec stage is unavailable or returns junk.
  *
@@ -146,7 +159,7 @@ export function classifyPluginIntent(userPrompt: string): AudioPluginSpec {
       name: "",
       family: only.family,
       uiMetaphor: only.uiMetaphor,
-      dspIdentity: `${only.family} processing as described`,
+      dspIdentity: dspIdentityFor(only.family),
       hybrid: false,
       extraCapabilities: [],
       interpretedGoal: userPrompt.slice(0, 160),
@@ -215,7 +228,9 @@ CRITICAL rule for hybrids -- never force the idea into the closest common catego
 - "a delay that sounds underwater" -> family delay with lowpassed repeats, hybrid false (one family, flavored).
 CRITICAL rule for two UI-mandatory families -- these ALWAYS get a specific fixed UI regardless of what else the request mentions:
 - Any guitar/bass amp or amplifier simulator (family amp_sim) ALWAYS gets an amp head + a speaker cabinet + mic positioning on the cabinet -- every single time, never optional.
-- Any sampler/drum-pad/MPC/beat-pad request (family sampler) ALWAYS gets an 8-pad trigger grid layout, never plain sliders.`;
+- Any sampler/drum-pad/MPC/beat-pad request (family sampler) ALWAYS gets an 8-pad trigger grid layout, never plain sliders.
+CRITICAL rule for pitch/autotune (family pitch) -- an autotune/tuner request is pitch CORRECTION, not a manual pitch shift:
+- The dspIdentity must be "detect the fundamental (autocorrelation), snap it to a selected key + scale, resynthesize at the corrected pitch with formant preservation" -- with a Key control that includes an Auto key-detect mode, plus Scale, Retune Speed, and Formant. Never reduce it to a single "Pitch Shift" knob.`;
 
 /**
  * Full spec stage: deterministic classification first, then (when a local

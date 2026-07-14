@@ -68,9 +68,10 @@ import NativeBuildPanel from "./components/NativeBuildPanel";
 import SimpleStudio from "./components/SimpleStudio";
 import ModelPicker, { EngineId } from "./components/ModelPicker";
 import RefineControl from "./components/RefineControl";
-import BuildProgressBar, { BuildStage } from "./components/BuildProgressBar";
+import BuildProgressBar, { BuildStage, BuildVersion } from "./components/BuildProgressBar";
+import BlindListeningTest from "./components/BlindListeningTest";
 import { runPlannedBuild } from "./utils/buildPlanner";
-import { runRefinementLoop, MAX_REFINE_LOOPS } from "./utils/refinementLoop";
+import { runRefinementLoop, refinementScore, isNearTie, MAX_REFINE_LOOPS, RankedCandidate } from "./utils/refinementLoop";
 
 export function sanitizeDspCode(codeString: string): string {
   let sanitizedCode = codeString;
@@ -561,7 +562,16 @@ export default function App() {
   // Live build status bar: checkpoint stages driven by REAL pipeline
   // callbacks (planner onStage, perfecting-loop onIteration) — no fake timers.
   const [buildStages, setBuildStages] = useState<BuildStage[]>([]);
+  // Perfecting-loop leaderboard + blind A/B/C test. Versions persist after the
+  // build finishes so the ranking and the "Judge by ear" button stay visible.
+  const [buildVersions, setBuildVersions] = useState<BuildVersion[]>([]);
+  const [refineCandidates, setRefineCandidates] = useState<RankedCandidate[]>([]);
+  const [showBlindTest, setShowBlindTest] = useState(false);
   const beginBuildStages = (withPipeline: boolean) => {
+    // A fresh build clears any prior perfecting-loop results.
+    setBuildVersions([]);
+    setRefineCandidates([]);
+    setShowBlindTest(false);
     const base: BuildStage[] = withPipeline
       ? [
           { id: "intent", label: "Intent", status: "pending" },
@@ -1270,6 +1280,77 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     setIsPlaying(false);
   };
 
+  // ---- Perfecting-loop wiring: run the loop, stream each version to the live
+  //      leaderboard, and keep the ranked candidates for the blind ear test. ----
+  const runPerfectingLoop = async (
+    base: { plugin: AudioPlugin; gate: ReturnType<typeof runQualityGate> },
+    opts: { prompt: string; spec: any; llmConfig?: any; signal?: AbortSignal }
+  ) => {
+    setBuildVersions([{ label: "v1", score: refinementScore(base.gate), changeSummary: "initial build", status: "kept" }]);
+    const refined = await runRefinementLoop(base, {
+      prompt: opts.prompt,
+      spec: opts.spec,
+      iterations: refineLoops,
+      llmConfig: opts.llmConfig,
+      signal: opts.signal,
+      onIteration: (n, total) => markStage("perfect", `v${n + 1}/${total}`),
+      onCandidate: (_n, _total, cand) =>
+        setBuildVersions((prev) => [
+          ...prev.filter((v) => v.label !== cand.label),
+          { label: cand.label, score: cand.score, changeSummary: cand.changeSummary, status: cand.accepted ? "kept" : "dropped" },
+        ]),
+    });
+    setRefineCandidates(refined.candidates);
+    return refined;
+  };
+
+  // Point the live engine at an arbitrary plugin's DSP + params WITHOUT
+  // persisting it as the loaded plugin — used to audition blind-test candidates.
+  const applyLiveDsp = (p: AudioPlugin) => {
+    compileDsp(p.dspFunction);
+    const paramsMap: Record<string, number> = {};
+    p.parameters.forEach((q) => {
+      paramsMap[q.id] = q.value !== undefined ? q.value : q.defaultValue;
+    });
+    activeParamsRef.current = paramsMap;
+    dspStateRef.current = {};
+    outputTrimRef.current = p.outputTrim ?? 1;
+    dcBlockRef.current = p.dcBlock ?? false;
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: "params", params: paramsMap });
+      workletNodeRef.current.port.postMessage({ type: "trim", trim: outputTrimRef.current });
+      workletNodeRef.current.port.postMessage({ type: "dcblock", dcblock: dcBlockRef.current });
+    }
+  };
+
+  const previewCandidate = async (p: AudioPlugin) => {
+    // Start the engine first (it seeds from the loaded plugin) then swap in the
+    // candidate, so the audition sticks instead of being overwritten at startup.
+    if (!isPlaying) await togglePlaySimulation();
+    applyLiveDsp(p);
+  };
+
+  const restoreLoaded = () => {
+    stopAudioEngine();
+    applyLiveDsp(plugin);
+  };
+
+  const handleBlindChoose = (picked: RankedCandidate, willLoad: boolean) => {
+    if (willLoad) {
+      savePluginState(picked.plugin);
+      setScratchCode(picked.plugin.dspFunction);
+      compileDsp(picked.plugin.dspFunction);
+      triggerToast(`Your ear picked ${picked.label} — loaded (near-tie with the top score).`);
+    } else {
+      triggerToast(`Noted: you liked ${picked.label}, but the higher-scoring version stays loaded.`);
+    }
+  };
+
+  const closeBlindTest = () => {
+    setShowBlindTest(false);
+    restoreLoaded();
+  };
+
   // Clean up on component unmount
   useEffect(() => {
     return () => {
@@ -1396,16 +1477,15 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           });
 
           // Perfecting loop (opt-in): rework N times, keep only iterations
-          // that score strictly higher. Rebuilds only — never fights an
-          // explicit user tweak of the existing plugin.
-          if (refineLoops > 0 && up.dspFunction !== plugin.dspFunction) {
+          // that score strictly higher. Runs on every offline (re)build when
+          // enabled — same trigger as the planned and online paths.
+          if (refineLoops > 0) {
             beginBuildStages(false);
             markStage("perfect");
-            const refined = await runRefinementLoop({ plugin: gate.plugin, gate }, {
+            const refined = await runPerfectingLoop({ plugin: gate.plugin, gate }, {
               prompt: promptToSend,
               spec,
-              iterations: refineLoops,
-              onIteration: (n, total) => markStage("perfect", `${n}/${total}`),
+              llmConfig: isLocalProvider(getLLMConfig()) ? getLLMConfig() : undefined,
             });
             gate = refined.gate;
             finishStages();
@@ -1464,13 +1544,11 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
 
         let gate = planned.gate;
         if (refineLoops > 0) {
-          const refined = await runRefinementLoop({ plugin: gate.plugin, gate }, {
+          const refined = await runPerfectingLoop({ plugin: gate.plugin, gate }, {
             prompt: promptToSend,
             spec,
-            iterations: refineLoops,
             llmConfig,
             signal: controller.signal,
-            onIteration: (n, total) => markStage("perfect", `${n}/${total}`),
           });
           gate = refined.gate;
         }
@@ -1714,13 +1792,11 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         if (refineLoops > 0) {
           beginBuildStages(false);
           markStage("perfect");
-          const refined = await runRefinementLoop({ plugin: gate.plugin, gate }, {
+          const refined = await runPerfectingLoop({ plugin: gate.plugin, gate }, {
             prompt: promptToSend,
             spec,
-            iterations: refineLoops,
             llmConfig,
             signal: controller.signal,
-            onIteration: (n, total) => markStage("perfect", `${n}/${total}`),
           });
           gate = refined.gate;
           finishStages();
@@ -1791,13 +1867,16 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           prompt: promptToSend,
           intent: spec?.interpretedGoal,
         });
-        if (refineLoops > 0 && up.dspFunction !== plugin.dspFunction) {
-          const refined = await runRefinementLoop({ plugin: gate.plugin, gate }, {
+        if (refineLoops > 0) {
+          beginBuildStages(false);
+          markStage("perfect");
+          const refined = await runPerfectingLoop({ plugin: gate.plugin, gate }, {
             prompt: promptToSend,
             spec,
-            iterations: refineLoops,
+            llmConfig: isLocalProvider(getLLMConfig()) ? getLLMConfig() : undefined,
           });
           gate = refined.gate;
+          finishStages();
         }
 
         savePluginState(gate.plugin);
@@ -2739,7 +2818,19 @@ Return ONLY a JSON object with this exact shape, no other text:
           }
           refineControl={<RefineControl loops={refineLoops} onChange={setRefineLoops} variant="simple" />}
           buildStages={buildStages}
+          buildVersions={buildVersions}
+          onJudgeByEar={() => setShowBlindTest(true)}
+          canJudgeByEar={refineCandidates.length >= 2}
         />
+        {showBlindTest && refineCandidates.length >= 2 && (
+          <BlindListeningTest
+            candidates={refineCandidates}
+            onPreview={previewCandidate}
+            onStop={stopAudioEngine}
+            onClose={closeBlindTest}
+            onChoose={handleBlindChoose}
+          />
+        )}
         {toastMessage && (
           <div className="fixed bottom-6 right-6 z-100 bg-neutral-900 border border-neutral-800 text-white font-bold text-xs px-4 py-3.5 rounded-xl shadow-xl flex items-center gap-2 animate-slideUp">
             <CheckCircle className="w-4 h-4 text-emerald-500 animate-pulse" />
@@ -3034,9 +3125,13 @@ Return ONLY a JSON object with this exact shape, no other text:
                               />
                             </div>
                             <JobTimer active={chatLoading} jobKey="chat_generation" label={localLlmStatus?.model || "Generating"} />
-                            {buildStages.length > 0 && (
+                            {(buildStages.length > 0 || buildVersions.length > 0) && (
                               <div className="pt-2">
-                                <BuildProgressBar stages={buildStages} />
+                                <BuildProgressBar
+                                  stages={buildStages}
+                                  versions={buildVersions}
+                                  onJudge={refineCandidates.length >= 2 ? () => setShowBlindTest(true) : undefined}
+                                />
                               </div>
                             )}
                           </div>
@@ -4179,6 +4274,17 @@ return inputSample * dynamicVolumeMod;`
           <CheckCircle className="w-4 h-4 text-emerald-500 animate-pulse" />
           <span>{toastMessage}</span>
         </div>
+      )}
+
+      {/* Blind A/B/C listening test — final human determination by ear */}
+      {showBlindTest && refineCandidates.length >= 2 && (
+        <BlindListeningTest
+          candidates={refineCandidates}
+          onPreview={previewCandidate}
+          onStop={stopAudioEngine}
+          onClose={closeBlindTest}
+          onChoose={handleBlindChoose}
+        />
       )}
 
       {/* Interactive step-by-step user companion handbook */}

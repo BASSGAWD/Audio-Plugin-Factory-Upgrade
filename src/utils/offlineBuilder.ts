@@ -23,7 +23,7 @@ import {
   classifyPluginIntent,
   familyToCategory,
 } from "./pluginSpec";
-import { DSP_RECIPES, DspRecipe, scoreRecipes } from "./dspRecipes";
+import { DSP_RECIPES, DspRecipe, PITCH_SHIFT_RECIPE, scoreRecipes } from "./dspRecipes";
 import { buildPrimitiveGraph } from "./dspPrimitives";
 
 export interface OfflineBuild {
@@ -377,6 +377,10 @@ const PARAM_HINTS: Record<string, string> = {
   tone: "overall brightness",
   space: "adds room and echo around the sound",
   pitch: "shift in semitones (+12 = one octave up)",
+  key: "target key — 0 = Auto (follows the take), 1-12 = C through B",
+  scale: "scale to snap to — 0 chromatic, 1 major, 2 minor, 3 pentatonic",
+  speed: "retune speed — 0 ms hard/robotic snap, higher = human glide",
+  formant: "formant shift — 0 keeps the natural voice, +/- for chipmunk/deeper",
   freq: "root note frequency",
   detune: "width and thickness between the two oscillators",
   level: "output level",
@@ -403,7 +407,8 @@ const FRIENDLY_STRUCTURE: Record<string, string> = {
   filter: "a resonant lowpass with a smoothed, sweepable cutoff",
   distortion: "a soft-clip drive with gain compensation and a tone control",
   sampler: "eight synthesized pads — kick, toms, snare, perc, hat, clap, bell",
-  pitch: "a click-free pitch shifter with two crossfaded read heads",
+  pitch: "a real autotuner — detects the sung pitch, snaps it to your key/scale, and resynthesizes with formant preservation",
+  pitch_shift: "a click-free fixed pitch shifter with two crossfaded read heads",
   synth: "a detuned two-oscillator pad voice through a resonant lowpass",
   amp_channel: "a gated multi-stage tube-style preamp into a tone stack and a 4x12-style cab",
 };
@@ -448,7 +453,7 @@ const HONESTY_NOTES: Partial<Record<string, string>> = {
   sampler:
     "Every pad is a synthesized voice (kick, toms, snare, perc, hat, clap, bell) -- this engine has no audio-file loading, so nothing here claims to import WAVs.",
   pitch:
-    "This is a manual pitch shifter (dual crossfaded read heads) -- the engine has no real-time pitch detection, so it shifts by the amount you set rather than auto-correcting sung notes.",
+    "This is a real tuner: it detects the sung pitch by autocorrelation, snaps it to the Key and Scale you pick (Key = Auto follows the take's own key), and resynthesizes at the corrected pitch. Retune Speed sets snap vs. glide, and Formant keeps the vocal character natural while the pitch moves.",
   synth:
     "This is a generator: it produces its own tone from the oscillators and ignores the audio input.",
 };
@@ -489,8 +494,9 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     friendly = FRIENDLY_STRUCTURE.amp_channel;
   } else if (wantsShimmer) {
     const reverbRecipe = DSP_RECIPES.find((r) => r.id === "reverb")!;
-    const pitchRecipe = DSP_RECIPES.find((r) => r.id === "pitch")!;
-    const composed = composeRecipes(reverbRecipe, pitchRecipe);
+    // Shimmer wants a FIXED octave-up sheen, not pitch correction -- compose the
+    // standalone fixed shifter, not the `pitch` autotune recipe.
+    const composed = composeRecipes(reverbRecipe, PITCH_SHIFT_RECIPE);
     parameters = toLiveParams(composed.parameters);
     for (const p of parameters) {
       if (p.id === "pitch") {

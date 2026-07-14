@@ -95,9 +95,16 @@ for (const { prompt, expectFamily } of BUILD_PROMPTS) {
 
 const pitchBuild = buildOfflinePlugin("autotune my vocals");
 check(
-  "pitch build never claims pitch detection",
-  /no real-time pitch detection/i.test(pitchBuild.description) &&
-    !/elite.*pitch detection|autocorrelation.*(f0|tracking)|detects (the |your )?pitch/i.test(pitchBuild.description)
+  "autotune build describes real pitch correction, not a manual shift",
+  /detect|autocorrelation|snap|correct/i.test(pitchBuild.description) &&
+    !/no real-time pitch detection|manual pitch shift/i.test(pitchBuild.description),
+  pitchBuild.description.slice(0, 120)
+);
+const autotuneParamIds = pitchBuild.parameters.map((p) => p.id).sort().join(",");
+check(
+  "autotune exposes key/scale/speed/formant controls",
+  ["formant", "key", "mix", "scale", "speed"].every((id) => pitchBuild.parameters.some((p) => p.id === id)),
+  `params=${autotuneParamIds}`
 );
 const samplerBuild = buildOfflinePlugin("make a sampler with drum pads");
 check(

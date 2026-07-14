@@ -32,7 +32,7 @@ export const DSP_PRIMITIVES: DspPrimitive[] = [
     match: /granular|grain|texture|shimmer|pitch|alien|crystal|sparkle|space|cosmic|dream/i,
     order: 10,
     parameters: [{ id: "shift", name: "Shift", min: -12, max: 12, defaultValue: 5, unit: "st" }],
-    body: `if (!state.init) { state.buf = new Float32Array(4096); state.wp = 0; state.rp1 = 0; state.rp2 = 2048; state.init = true; }
+    body: `if (!state.init) { state.buf = new Float32Array(4096); state.wp = 0; state.rp1 = 0; state.rp2 = 1024; state.init = true; }
 let shift = params.shift !== undefined ? params.shift : 5;
 let ratio = Math.pow(2, shift / 12);
 state.buf[state.wp] = inputSample;

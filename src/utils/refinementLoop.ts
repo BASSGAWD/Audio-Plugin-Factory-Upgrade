@@ -15,7 +15,7 @@
  * loops" is always shown as scores, not vibes.
  */
 
-import { AudioPlugin, BuildReport } from "../types";
+import { AudioPlugin, BuildReport, PluginParameter } from "../types";
 import { AudioPluginSpec, classifyPluginIntent } from "./pluginSpec";
 import { LLMConfig, callLocalLLM, isLocalProvider } from "./llmGateway";
 import { DSP_CODING_RULES, SOUND_QUALITY_RULES } from "./dspPromptKit";
@@ -30,6 +30,24 @@ export interface RefinementIteration {
   action: string;
   accepted: boolean;
   score: number;
+  /** Plain-language "what changed vs the current best" for the UI trace. */
+  changeSummary: string;
+}
+
+/**
+ * One retained, gated version — the unit the ranking leaderboard and the blind
+ * A/B/C listening test operate on. Candidates are distinct plugins (deduped by
+ * DSP + param defaults) so the user is never auditioning identical clones.
+ */
+export interface RankedCandidate {
+  /** Stable version tag: v1 = initial build, v2.. = rework passes. */
+  label: string;
+  plugin: AudioPlugin;
+  gate: QualityGateResult;
+  score: number;
+  /** 1 = highest refinementScore. */
+  rank: number;
+  changeSummary: string;
 }
 
 export interface RefinementResult {
@@ -39,6 +57,19 @@ export interface RefinementResult {
   /** Score of the initial build, for the before/after story. */
   initialScore: number;
   bestScore: number;
+  /** Distinct versions, ranked best-first (top 3), for the leaderboard + blind test. */
+  candidates: RankedCandidate[];
+}
+
+/**
+ * How close two refinementScores must be to count as a tie the human ear should
+ * settle. The score spans ~0-800 (four 0-100 dimensions + 4x confidence), so 6
+ * points is well under 1% — it captures all-100s/confidence ties and sub-point
+ * character/correction differences without ever calling a real gap a tie.
+ */
+export const NEAR_TIE_MARGIN = 6;
+export function isNearTie(a: number, b: number): boolean {
+  return Math.abs(a - b) <= NEAR_TIE_MARGIN;
 }
 
 /**
@@ -70,17 +101,51 @@ const INTENSITY_PARAM = /^(mix|drive|feedback|decay|depth|space|tone|cutoff|reso
 /** Seeded nudge pattern: alternating directions, growing amplitude. */
 const NUDGE_FRACTIONS = [0.12, -0.12, 0.2, -0.2, 0.3, -0.3];
 
+const DECORATIVE_CONTROLS = new Set(["meter", "label", "waveform", "eq", "amp", "cab", "mic", "mic_stand", "pad", "button"]);
+
+/** A continuous, non-decorative parameter worth nudging for a voicing variant. */
+function isNudgeable(p: PluginParameter): boolean {
+  if (p.min >= p.max) return false;
+  if (p.id.startsWith("pad_")) return false;
+  if (p.controlType && DECORATIVE_CONTROLS.has(p.controlType)) return false;
+  if (/bypass|enable|power|on_off/i.test(p.id)) return false;
+  return true;
+}
+
 /** Clone the plugin with intensity-parameter defaults nudged by a seeded
- *  fraction of their range. Never touches the DSP code. */
+ *  fraction of their range. Never touches the DSP code. When a plugin has no
+ *  named intensity knob (e.g. autotune's key/scale), fall back to nudging every
+ *  continuous non-decorative param so looping still yields a DISTINCT version to
+ *  rank and audition instead of an identical clone. */
 export function voicingVariant(plugin: AudioPlugin, iteration: number): AudioPlugin {
   const frac = NUDGE_FRACTIONS[(iteration - 1) % NUDGE_FRACTIONS.length];
+  const intensity = plugin.parameters.filter((p) => INTENSITY_PARAM.test(p.id));
+  const targets = intensity.length > 0 ? intensity : plugin.parameters.filter(isNudgeable);
+  const targetIds = new Set(targets.map((p) => p.id));
   const parameters = plugin.parameters.map((p) => {
-    if (!INTENSITY_PARAM.test(p.id)) return { ...p };
+    if (!targetIds.has(p.id)) return { ...p };
     const nudged = Math.min(p.max, Math.max(p.min, p.defaultValue + frac * (p.max - p.min)));
     const v = Math.round(nudged * 1000) / 1000;
     return { ...p, defaultValue: v, value: v };
   });
   return { ...plugin, parameters };
+}
+
+/** Human-readable default-value differences between two versions of a plugin
+ *  ("Mix +12%, Feedback -12%"), as a percentage of each param's range. Used for
+ *  the per-version change summary in the leaderboard. */
+export function paramDeltas(base: AudioPlugin, cand: AudioPlugin): string[] {
+  const out: string[] = [];
+  for (const bp of base.parameters) {
+    const cp = cand.parameters.find((p) => p.id === bp.id);
+    if (!cp) continue;
+    const range = bp.max - bp.min || 1;
+    const d = cp.defaultValue - bp.defaultValue;
+    if (Math.abs(d) < range * 0.005) continue;
+    const pct = Math.round((d / range) * 100);
+    out.push(`${bp.name} ${pct > 0 ? "+" : ""}${pct}%`);
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -130,6 +195,12 @@ export interface RefinementOptions {
   llmConfig?: LLMConfig;
   /** Called at the start of each rework pass (drives the UI status bar). */
   onIteration?: (n: number, total: number) => void;
+  /** Called once each rework pass has been gated (drives the live leaderboard). */
+  onCandidate?: (
+    n: number,
+    total: number,
+    cand: { label: string; score: number; accepted: boolean; changeSummary: string }
+  ) => void;
   /** Injectable refiner (tests); null disables LLM rework entirely. */
   refiner?: RefinerWorker | null;
   signal?: AbortSignal;
@@ -157,9 +228,16 @@ export async function runRefinementLoop(
   let bestScore = initialScore;
   const trace: RefinementIteration[] = [];
 
+  // Every distinct gated version, kept for ranking + the blind listening test.
+  interface Collected { label: string; plugin: AudioPlugin; gate: QualityGateResult; score: number; changeSummary: string; }
+  const collected: Collected[] = [
+    { label: "v1", plugin: initial.plugin, gate: initial.gate, score: initialScore, changeSummary: "initial build" },
+  ];
+
   for (let n = 1; n <= iterations; n++) {
     opts.onIteration?.(n, iterations);
     let action = "";
+    let changeSummary = "";
     let candidate: AudioPlugin | null = null;
 
     // Strategy 1: LLM rework of the DSP (schema frozen), acceptance-checked.
@@ -177,6 +255,7 @@ export async function runRefinementLoop(
           if (acceptance.ok) {
             candidate = { ...best.plugin, dspFunction: dsp };
             action = `model rework${reworked.notes ? ` (${reworked.notes.slice(0, 90)})` : ""}`;
+            changeSummary = reworked.notes ? reworked.notes.slice(0, 90) : "reworked the DSP for richer character";
           } else {
             action = `model rework rejected by acceptance check (${acceptance.evidence.slice(0, 90)})`;
           }
@@ -193,17 +272,45 @@ export async function runRefinementLoop(
     if (!candidate) {
       candidate = voicingVariant(best.plugin, n);
       action = action ? `${action}; tried voicing variant instead` : `voicing variant (seeded nudge ${n})`;
+      const deltas = paramDeltas(best.plugin, candidate);
+      changeSummary = deltas.length > 0 ? deltas.join(", ") : "voicing nudge (no audible change)";
     }
 
     const candidateGate = gateOf(candidate);
     const score = refinementScore(candidateGate);
     const accepted = score > bestScore;
+    const label = `v${n + 1}`;
     if (accepted) {
       best = { plugin: candidateGate.plugin, gate: candidateGate };
       bestScore = score;
     }
-    trace.push({ iteration: n, action, accepted, score });
+    trace.push({ iteration: n, action, accepted, score, changeSummary });
+    collected.push({ label, plugin: candidateGate.plugin, gate: candidateGate, score, changeSummary });
+    opts.onCandidate?.(n, iterations, { label, score, accepted, changeSummary });
   }
+
+  // Rank distinct versions best-first for the leaderboard and blind test. Two
+  // versions are "the same" when their DSP and rounded param defaults match, so
+  // the user never auditions identical clones.
+  const signature = (p: AudioPlugin) =>
+    p.dspFunction + "|" + p.parameters.map((q) => `${q.id}:${Math.round(q.defaultValue * 1000)}`).join(",");
+  const seen = new Set<string>();
+  const unique: Collected[] = [];
+  for (const c of collected) {
+    const sig = signature(c.plugin);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    unique.push(c);
+  }
+  unique.sort((a, b) => b.score - a.score);
+  const candidates: RankedCandidate[] = unique.slice(0, 3).map((c, i) => ({
+    label: c.label,
+    plugin: c.plugin,
+    gate: c.gate,
+    score: c.score,
+    rank: i + 1,
+    changeSummary: c.changeSummary,
+  }));
 
   // Attach the trace to whichever report ships (the doc's honesty rule:
   // "perfected" must be shown as scores, not claimed).
@@ -211,5 +318,5 @@ export async function runRefinementLoop(
   best.gate.report.refinement = refinement;
   if (best.plugin.buildReport) best.plugin.buildReport.refinement = refinement;
 
-  return { plugin: best.plugin, gate: best.gate, iterations: trace, initialScore, bestScore };
+  return { plugin: best.plugin, gate: best.gate, iterations: trace, initialScore, bestScore, candidates };
 }

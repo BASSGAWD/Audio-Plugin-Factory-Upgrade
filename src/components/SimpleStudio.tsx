@@ -16,7 +16,7 @@ import { AudioPlugin, ChatMessage } from "../types";
 import Visualizer from "./Visualizer";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
-import BuildProgressBar, { BuildStage } from "./BuildProgressBar";
+import BuildProgressBar, { BuildStage, BuildVersion } from "./BuildProgressBar";
 
 interface SimpleStudioProps {
   plugin: AudioPlugin;
@@ -41,6 +41,12 @@ interface SimpleStudioProps {
   refineControl?: React.ReactNode;
   /** Live build checkpoints (real pipeline callbacks) while building. */
   buildStages?: BuildStage[];
+  /** Ranked versions from the perfecting loop, for the live leaderboard. */
+  buildVersions?: BuildVersion[];
+  /** Opens the blind A/B/C listening test (shown when >=2 versions exist). */
+  onJudgeByEar?: () => void;
+  /** True when >=2 distinct ranked candidates exist — enables the ear test. */
+  canJudgeByEar?: boolean;
 }
 
 const SUGGESTIONS: Array<{ emoji: string; label: string; prompt: string }> = [
@@ -173,6 +179,9 @@ export default function SimpleStudio({
   modelPicker,
   refineControl,
   buildStages = [],
+  buildVersions = [],
+  onJudgeByEar,
+  canJudgeByEar = false,
 }: SimpleStudioProps) {
   const [input, setInput] = useState("");
   const [dockOpen, setDockOpen] = useState(false);
@@ -403,7 +412,13 @@ export default function SimpleStudio({
                       <span className="w-1 h-1 rounded-full bg-neutral-400 animate-bounce [animation-delay:300ms]" />
                     </span>
                   </div>
-                  {buildStages.length > 0 && <BuildProgressBar stages={buildStages} />}
+                  {(buildStages.length > 0 || buildVersions.length > 0) && (
+                    <BuildProgressBar
+                      stages={buildStages}
+                      versions={buildVersions}
+                      onJudge={canJudgeByEar ? onJudgeByEar : undefined}
+                    />
+                  )}
                 </div>
               </div>
             )}

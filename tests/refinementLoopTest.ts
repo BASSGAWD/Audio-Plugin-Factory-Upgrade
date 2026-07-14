@@ -2,7 +2,7 @@
  * Perfecting-loop tests: monotonic by construction — a rework can only
  * replace the build when it passes acceptance AND scores strictly higher.
  */
-import { runRefinementLoop, refinementScore, voicingVariant, MAX_REFINE_LOOPS } from "../src/utils/refinementLoop";
+import { runRefinementLoop, refinementScore, voicingVariant, isNearTie, NEAR_TIE_MARGIN, MAX_REFINE_LOOPS } from "../src/utils/refinementLoop";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { runQualityGate, formatBuildReport, measureCharacterIndex } from "../src/utils/qualityGate";
 import { DSP_RECIPES } from "../src/utils/dspRecipes";
@@ -89,6 +89,23 @@ function gatedBuild(prompt: string, dspOverride?: string): { plugin: AudioPlugin
   const highChar = { ...initial.gate, report: { ...initial.gate.report, characterIndex: 1 } };
   check("character index: breaks ties between equal-score candidates", refinementScore(highChar) > refinementScore(lowChar));
   check("character index: bonus stays small relative to correctness terms", refinementScore(highChar) - refinementScore(lowChar) <= 3);
+
+  /* 6. Ranked candidates: distinct, described, and ordered — the leaderboard +
+        blind-test payload. Even on an already-maxed build the loop must surface
+        >=2 audibly-distinct versions to rank and audition. */
+  const ranked = await runRefinementLoop(initial, { prompt: "make a warm tape delay", iterations: 4, refiner: null });
+  check("candidates: >=2 distinct versions retained", ranked.candidates.length >= 2, `n=${ranked.candidates.length}`);
+  check("candidates: every version has a change summary", ranked.candidates.every((c) => !!c.changeSummary && c.changeSummary.length > 0));
+  check("candidates: ranked by score descending", ranked.candidates.every((c, i) => i === 0 || ranked.candidates[i - 1].score >= c.score));
+  check("candidates: rank field matches order", ranked.candidates.every((c, i) => c.rank === i + 1));
+  check("candidates: initial v1 is included", ranked.candidates.some((c) => c.label === "v1"));
+  const sigs = ranked.candidates.map((c) => c.plugin.dspFunction + "|" + c.plugin.parameters.map((p) => Math.round(p.defaultValue * 1000)).join(","));
+  check("candidates: no duplicate versions", new Set(sigs).size === sigs.length);
+  check("candidates: top-ranked is the loaded best", ranked.candidates[0].score === ranked.bestScore, `top=${ranked.candidates[0].score} best=${ranked.bestScore}`);
+
+  /* 7. Near-tie boundary drives the human-override rule */
+  check("isNearTie: within margin is a tie", isNearTie(800, 800 + NEAR_TIE_MARGIN));
+  check("isNearTie: beyond margin is not", !isNearTie(800, 800 + NEAR_TIE_MARGIN + 0.1));
 
   console.log(failures === 0 ? "\nREFINEMENT: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);

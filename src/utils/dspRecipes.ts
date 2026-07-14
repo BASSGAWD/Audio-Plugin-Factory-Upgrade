@@ -306,58 +306,165 @@ return Math.tanh(sum * mix);`,
   },
   {
     id: "pitch",
-    title: "Dual-tap delay-line pitch shifter (Hann-crossfaded read heads, no external pitch-detection library)",
-    match: /pitch|autotune|auto.?tune|harmoni[sz]er|octav(?:e|iz)|transpose|detune.?voice/i,
+    title: "Autotune (autocorrelation F0 detection -> key/scale snap -> formant-preserving resynthesis)",
+    match: /pitch|autotune|auto.?tune|harmoni[sz]er|octav(?:e|iz)|transpose|detune.?voice|tuner|retune|correct(?:ion)?/i,
     parameters: [
-      { id: "pitch", name: "Pitch Shift", min: -12, max: 12, defaultValue: 7, unit: "st" },
-      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "key", name: "Key", min: 0, max: 12, defaultValue: 0, unit: "" },
+      { id: "scale", name: "Scale", min: 0, max: 3, defaultValue: 1, unit: "" },
+      { id: "speed", name: "Retune Speed", min: 0, max: 100, defaultValue: 20, unit: "ms" },
+      { id: "formant", name: "Formant", min: -12, max: 12, defaultValue: 0, unit: "st" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
     body: `if (!state.init) {
   state.buf = new Float32Array(4096);
   state.wp = 0;
   state.rp1 = 0;
-  state.rp2 = 2048;
+  state.rp2 = 1024; // half a grain (GRAIN/2) apart so the two Hann windows sum to 1.0
+  state.hop = 0;
+  state.detF = 220;
+  state.ratio = 1;
+  state.pc = new Float32Array(12);
+  state.dl1 = 0; state.dl2 = 0; state.wl1 = 0; state.wl2 = 0;
+  state.deLo = 0; state.deMid = 0; state.deHi = 0;
+  state.weLo = 0; state.weMid = 0; state.weHi = 0;
   state.init = true;
 }
-let pitch = params.pitch !== undefined ? params.pitch : 7;
-let mix = params.mix !== undefined ? params.mix : 0.5;
-let ratio = Math.pow(2, pitch / 12);
-let grain = 2048;
-let bufLen = 4096;
+let BUF = 4096;
+let GRAIN = 2048;
+let key = params.key !== undefined ? params.key : 0;
+let scale = params.scale !== undefined ? params.scale : 1;
+let speed = params.speed !== undefined ? params.speed : 20;
+let formant = params.formant !== undefined ? params.formant : 0;
+let mix = params.mix !== undefined ? params.mix : 1;
 
-state.buf[state.wp] = inputSample;
-state.wp = (state.wp + 1) % bufLen;
+// 1. Write the dry sample into the analysis/resynthesis ring.
+let dry = inputSample;
+state.buf[state.wp] = dry;
+state.wp = (state.wp + 1) % BUF;
 
-let i0a = Math.floor(state.rp1) % bufLen; if (i0a < 0) i0a += bufLen;
-let i1a = (i0a + 1) % bufLen;
+// 2. Detect the fundamental every 512 samples via normalized autocorrelation.
+//    Hold the previous estimate on near-silence so gaps never divide by zero.
+state.hop++;
+if (state.hop >= 512) {
+  state.hop = 0;
+  let N = 512;
+  let energy = 0;
+  for (let n = 0; n < N; n++) {
+    let s = state.buf[(state.wp - 1 - n + BUF + BUF) % BUF];
+    energy += s * s;
+  }
+  if (energy > 1e-3) {
+    let bestLag = 0;
+    let bestCorr = 0;
+    for (let lag = 44; lag <= 551; lag++) {
+      let corr = 0;
+      for (let n = 0; n < N; n += 2) {
+        let a = state.buf[(state.wp - 1 - n + BUF + BUF) % BUF];
+        let b = state.buf[(state.wp - 1 - n - lag + BUF + BUF + BUF) % BUF];
+        corr += a * b;
+      }
+      corr = corr / (energy + 1e-9);
+      if (corr > bestCorr) { bestCorr = corr; bestLag = lag; }
+    }
+    if (bestLag > 0 && bestCorr > 0.25) {
+      state.detF = 44100 / bestLag;
+      let midiD = 69 + 12 * Math.log(state.detF / 440) / Math.log(2);
+      let pcls = ((Math.round(midiD) % 12) + 12) % 12;
+      for (let k = 0; k < 12; k++) state.pc[k] *= 0.995;
+      state.pc[pcls] += 1;
+    }
+  }
+}
+
+// 3. Snap the detected note to the selected key + scale (0=Auto key uses the
+//    accumulated pitch-class histogram). Scale masks are 12-bit note sets.
+let tonic;
+if (key <= 0.5) {
+  let bestPc = 0; let bestVal = -1;
+  for (let k = 0; k < 12; k++) { if (state.pc[k] > bestVal) { bestVal = state.pc[k]; bestPc = k; } }
+  tonic = bestPc;
+} else {
+  tonic = (Math.round(key) - 1) % 12;
+}
+let sc = Math.round(scale);
+let mask = 4095;              // chromatic
+if (sc === 1) mask = 2741;   // major     {0,2,4,5,7,9,11}
+else if (sc === 2) mask = 1453; // minor  {0,2,3,5,7,8,10}
+else if (sc >= 3) mask = 661;   // penta  {0,2,4,7,9}
+let midiIn = 69 + 12 * Math.log(state.detF / 440) / Math.log(2);
+let nearMidi = Math.round(midiIn);
+let rel = ((nearMidi - tonic) % 12 + 12) % 12;
+let snapRel = rel;
+for (let r = 0; r <= 6; r++) {
+  let up = (rel + r) % 12;
+  let dn = (rel - r + 12) % 12;
+  if ((mask >> up) & 1) { snapRel = up; break; }
+  if ((mask >> dn) & 1) { snapRel = dn; break; }
+}
+let snappedMidi = nearMidi - rel + snapRel;
+let targetF = 440 * Math.pow(2, (snappedMidi - 69) / 12);
+let target = targetF / (state.detF + 1e-9);
+if (target < 0.5) target = 0.5;
+if (target > 2) target = 2;
+
+// 4. Retune speed: glide the resample ratio toward the target (0 ms = instant).
+let alpha = speed < 0.5 ? 1 : 1 - Math.exp(-1 / (speed * 0.001 * 44100 + 1));
+state.ratio += alpha * (target - state.ratio);
+let ratio = state.ratio;
+
+// 5. Resynthesize at the corrected pitch: two Hann-windowed read heads a half
+//    grain apart, summing to 1.0, advanced by the (dynamic) correction ratio.
+let i0a = Math.floor(state.rp1) % BUF; if (i0a < 0) i0a += BUF;
+let i1a = (i0a + 1) % BUF;
 let fracA = state.rp1 - Math.floor(state.rp1);
 let sampleA = state.buf[i0a] * (1 - fracA) + state.buf[i1a] * fracA;
-
-let i0b = Math.floor(state.rp2) % bufLen; if (i0b < 0) i0b += bufLen;
-let i1b = (i0b + 1) % bufLen;
+let i0b = Math.floor(state.rp2) % BUF; if (i0b < 0) i0b += BUF;
+let i1b = (i0b + 1) % BUF;
 let fracB = state.rp2 - Math.floor(state.rp2);
 let sampleB = state.buf[i0b] * (1 - fracB) + state.buf[i1b] * fracB;
-
-let posA = state.rp1 % grain; if (posA < 0) posA += grain;
-let posB = state.rp2 % grain; if (posB < 0) posB += grain;
-let winA = 0.5 - 0.5 * Math.cos((2 * Math.PI * posA) / grain);
-let winB = 0.5 - 0.5 * Math.cos((2 * Math.PI * posB) / grain);
-
+let posA = state.rp1 % GRAIN; if (posA < 0) posA += GRAIN;
+let posB = state.rp2 % GRAIN; if (posB < 0) posB += GRAIN;
+let winA = 0.5 - 0.5 * Math.cos((2 * Math.PI * posA) / GRAIN);
+let winB = 0.5 - 0.5 * Math.cos((2 * Math.PI * posB) / GRAIN);
 let wet = sampleA * winA + sampleB * winB;
+state.rp1 += ratio; if (state.rp1 >= BUF) state.rp1 -= BUF; if (state.rp1 < 0) state.rp1 += BUF;
+state.rp2 += ratio; if (state.rp2 >= BUF) state.rp2 -= BUF; if (state.rp2 < 0) state.rp2 += BUF;
 
-state.rp1 += ratio;
-state.rp2 += ratio;
-if (state.rp1 >= bufLen) state.rp1 -= bufLen;
-if (state.rp1 < 0) state.rp1 += bufLen;
-if (state.rp2 >= bufLen) state.rp2 -= bufLen;
-if (state.rp2 < 0) state.rp2 += bufLen;
+// 6. Formant preservation: split dry + wet into 3 bands (one-pole crossovers
+//    at ~500 Hz and ~2500 Hz), then impose the DRY band envelopes on the wet
+//    excitation so the vocal formants stay put while the pitch moves. The
+//    Formant knob tilts the low<->high balance for deliberate formant shift.
+let a1 = 1 - Math.exp(-2 * Math.PI * 500 / 44100);
+let a2 = 1 - Math.exp(-2 * Math.PI * 2500 / 44100);
+state.dl1 += a1 * (dry - state.dl1);
+state.dl2 += a2 * (dry - state.dl2);
+let dLo = state.dl1; let dMid = state.dl2 - state.dl1; let dHi = dry - state.dl2;
+state.wl1 += a1 * (wet - state.wl1);
+state.wl2 += a2 * (wet - state.wl2);
+let wLo = state.wl1; let wMid = state.wl2 - state.wl1; let wHi = wet - state.wl2;
+let ea = 0.0015;
+state.deLo += ea * (Math.abs(dLo) - state.deLo);
+state.deMid += ea * (Math.abs(dMid) - state.deMid);
+state.deHi += ea * (Math.abs(dHi) - state.deHi);
+state.weLo += ea * (Math.abs(wLo) - state.weLo);
+state.weMid += ea * (Math.abs(wMid) - state.weMid);
+state.weHi += ea * (Math.abs(wHi) - state.weHi);
+let tilt = Math.pow(2, formant / 12);
+let tiltRt = Math.sqrt(tilt);
+let gLo = (state.deLo / (state.weLo + 1e-4)) / tiltRt;
+let gMid = state.deMid / (state.weMid + 1e-4);
+let gHi = (state.deHi / (state.weHi + 1e-4)) * tiltRt;
+if (gLo > 4) gLo = 4; if (gMid > 4) gMid = 4; if (gHi > 4) gHi = 4;
+let wetFC = wLo * gLo + wMid * gMid + wHi * gHi;
 
-return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+// 7. Blend the corrected voice against the dry signal.
+return Math.tanh(dry * (1 - mix) + wetFC * mix);`,
     pitfalls: [
-      "This engine has no real-time pitch-DETECTION (no autocorrelation/FFT F0 tracking) -- 'autotune' here means a manual/fixed pitch SHIFT, not automatic scale-snapping correction. Never claim it detects or corrects the singer's actual note.",
-      "Use TWO read heads spaced half a grain apart, each with a Hann window (0.5 - 0.5*cos), so their windows sum to exactly 1.0 at every position -- this is what eliminates the clicking a single moving read head would cause when it wraps.",
-      "Advance both read pointers by the same fractional ratio (2^(semitones/12)) per sample; wrap them independently with modulo, not relative to the write pointer.",
-      "Always linearly interpolate the buffer read (fractional index) -- integer-only reads alias badly at non-octave shift amounts.",
+      "Detect the fundamental with normalized autocorrelation over a running state buffer (peak lag in the ~80-1000 Hz vocal range), then SNAP it to the selected key/scale and resynth at the corrected pitch -- this is a real tuner, not a fixed pitch shift. Guard detection against silence: when the analysis window energy is near zero, HOLD the previous F0 instead of dividing by it, or the burst/gap material NaNs.",
+      "Snap to a note SET, not a fixed offset: represent the scale as a 12-bit mask (chromatic/major/minor/pentatonic) and search outward from the detected pitch class for the nearest allowed degree. Key 0 = Auto: pick the tonic from an accumulated, decaying pitch-class histogram so the plugin follows the performance's key.",
+      "Glide the correction ratio toward the target with a Retune Speed coefficient (0 ms = instant/robotic snap, larger = human-like slide); jumping the ratio per detection clicks. Clamp the ratio to +/-1 octave.",
+      "Use TWO Hann-windowed read heads a half grain apart (windows sum to 1.0), advanced by the dynamic correction ratio, wrapped independently with modulo; linearly interpolate every fractional read.",
+      "Preserve formants by transferring the DRY per-band envelopes onto the pitch-shifted wet (3-band one-pole crossover, dry_env/(wet_env+eps) per band, clamped) -- shifting pitch without this gives chipmunk/monster artifacts. The Formant knob should tilt the band balance so it stays audibly useful even at zero correction.",
     ],
   },
   {
@@ -399,6 +506,69 @@ return Math.tanh(state.low * level);`,
     ],
   },
 ];
+
+/**
+ * Fixed dual-tap pitch SHIFTER (the pre-autotune `pitch` recipe). Not part of
+ * DSP_RECIPES routing -- autotune requests now get the real tuner above. This
+ * lives on as a composition building block for effects that genuinely want a
+ * constant transpose, above all shimmer reverb's octave-up tail sheen.
+ */
+export const PITCH_SHIFT_RECIPE: DspRecipe = {
+  id: "pitch_shift",
+  title: "Dual-tap delay-line pitch shifter (Hann-crossfaded read heads, fixed transpose)",
+  match: /pitch.?shift|octave.?(?:up|down)|transpose/i,
+  parameters: [
+    { id: "pitch", name: "Pitch Shift", min: -12, max: 12, defaultValue: 7, unit: "st" },
+    { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+  ],
+  body: `if (!state.init) {
+  state.buf = new Float32Array(4096);
+  state.wp = 0;
+  state.rp1 = 0;
+  state.rp2 = 1024; // half a grain (grain/2) apart so the two Hann windows sum to 1.0
+  state.init = true;
+}
+let pitch = params.pitch !== undefined ? params.pitch : 7;
+let mix = params.mix !== undefined ? params.mix : 0.5;
+let ratio = Math.pow(2, pitch / 12);
+let grain = 2048;
+let bufLen = 4096;
+
+state.buf[state.wp] = inputSample;
+state.wp = (state.wp + 1) % bufLen;
+
+let i0a = Math.floor(state.rp1) % bufLen; if (i0a < 0) i0a += bufLen;
+let i1a = (i0a + 1) % bufLen;
+let fracA = state.rp1 - Math.floor(state.rp1);
+let sampleA = state.buf[i0a] * (1 - fracA) + state.buf[i1a] * fracA;
+
+let i0b = Math.floor(state.rp2) % bufLen; if (i0b < 0) i0b += bufLen;
+let i1b = (i0b + 1) % bufLen;
+let fracB = state.rp2 - Math.floor(state.rp2);
+let sampleB = state.buf[i0b] * (1 - fracB) + state.buf[i1b] * fracB;
+
+let posA = state.rp1 % grain; if (posA < 0) posA += grain;
+let posB = state.rp2 % grain; if (posB < 0) posB += grain;
+let winA = 0.5 - 0.5 * Math.cos((2 * Math.PI * posA) / grain);
+let winB = 0.5 - 0.5 * Math.cos((2 * Math.PI * posB) / grain);
+
+let wet = sampleA * winA + sampleB * winB;
+
+state.rp1 += ratio;
+state.rp2 += ratio;
+if (state.rp1 >= bufLen) state.rp1 -= bufLen;
+if (state.rp1 < 0) state.rp1 += bufLen;
+if (state.rp2 >= bufLen) state.rp2 -= bufLen;
+if (state.rp2 < 0) state.rp2 += bufLen;
+
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+  pitfalls: [
+    "This is a FIXED transpose (shifts by the amount you set), not a tuner -- it has no pitch detection or scale snapping. Use the `pitch` autotune recipe for correction.",
+    "Use TWO read heads spaced half a grain apart, each with a Hann window (0.5 - 0.5*cos), so their windows sum to exactly 1.0 at every position -- this is what eliminates the clicking a single moving read head would cause when it wraps.",
+    "Advance both read pointers by the same fractional ratio (2^(semitones/12)) per sample; wrap them independently with modulo, not relative to the write pointer.",
+    "Always linearly interpolate the buffer read (fractional index) -- integer-only reads alias badly at non-octave shift amounts.",
+  ],
+};
 
 /** Pick the recipe matching a natural-language request (first match wins). */
 export function detectRecipe(userPrompt: string): DspRecipe | null {

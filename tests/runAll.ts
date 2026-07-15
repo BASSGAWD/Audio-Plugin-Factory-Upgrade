@@ -31,6 +31,9 @@ const TEST_FILES = [
   "refinementLoopTest.ts",
   "uiRenderTest.tsx",
   "signalBankTest.ts",
+  "oneShotQualityTest.ts",
+  "editPassTest.ts",
+  "canvasFactoryTest.ts",
 ];
 
 let failed = 0;

@@ -594,6 +594,60 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
 }
 
 /* ------------------------------------------------------------------ */
+/* Best-of-N: distinct alternate builds of the same request            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Up to three genuinely different deterministic takes on one prompt, for the
+ * perfecting loop's seed pool and the blind listening test:
+ *
+ *   [0] the main build (exactly what buildOfflinePlugin ships today)
+ *   [1] the other interpretation -- the hybrid composition when the main was
+ *       a single recipe, or the strongest single recipe when it was a hybrid
+ *   [2] a composed primitive character chain (a different signal path
+ *       entirely)
+ *
+ * All candidates share the main build's name/summary (whichever wins IS the
+ * build); duplicates by dspFunction are dropped. Callers gate each candidate
+ * themselves -- same contract as buildOfflinePlugin.
+ */
+export function buildOfflineCandidates(prompt: string, specIn?: AudioPluginSpec | null): OfflineBuild[] {
+  const spec = specIn ?? classifyPluginIntent(prompt);
+  const main = buildOfflinePlugin(prompt, spec);
+  const out: OfflineBuild[] = [main];
+  const seen = new Set([main.dspFunction]);
+
+  const push = (dspFunction: string, parameters: PluginParameter[], take: string) => {
+    if (seen.has(dspFunction) || out.length >= 3) return;
+    seen.add(dspFunction);
+    out.push({
+      ...main,
+      description: `${FAMILY_LABELS[spec.family]}: alternate take — ${take}.`,
+      parameters,
+      dspFunction,
+    });
+  };
+
+  // Alternate interpretation: hybrid <-> single, whichever the main is NOT.
+  const scored = scoreRecipes(prompt, spec);
+  if (scored.length >= 2) {
+    const composed = composeRecipes(scored[0].recipe, scored[1].recipe);
+    push(composed.body, toLiveParams(composed.parameters), composed.title);
+    push(scored[0].recipe.body, toLiveParams(scored[0].recipe.parameters), scored[0].recipe.title);
+  }
+
+  // A different signal path entirely: the composed primitive chain.
+  try {
+    const graph = buildPrimitiveGraph(prompt);
+    push(graph.body, toLiveParams(graph.parameters), `composed chain (${graph.title})`);
+  } catch {
+    // chain composition is best-effort; the main build always exists
+  }
+
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
 /* Relative tweaks ("make it brighter", "more feedback")               */
 /* ------------------------------------------------------------------ */
 

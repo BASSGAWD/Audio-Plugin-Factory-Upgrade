@@ -94,11 +94,13 @@ return y / Math.pow(state.smF, 0.4);`,
     match: /drive|warm|dirt|grit|saturat|expensive|thick|fat|analog/i,
     order: 20,
     parameters: [{ id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 8, unit: "dB" }],
-    body: `if (!state.init) { state.smD = 8; state.init = true; }
+    body: `if (!state.init) { state.smD = 8; state.pv = 0; state.init = true; }
 let drive = params.drive !== undefined ? params.drive : 8;
 state.smD += 0.002 * (drive - state.smD);
 let g = Math.pow(10, state.smD / 20);
-return Math.tanh(inputSample * g) / Math.pow(g, 0.65);`,
+let mid = 0.5 * (state.pv + inputSample);
+state.pv = inputSample;
+return 0.5 * (Math.tanh(mid * g) + Math.tanh(inputSample * g)) / Math.pow(g, 0.65);`,
   },
   {
     id: "comb_resonator",

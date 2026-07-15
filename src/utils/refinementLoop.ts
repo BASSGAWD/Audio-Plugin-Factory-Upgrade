@@ -22,6 +22,7 @@ import { DSP_CODING_RULES, SOUND_QUALITY_RULES } from "./dspPromptKit";
 import { checkDsp } from "./pluginVerifier";
 import { normalizeModelDspCode } from "./healthcheckRunner";
 import { QualityGateResult, runQualityGate } from "./qualityGate";
+import { learnedPitfallsFor } from "./learnedPitfalls";
 
 export const MAX_REFINE_LOOPS = 25;
 
@@ -90,7 +91,11 @@ export function refinementScore(gate: QualityGateResult): number {
   // Harshness: only when the gate judged it a defect for this family (harsh),
   // scaled by how bad. Tops out at ~5, another tie-breaker among correct builds.
   const harshnessPenalty = gate.report.harsh ? 5 * (gate.report.aliasingIndex ?? 0) : 0;
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty;
+  // A knob that does the WRONG thing (semantic violation) already costs
+  // musicality; the extra term here makes the loop prefer an honest candidate
+  // even when the headline scores happen to tie.
+  const semanticPenalty = 4 * (gate.report.semanticViolations?.length ?? 0);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty;
 }
 
 /* ------------------------------------------------------------------ */
@@ -203,6 +208,13 @@ export interface RefinementOptions {
   ) => void;
   /** Injectable refiner (tests); null disables LLM rework entirely. */
   refiner?: RefinerWorker | null;
+  /**
+   * Alternate builds (already gated) to consider BEFORE the loop runs --
+   * the best-of-N seeds. Each competes for "best" exactly like a rework pass
+   * (accepted only on a strictly higher score) and joins the ranked
+   * candidates for the leaderboard and blind test.
+   */
+  seedCandidates?: Array<{ plugin: AudioPlugin; gate: QualityGateResult; changeSummary: string }>;
   signal?: AbortSignal;
 }
 
@@ -234,6 +246,24 @@ export async function runRefinementLoop(
     { label: "v1", plugin: initial.plugin, gate: initial.gate, score: initialScore, changeSummary: "initial build" },
   ];
 
+  // Best-of-N seeds: alternate builds compete for "best" before any rework
+  // pass, under the same strictly-higher rule, and join the ranked pool. If a
+  // deterministic alternate beats the model build, the alternate ships.
+  const seedTrace: RefinementIteration[] = [];
+  for (let s = 0; s < (opts.seedCandidates?.length ?? 0); s++) {
+    const seed = opts.seedCandidates![s];
+    const score = refinementScore(seed.gate);
+    const accepted = score > bestScore;
+    const label = `alt${s + 1}`;
+    if (accepted) {
+      best = { plugin: seed.plugin, gate: seed.gate };
+      bestScore = score;
+    }
+    seedTrace.push({ iteration: 0, action: `alternate build (${seed.changeSummary.slice(0, 90)})`, accepted, score, changeSummary: seed.changeSummary });
+    collected.push({ label, plugin: seed.plugin, gate: seed.gate, score, changeSummary: seed.changeSummary });
+    opts.onCandidate?.(0, iterations, { label, score, accepted, changeSummary: seed.changeSummary });
+  }
+
   for (let n = 1; n <= iterations; n++) {
     opts.onIteration?.(n, iterations);
     let action = "";
@@ -246,8 +276,12 @@ export async function runRefinementLoop(
         const evidence = [
           `scores: looks ${best.gate.scores.looks} / performance ${best.gate.scores.performance} / musicality ${best.gate.scores.musicality}`,
           best.gate.report.deadParams.length > 0 ? `controls with no audible effect: ${best.gate.report.deadParams.join(", ")}` : "",
+          (best.gate.report.semanticViolations?.length ?? 0) > 0
+            ? `controls that do NOT behave like their name claims (fix the math direction): ${best.gate.report.semanticViolations!.join(", ")}`
+            : "",
+          best.gate.report.harsh ? `audible aliasing fizz (inharmonic ratio ${(best.gate.report.aliasingIndex ?? 0).toFixed(2)}) -- oversample the nonlinearity 2x and lowpass after it` : "",
           ...best.gate.report.fixes.filter((f) => /corrected/i.test(f)),
-        ].filter(Boolean).join("\n");
+        ].filter(Boolean).join("\n") + learnedPitfallsFor(spec.family);
         const reworked = await refiner({ prompt: opts.prompt, plugin: best.plugin, evidence });
         const dsp = normalizeModelDspCode(reworked.dspFunction);
         if (dsp.trim()) {
@@ -313,8 +347,10 @@ export async function runRefinementLoop(
   }));
 
   // Attach the trace to whichever report ships (the doc's honesty rule:
-  // "perfected" must be shown as scores, not claimed).
-  const refinement: NonNullable<BuildReport["refinement"]> = trace.map((t) => ({ ...t }));
+  // "perfected" must be shown as scores, not claimed). Seeds go in as
+  // iteration 0 so the report shows the whole competition, while the
+  // returned `iterations` stays rework-passes-only.
+  const refinement: NonNullable<BuildReport["refinement"]> = [...seedTrace, ...trace].map((t) => ({ ...t }));
   best.gate.report.refinement = refinement;
   if (best.plugin.buildReport) best.plugin.buildReport.refinement = refinement;
 

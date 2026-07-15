@@ -8,11 +8,15 @@ import {
   Download,
   Plus,
   SlidersHorizontal,
+  LayoutGrid,
   Volume2,
   AlertTriangle,
   Sparkles,
+  Crosshair,
+  X,
 } from "lucide-react";
-import { AudioPlugin, ChatMessage } from "../types";
+import { AudioPlugin, ChatMessage, PluginParameter } from "../types";
+import type { ElementNote } from "../utils/editPass";
 import Visualizer from "./Visualizer";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
@@ -35,6 +39,8 @@ interface SimpleStudioProps {
   onSourceTypeChange: (source: "synth" | "sine" | "noise") => void;
   onSliderChange: (paramId: string, value: number) => void;
   onOpenPro: (tab?: string) => void;
+  /** Opens the Factory Canvas: the spatial multi-plugin workspace. */
+  onOpenCanvas?: () => void;
   /** Rendered ModelPicker from App — keeps engine/config state in one owner. */
   modelPicker?: React.ReactNode;
   /** Rendered RefineControl (perfecting loop toggle + count) from App. */
@@ -47,6 +53,14 @@ interface SimpleStudioProps {
   onJudgeByEar?: () => void;
   /** True when >=2 distinct ranked candidates exist — enables the ear test. */
   canJudgeByEar?: boolean;
+  /** Annotation canvas: point at a control and pin an improvement note. */
+  annotateMode?: boolean;
+  onToggleAnnotate?: () => void;
+  annotations?: ElementNote[];
+  onAddNote?: (paramId: string, paramName: string, note: string) => void;
+  onRemoveNote?: (index: number) => void;
+  /** Runs one edit pass that applies every pinned note. */
+  onApplyNotes?: () => void;
 }
 
 const SUGGESTIONS: Array<{ emoji: string; label: string; prompt: string }> = [
@@ -176,15 +190,58 @@ export default function SimpleStudio({
   onSourceTypeChange,
   onSliderChange,
   onOpenPro,
+  onOpenCanvas,
   modelPicker,
   refineControl,
   buildStages = [],
   buildVersions = [],
   onJudgeByEar,
   canJudgeByEar = false,
+  annotateMode = false,
+  onToggleAnnotate,
+  annotations = [],
+  onAddNote,
+  onRemoveNote,
+  onApplyNotes,
 }: SimpleStudioProps) {
   const [input, setInput] = useState("");
   const [dockOpen, setDockOpen] = useState(false);
+  // Annotation canvas: the control currently being annotated + draft text.
+  const [noteTarget, setNoteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [noteText, setNoteText] = useState("");
+
+  // Render-function wrapper (NOT a nested component — a new component
+  // identity per render would remount the controls and break knob drags).
+  // In annotate mode every control gets a crosshair overlay: clicking it
+  // targets the note editor instead of turning the knob.
+  const wrapAnnotatable = (p: PluginParameter, node: React.ReactNode) => {
+    if (!annotateMode) return <React.Fragment key={p.id}>{node}</React.Fragment>;
+    const count = annotations.filter((a) => a.paramId === p.id).length;
+    return (
+      <div key={p.id} className="relative">
+        {node}
+        <button
+          type="button"
+          onClick={() => {
+            setNoteTarget({ id: p.id, name: p.name });
+            setNoteText("");
+          }}
+          aria-label={`Add an improvement note on ${p.name}`}
+          className={`absolute inset-0 z-10 rounded-lg border-2 border-dashed transition-colors cursor-crosshair ${
+            noteTarget?.id === p.id
+              ? "border-orange-400 bg-orange-500/25"
+              : "border-orange-600/50 bg-orange-500/5 hover:bg-orange-500/15"
+          }`}
+        >
+          {count > 0 && (
+            <span className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-orange-600 text-white text-[10px] font-bold flex items-center justify-center">
+              {count}
+            </span>
+          )}
+        </button>
+      </div>
+    );
+  };
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -331,6 +388,16 @@ export default function SimpleStudio({
           )}
           {refineControl}
           {modelPicker}
+          {onOpenCanvas && (
+            <button
+              onClick={onOpenCanvas}
+              className="flex items-center gap-1.5 text-xs text-neutral-400 hover:text-neutral-100 px-3 py-1.5 rounded-lg border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900 transition-colors cursor-pointer"
+              title="Open the Factory Canvas: build many plugins side by side on an infinite canvas"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+              Canvas
+            </button>
+          )}
           <button
             onClick={() => onOpenPro()}
             className="flex items-center gap-1.5 text-xs text-neutral-400 hover:text-neutral-100 px-3 py-1.5 rounded-lg border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900 transition-colors cursor-pointer"
@@ -465,6 +532,29 @@ export default function SimpleStudio({
                   )}
                 </div>
               </button>
+              {onToggleAnnotate && (
+                <button
+                  onClick={() => {
+                    if (!dockOpen && !annotateMode) setDockOpen(true);
+                    onToggleAnnotate();
+                  }}
+                  className={`relative shrink-0 p-2 rounded-lg transition-colors cursor-pointer ${
+                    annotateMode
+                      ? "text-orange-300 bg-orange-600/20 hover:bg-orange-600/30"
+                      : "text-neutral-400 hover:text-white hover:bg-neutral-800"
+                  }`}
+                  title="Annotate: point at controls and pin improvement notes"
+                  aria-label="Toggle annotate mode"
+                  aria-pressed={annotateMode}
+                >
+                  <Crosshair className="w-4 h-4" />
+                  {annotations.length > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-0.5 rounded-full bg-orange-600 text-white text-[9px] font-bold flex items-center justify-center">
+                      {annotations.length}
+                    </span>
+                  )}
+                </button>
+              )}
               <button
                 onClick={downloadPluginFiles}
                 className="shrink-0 p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
@@ -499,38 +589,116 @@ export default function SimpleStudio({
                     <>
                       {showpiece.length > 0 && (
                         <div className="flex flex-col gap-2">
-                          {showpiece.map((p) => (
-                            <PluginControl key={p.id} param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />
-                          ))}
+                          {showpiece.map((p) =>
+                            wrapAnnotatable(p, <PluginControl param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />)
+                          )}
                         </div>
                       )}
 
                       {visualizers.length > 0 && (
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          {visualizers.map((p) => (
-                            <PluginControl key={p.id} param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />
-                          ))}
+                          {visualizers.map((p) =>
+                            wrapAnnotatable(p, <PluginControl param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />)
+                          )}
                         </div>
                       )}
 
                       {pads.length > 0 && (
                         <div className="grid grid-cols-4 gap-2 max-w-xs">
-                          {pads.map((p) => (
-                            <PluginControl key={p.id} param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />
-                          ))}
+                          {pads.map((p) =>
+                            wrapAnnotatable(p, <PluginControl param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />)
+                          )}
                         </div>
                       )}
 
                       {regular.length > 0 && (
                         <div className="grid grid-cols-3 sm:grid-cols-4 gap-x-4 gap-y-3">
-                          {regular.map((p) => (
-                            <PluginControl key={p.id} param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />
-                          ))}
+                          {regular.map((p) =>
+                            wrapAnnotatable(p, <PluginControl param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />)
+                          )}
                         </div>
                       )}
                     </>
                   );
                 })()}
+
+                {annotateMode && !noteTarget && (
+                  <p className="text-[11px] text-orange-300/90 px-1">
+                    🎯 Annotate mode — click any control above and tell me what to improve about it.
+                  </p>
+                )}
+
+                {annotateMode && noteTarget && (
+                  <div className="rounded-lg border border-orange-800/60 bg-neutral-900/80 p-3 space-y-2 animate-fadeIn">
+                    <div className="text-[11px] font-semibold text-orange-300">Note for {noteTarget.name}</div>
+                    <textarea
+                      value={noteText}
+                      onChange={(e) => setNoteText(e.target.value)}
+                      rows={2}
+                      autoFocus
+                      placeholder='e.g. "too subtle — more aggressive", "wider range", "rename to Space"'
+                      aria-label={`Improvement note for ${noteTarget.name}`}
+                      className="w-full text-xs bg-neutral-950 border border-neutral-800 rounded-md p-2 text-neutral-200 outline-none focus:border-orange-700 resize-none"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          if (!noteText.trim()) return;
+                          onAddNote?.(noteTarget.id, noteTarget.name, noteText.trim());
+                          setNoteTarget(null);
+                          setNoteText("");
+                        }}
+                        disabled={!noteText.trim()}
+                        className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition-colors ${
+                          noteText.trim()
+                            ? "bg-orange-600 hover:bg-orange-500 text-white cursor-pointer"
+                            : "bg-neutral-850 text-neutral-600 cursor-not-allowed"
+                        }`}
+                      >
+                        Pin note
+                      </button>
+                      <button
+                        onClick={() => {
+                          setNoteTarget(null);
+                          setNoteText("");
+                        }}
+                        className="px-3 py-1.5 rounded-md text-[11px] font-semibold bg-neutral-800 hover:bg-neutral-750 text-neutral-300 transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {annotations.length > 0 && (
+                  <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-2 space-y-1.5" aria-label="Pinned improvement notes">
+                    <div className="text-[10px] uppercase tracking-widest text-neutral-500 font-semibold px-1">
+                      Improvement notes
+                    </div>
+                    {annotations.map((a, i) => (
+                      <div key={`${a.paramId}-${i}`} className="flex items-center gap-2 text-[11px] bg-neutral-950/60 rounded-md px-2 py-1">
+                        <span className="font-semibold text-orange-300 shrink-0">{a.paramName}</span>
+                        <span className="flex-1 text-neutral-300 truncate">{a.note}</span>
+                        <button
+                          onClick={() => onRemoveNote?.(i)}
+                          aria-label={`Remove note on ${a.paramName}`}
+                          className="text-neutral-500 hover:text-white transition-colors cursor-pointer"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      onClick={onApplyNotes}
+                      disabled={chatLoading}
+                      className={`w-full mt-1 py-1.5 rounded-md text-[11px] font-bold transition-colors ${
+                        chatLoading ? "bg-neutral-850 text-neutral-600 cursor-not-allowed" : "bg-orange-600 hover:bg-orange-500 text-white cursor-pointer"
+                      }`}
+                    >
+                      Apply {annotations.length} note{annotations.length === 1 ? "" : "s"} →
+                    </button>
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-neutral-850">
                   <span className="text-[10px] text-neutral-500 font-medium">Test sound:</span>

@@ -124,6 +124,24 @@ export interface BuildReport {
   harsh?: boolean;
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
+  /**
+   * Per-parameter SEMANTIC honesty checks: a knob named Cutoff must actually
+   * brighten as it opens, Feedback must actually lengthen the tail, Drive
+   * must actually add harmonics, Mix must actually move dry->wet. Each entry
+   * is one measured directional test; `ok: false` means the knob is alive
+   * but does the WRONG thing (or nothing directional). Violations are
+   * penalized in musicality and fed to the refinement loop as evidence.
+   */
+  semanticChecks?: Array<{
+    param: string;
+    /** The property tested: "brightness" | "tail" | "harmonics" | "wet-dry". */
+    property: string;
+    /** Measured low-setting vs high-setting values, for the evidence trail. */
+    detail: string;
+    ok: boolean;
+  }>;
+  /** Ids of parameters that failed their semantic check (subset of the above). */
+  semanticViolations?: string[];
   /** 0-100: min score minus penalties for dead/unstable controls. */
   confidence: number;
   /**
@@ -147,7 +165,8 @@ export interface BuildReport {
     evidence: string;
   }>;
   /** Perfecting-loop trace when the user enabled refinement: one entry per
-   *  rework iteration, accepted only when it scored strictly higher. */
+   *  rework iteration (iteration 0 = an alternate seed build considered
+   *  before the loop), accepted only when it scored strictly higher. */
   refinement?: Array<{
     iteration: number;
     action: string;

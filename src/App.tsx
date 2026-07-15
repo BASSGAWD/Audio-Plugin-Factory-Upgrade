@@ -48,7 +48,9 @@ import {
   TRANSLATE_PORTABLE_PROMPT,
 } from "./utils/dspPromptKit";
 import { verifyAndRepairDsp } from "./utils/pluginVerifier";
-import { runQualityGate, formatBuildReport } from "./utils/qualityGate";
+import { runQualityGate, formatBuildReport, measurePreviewTrim } from "./utils/qualityGate";
+import { buildOfflineCandidates } from "./utils/offlineBuilder";
+import { recordLessons } from "./utils/learnedPitfalls";
 import { buildPortableScaffolds } from "./utils/portableCodegen";
 import { buildRecipeContext } from "./utils/dspRecipes";
 import { AudioPluginSpec, classifyPluginIntent, generatePluginSpec, formatSpecContext, looksLikeBuildRequest, familyToCategory } from "./utils/pluginSpec";
@@ -66,12 +68,15 @@ import PresetManager from "./components/PresetManager";
 import GitHubAudioDiscovery from "./components/GitHubAudioDiscovery";
 import NativeBuildPanel from "./components/NativeBuildPanel";
 import SimpleStudio from "./components/SimpleStudio";
+import FactoryCanvas from "./components/FactoryCanvas";
 import ModelPicker, { EngineId } from "./components/ModelPicker";
 import RefineControl from "./components/RefineControl";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./components/BuildProgressBar";
 import BlindListeningTest from "./components/BlindListeningTest";
 import { runPlannedBuild } from "./utils/buildPlanner";
 import { runRefinementLoop, refinementScore, isNearTie, MAX_REFINE_LOOPS, RankedCandidate } from "./utils/refinementLoop";
+import { classifyEditIntent } from "./utils/editIntent";
+import { runEditPass, ElementNote } from "./utils/editPass";
 
 export function sanitizeDspCode(codeString: string): string {
   let sanitizedCode = codeString;
@@ -523,12 +528,14 @@ private:
 
 export default function App() {
   // ---- 1. State Declarations ----
-  // Simple mode = ChatGPT-style single chat screen (default). Pro mode = full workspace.
-  const [uiMode, setUiMode] = useState<"simple" | "pro">(() => {
+  // Simple mode = ChatGPT-style single chat screen (default). Pro mode = full
+  // workspace. Canvas mode = the factory floor: every prompt becomes a
+  // draggable plugin card on an infinite canvas.
+  const [uiMode, setUiMode] = useState<"simple" | "pro" | "canvas">(() => {
     const saved = localStorage.getItem(STORAGE_KEY_UI_MODE);
-    return saved === "pro" ? "pro" : "simple";
+    return saved === "pro" ? "pro" : saved === "canvas" ? "canvas" : "simple";
   });
-  const switchUiMode = (mode: "simple" | "pro") => {
+  const switchUiMode = (mode: "simple" | "pro" | "canvas") => {
     setUiMode(mode);
     localStorage.setItem(STORAGE_KEY_UI_MODE, mode);
   };
@@ -567,11 +574,17 @@ export default function App() {
   const [buildVersions, setBuildVersions] = useState<BuildVersion[]>([]);
   const [refineCandidates, setRefineCandidates] = useState<RankedCandidate[]>([]);
   const [showBlindTest, setShowBlindTest] = useState(false);
+  // Annotation canvas: notes pinned to specific controls, consumed by the
+  // next edit pass ("point at it and say what's wrong").
+  const [annotateMode, setAnnotateMode] = useState(false);
+  const [annotations, setAnnotations] = useState<ElementNote[]>([]);
   const beginBuildStages = (withPipeline: boolean) => {
-    // A fresh build clears any prior perfecting-loop results.
+    // A fresh build clears any prior perfecting-loop results and stale
+    // element notes (param ids may not survive a rebuild).
     setBuildVersions([]);
     setRefineCandidates([]);
     setShowBlindTest(false);
+    setAnnotations([]);
     const base: BuildStage[] = withPipeline
       ? [
           { id: "intent", label: "Intent", status: "pending" },
@@ -1287,12 +1300,44 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     opts: { prompt: string; spec: any; llmConfig?: any; signal?: AbortSignal }
   ) => {
     setBuildVersions([{ label: "v1", score: refinementScore(base.gate), changeSummary: "initial build", status: "kept" }]);
+
+    // Best-of-N seeds: gate up to two deterministic alternate takes on the
+    // same request. They compete for "best" under the same strictly-higher
+    // rule and give the blind test genuinely different algorithms to compare
+    // (including model-vs-recipe when the base build came from a model).
+    // REBUILDS ONLY: an in-place tweak ("brighter") must never be hijacked by
+    // an unrelated alternate — tweaks keep the user's DSP and get voicing
+    // passes only.
+    const isRebuild = base.plugin.dspFunction !== plugin.dspFunction;
+    const seedCandidates: Array<{ plugin: AudioPlugin; gate: ReturnType<typeof runQualityGate>; changeSummary: string }> = [];
+    if (isRebuild) {
+      try {
+        const alternates = buildOfflineCandidates(opts.prompt, opts.spec).slice(1);
+        for (const alt of alternates) {
+          if (alt.dspFunction === base.plugin.dspFunction) continue;
+          const altPlugin: AudioPlugin = {
+            ...base.plugin,
+            id: `plugin-alt-${Date.now()}-${seedCandidates.length}`,
+            description: alt.description,
+            parameters: alt.parameters.map((p) => ({ ...p, value: p.value !== undefined ? p.value : p.defaultValue })),
+            dspFunction: alt.dspFunction,
+          };
+          const altGate = runQualityGate(altPlugin, { family: alt.family, prompt: opts.prompt, intent: opts.spec?.interpretedGoal });
+          const take = alt.description.replace(/^[^:]*:\s*/, "").replace(/\.$/, "");
+          seedCandidates.push({ plugin: altGate.plugin, gate: altGate, changeSummary: take.slice(0, 90) });
+        }
+      } catch (err) {
+        console.warn("Best-of-N alternate build failed (continuing with the base build only):", err);
+      }
+    }
+
     const refined = await runRefinementLoop(base, {
       prompt: opts.prompt,
       spec: opts.spec,
       iterations: refineLoops,
       llmConfig: opts.llmConfig,
       signal: opts.signal,
+      seedCandidates,
       onIteration: (n, total) => markStage("perfect", `v${n + 1}/${total}`),
       onCandidate: (_n, _total, cand) =>
         setBuildVersions((prev) => [
@@ -1306,7 +1351,9 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
 
   // Point the live engine at an arbitrary plugin's DSP + params WITHOUT
   // persisting it as the loaded plugin — used to audition blind-test candidates.
-  const applyLiveDsp = (p: AudioPlugin) => {
+  // `trimOverride` replaces the plugin's own output trim (used for exact
+  // loudness matching during the blind test).
+  const applyLiveDsp = (p: AudioPlugin, trimOverride?: number) => {
     compileDsp(p.dspFunction);
     const paramsMap: Record<string, number> = {};
     p.parameters.forEach((q) => {
@@ -1314,7 +1361,7 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     });
     activeParamsRef.current = paramsMap;
     dspStateRef.current = {};
-    outputTrimRef.current = p.outputTrim ?? 1;
+    outputTrimRef.current = trimOverride ?? p.outputTrim ?? 1;
     dcBlockRef.current = p.dcBlock ?? false;
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({ type: "params", params: paramsMap });
@@ -1326,13 +1373,42 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
   const previewCandidate = async (p: AudioPlugin) => {
     // Start the engine first (it seeds from the loaded plugin) then swap in the
     // candidate, so the audition sticks instead of being overwritten at startup.
+    // Every candidate auditions at EXACT unity loudness — the louder option
+    // always sounds "better" to human ears, so the blind test must compare
+    // character, not level.
     if (!isPlaying) await togglePlaySimulation();
-    applyLiveDsp(p);
+    applyLiveDsp(p, measurePreviewTrim(p.dspFunction, p.parameters));
   };
 
   const restoreLoaded = () => {
     stopAudioEngine();
     applyLiveDsp(plugin);
+  };
+
+  // ---- Factory Canvas engine bridge: audition any card's plugin through the
+  //      single live engine without persisting it as the loaded plugin. ----
+  const auditionCanvasPlugin = async (p: AudioPlugin) => {
+    // Start the engine first (it seeds from the loaded plugin), then swap the
+    // card's DSP in — the same pattern the blind-test preview uses.
+    if (!isPlaying) await togglePlaySimulation();
+    applyLiveDsp(p);
+  };
+
+  const updateLiveParam = (paramId: string, value: number) => {
+    activeParamsRef.current = { ...activeParamsRef.current, [paramId]: value };
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: "params", params: activeParamsRef.current });
+    }
+  };
+
+  const loadCanvasPluginInStudio = (p: AudioPlugin) => {
+    stopAudioEngine();
+    const loaded: AudioPlugin = { ...p, id: `plugin-${Date.now()}` };
+    savePluginState(loaded);
+    setScratchCode(loaded.dspFunction);
+    compileDsp(loaded.dspFunction);
+    switchUiMode("simple");
+    triggerToast(`Loaded "${loaded.name}" from the canvas.`);
   };
 
   const handleBlindChoose = (picked: RankedCandidate, willLoad: boolean) => {
@@ -1423,6 +1499,80 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
 
     // Get current LLM Gateway Settings (shared with the Memory & LLMs tab)
     const llmConfig: LLMConfig = getLLMConfig();
+
+    // ---- EDIT-BY-DEFAULT: once a plugin is loaded, change requests modify
+    //      it IN PLACE (notes, tweaks, additive stages, optional model edit).
+    //      Full regeneration happens only on explicit restart wording, a
+    //      "make me a <new thing>" request, or after the chat is cleared. ----
+    const pendingNotes = annotations;
+    const editIntent = classifyEditIntent(promptToSend, {
+      hasPlugin: !!plugin?.dspFunction,
+      noteCount: pendingNotes.length,
+    });
+    if (editIntent === "edit") {
+      beginBuildStages(false);
+      markStage("generate");
+      try {
+        const result = await runEditPass(plugin, {
+          prompt: promptToSend,
+          notes: pendingNotes,
+          llmConfig: isLocalProvider(llmConfig) ? llmConfig : undefined,
+        });
+        markStage("validate");
+        const changed = result.changes.length > 0;
+        if (changed) {
+          savePluginState(result.gate.plugin);
+          setScratchCode(result.gate.plugin.dspFunction);
+          setIsEditingCode(false);
+          runStabilityAnalysis(result.gate.plugin.dspFunction, result.gate.plugin.parameters);
+        }
+        setAnnotateMode(false);
+        finishStages();
+
+        const lines: string[] = [
+          changed
+            ? `✏️ **Edited in place** — your existing build was kept and adjusted (say **"start over"** for a full regeneration).`
+            : `✏️ I couldn't map that to a concrete change on the loaded plugin — point at a control with **Annotate** and tell me what's wrong, or name the control and a direction. (Say **"start over"** to regenerate instead.)`,
+        ];
+        if (changed) {
+          lines.push("", "Changes:", ...result.changes.map((c) => `- ${c}`));
+        }
+        if (result.unhandled.length > 0) {
+          lines.push("", ...result.unhandled.map((u) => `- ⚠️ ${u}`));
+        }
+        if (changed) {
+          lines.push("", formatBuildReport(result.gate.report));
+        }
+
+        const editMsg: ChatMessage = {
+          id: `chat-${Date.now()}-edit`,
+          senderId: "edit-core",
+          senderName: "Edit Pass",
+          role: "model",
+          text: lines.join("\n"),
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        };
+        const editHistory = [...newHistory, editMsg];
+        setChatHistory(editHistory);
+        localStorage.setItem(STORAGE_KEY_CHAT, JSON.stringify(editHistory));
+        if (changed) triggerToast(`Edited "${result.gate.plugin.name}" in place — ${result.changes.length} change(s).`);
+      } catch (err: any) {
+        setBuildStages([]);
+        const failMsg: ChatMessage = {
+          id: `chat-${Date.now()}-edit-fail`,
+          senderId: "edit-core",
+          senderName: "Edit Pass",
+          role: "model",
+          text: `The edit pass failed ("${String(err?.message || err).slice(0, 120)}") — your loaded plugin is untouched. Try rephrasing, or say "start over" for a full regeneration.`,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        };
+        const failHistory = [...newHistory, failMsg];
+        setChatHistory(failHistory);
+        localStorage.setItem(STORAGE_KEY_CHAT, JSON.stringify(failHistory));
+      }
+      setChatLoading(false);
+      return;
+    }
 
     // Spec-first stage: natural language never goes straight to code. A
     // deterministic classifier (instant, zero latency cost) always runs first
@@ -1543,6 +1693,9 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         });
 
         let gate = planned.gate;
+        // Failure memory: distill this model build's measured defects into
+        // per-family lessons for future planner/refiner prompts.
+        recordLessons(spec?.family, gate.report);
         if (refineLoops > 0) {
           const refined = await runPerfectingLoop({ plugin: gate.plugin, gate }, {
             prompt: promptToSend,
@@ -1789,6 +1942,9 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           prompt: promptToSend,
           intent: spec?.interpretedGoal,
         });
+        // Failure memory: distill this model build's measured defects into
+        // per-family lessons for future planner/refiner prompts.
+        recordLessons(spec?.family, gate.report);
         if (refineLoops > 0) {
           beginBuildStages(false);
           markStage("perfect");
@@ -2517,6 +2673,10 @@ return Math.tanh(finalOut * 0.95);`;
   };
 
   const handleClearChat = () => {
+    // A new chat resets the annotation canvas: the next build request is a
+    // fresh generation, not an edit of the previous plugin's notes.
+    setAnnotations([]);
+    setAnnotateMode(false);
     // 1. Abort any active request in-flight
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -2779,6 +2939,38 @@ Return ONLY a JSON object with this exact shape, no other text:
     triggerToast("Generation stopped.");
   };
 
+  // ---- Factory Canvas: the autonomous factory floor ----
+  if (uiMode === "canvas") {
+    return (
+      <>
+        <FactoryCanvas
+          onOpenStudio={() => {
+            stopAudioEngine();
+            switchUiMode("simple");
+          }}
+          onOpenPro={() => {
+            stopAudioEngine();
+            switchUiMode("pro");
+          }}
+          onLoadInStudio={loadCanvasPluginInStudio}
+          onAudition={auditionCanvasPlugin}
+          onStopAudition={stopAudioEngine}
+          onLiveParamChange={updateLiveParam}
+          isPlaying={isPlaying}
+          analyserNode={analyserNodeRef.current}
+          refineLoops={refineLoops}
+          refineControl={<RefineControl loops={refineLoops} onChange={setRefineLoops} variant="simple" />}
+        />
+        {toastMessage && (
+          <div className="fixed bottom-24 right-6 z-100 bg-neutral-900 border border-neutral-800 text-white font-bold text-xs px-4 py-3.5 rounded-xl shadow-xl flex items-center gap-2 animate-slideUp">
+            <CheckCircle className="w-4 h-4 text-emerald-500 animate-pulse" />
+            <span>{toastMessage}</span>
+          </div>
+        )}
+      </>
+    );
+  }
+
   // ---- Simple Mode: ChatGPT-style single screen (default experience) ----
   if (uiMode === "simple") {
     return (
@@ -2803,6 +2995,10 @@ Return ONLY a JSON object with this exact shape, no other text:
             if (tab) setCompanionTab(tab as CompanionTabId);
             switchUiMode("pro");
           }}
+          onOpenCanvas={() => {
+            stopAudioEngine();
+            switchUiMode("canvas");
+          }}
           modelPicker={
             <ModelPicker
               hasGeminiKey={apiHealth ? apiHealth.hasApiKey : null}
@@ -2821,6 +3017,12 @@ Return ONLY a JSON object with this exact shape, no other text:
           buildVersions={buildVersions}
           onJudgeByEar={() => setShowBlindTest(true)}
           canJudgeByEar={refineCandidates.length >= 2}
+          annotateMode={annotateMode}
+          onToggleAnnotate={() => setAnnotateMode((v) => !v)}
+          annotations={annotations}
+          onAddNote={(paramId, paramName, note) => setAnnotations((prev) => [...prev, { paramId, paramName, note }])}
+          onRemoveNote={(index) => setAnnotations((prev) => prev.filter((_, i) => i !== index))}
+          onApplyNotes={() => handleSendPromptDirectly("Apply my element notes")}
         />
         {showBlindTest && refineCandidates.length >= 2 && (
           <BlindListeningTest

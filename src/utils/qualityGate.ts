@@ -393,6 +393,243 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Parameter semantics: a knob must do what its NAME claims            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The audibility check above proves a knob DOES something; these checks prove
+ * it does the RIGHT thing. Each semantic family is a directional test with
+ * generous tolerance -- only clear reversals are flagged (a Cutoff that gets
+ * darker as it opens, a Feedback that shortens the tail, a Drive that removes
+ * harmonics, a Mix that moves wet->dry). This is the difference between "all
+ * controls are alive" and "all controls are honest" -- the most common failure
+ * of model-written DSP is plausible-looking code wired to the wrong math.
+ */
+const BRIGHT_PARAM = /^(cutoff|tone|treble|presence|bright|brightness|air|open)$/i;
+const TAIL_PARAM = /^(feedback|decay|size|room|length|sustain)$/i;
+const DRIVE_PARAM = /^(drive|dist|distortion|saturation|fuzz|gain)$/i;
+const MIX_PARAM = /^(mix|blend|drywet|dry_wet|wet)$/i;
+
+export interface SemanticCheck {
+  param: string;
+  property: string;
+  detail: string;
+  ok: boolean;
+}
+
+/**
+ * ABSOLUTE high-frequency amplitude (1.6k / 3.2k / 6.4k / 12.8k Hz), per
+ * sample. Absolute rather than share-of-total on purpose: in a multi-stage
+ * chain an upstream stage may already band-limit the signal, so opening a
+ * tone knob adds MID energy -- a relative share would read that honest
+ * brightening as "darker" (the mid growth dilutes the high share). The
+ * absolute measure only drops when high content genuinely disappears.
+ */
+function highBandLevel(samples: Float32Array): number {
+  const amps = [1600, 3200, 6400, 12800].map((f) => Math.sqrt(goertzelPower(samples, f, SAMPLE_RATE)));
+  return amps.reduce((a, b) => a + b, 0) / samples.length;
+}
+
+/** Broadband deterministic-noise probe: brightness checks need energy ABOVE
+ *  the crossover bands -- the musical bank's harmonics stop near 600 Hz, so a
+ *  cutoff sweep is invisible on them. Flat noise makes it unambiguous. */
+function noiseProbeAt(i: number): number {
+  return hashNoise(i) * 0.25;
+}
+
+/** 2nd+3rd harmonic amplitude relative to the fundamental on the clean tone. */
+function harmonicShare(samples: Float32Array): number {
+  const f1 = Math.sqrt(goertzelPower(samples, ALIAS_FUNDAMENTAL, SAMPLE_RATE));
+  const f2 = Math.sqrt(goertzelPower(samples, ALIAS_FUNDAMENTAL * 2, SAMPLE_RATE));
+  const f3 = Math.sqrt(goertzelPower(samples, ALIAS_FUNDAMENTAL * 3, SAMPLE_RATE));
+  return (f2 + f3) / (f1 + 1e-6);
+}
+
+/** 0.7 s window whose input stops at 0.35 s -- the last 0.2 s is pure tail. */
+const TAIL_TOTAL = 30870;
+const TAIL_INPUT_END = 15435;
+function tailSignalAt(i: number): number {
+  return i < TAIL_INPUT_END ? arpAt(i) : 0;
+}
+function tailRms(samples: Float32Array): number {
+  let sq = 0;
+  let n = 0;
+  for (let i = 22050; i < samples.length; i++) {
+    sq += samples[i] * samples[i];
+    n++;
+  }
+  return Math.sqrt(sq / Math.max(1, n));
+}
+
+export function verifyParamSemantics(
+  dspFunction: string,
+  parameters: PluginParameter[],
+  skipIds: Set<string> = new Set()
+): { checks: SemanticCheck[]; violations: string[] } {
+  const checks: SemanticCheck[] = [];
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return { checks, violations: [] };
+  const defaults = defaultParamsMap(parameters);
+
+  const render = (id: string, v: number, len: number, sig: (i: number) => number) =>
+    renderPass(dspFunc, { ...defaults, [id]: v }, len, sig);
+
+  for (const p of parameters) {
+    if (skipIds.has(p.id) || isDecorativeParam(p)) continue;
+
+    if (BRIGHT_PARAM.test(p.id)) {
+      // Opening a brightness-style knob must not DARKEN the sound.
+      const lo = render(p.id, p.min, CROSS_SIGNAL_WINDOW, noiseProbeAt);
+      const hi = render(p.id, p.max, CROSS_SIGNAL_WINDOW, noiseProbeAt);
+      if (lo.failed || hi.failed || lo.rms < 1e-4 || hi.rms < 1e-4) continue;
+      const a = highBandLevel(lo.samples);
+      const b = highBandLevel(hi.samples);
+      // Only a clear reversal is a violation: opening the knob lost more than
+      // half the absolute high content that was audibly there at min.
+      const ok = !(b < a * 0.5 && a > 1e-5);
+      checks.push({ param: p.id, property: "brightness", detail: `high-band level ${a.toExponential(2)} at min -> ${b.toExponential(2)} at max`, ok });
+    } else if (TAIL_PARAM.test(p.id)) {
+      // More feedback/decay/size must not SHORTEN the ring-out.
+      const lo = render(p.id, p.min, TAIL_TOTAL, tailSignalAt);
+      const hi = render(p.id, p.max, TAIL_TOTAL, tailSignalAt);
+      if (lo.failed || hi.failed) continue;
+      const a = tailRms(lo.samples);
+      const b = tailRms(hi.samples);
+      const ok = !(b < a * 0.8 && a > 1e-4);
+      checks.push({ param: p.id, property: "tail", detail: `tail RMS ${a.toFixed(5)} at min -> ${b.toFixed(5)} at max`, ok });
+    } else if (DRIVE_PARAM.test(p.id)) {
+      // More drive must not REMOVE harmonics from a clean tone.
+      const lo = render(p.id, p.min, 8192, cleanToneAt);
+      const hi = render(p.id, p.max, 8192, cleanToneAt);
+      if (lo.failed || hi.failed || lo.rms < 1e-4 || hi.rms < 1e-4) continue;
+      const a = harmonicShare(lo.samples);
+      const b = harmonicShare(hi.samples);
+      const ok = !(b < a * 0.8 && a - b > 0.01);
+      checks.push({ param: p.id, property: "harmonics", detail: `2nd+3rd harmonic ratio ${a.toFixed(4)} at min -> ${b.toFixed(4)} at max`, ok });
+    } else if (MIX_PARAM.test(p.id)) {
+      // Raising Mix must move the output AWAY from the dry signal, not toward it.
+      const lo = render(p.id, p.min, CROSS_SIGNAL_WINDOW, PRIMARY_SIGNAL.at);
+      const hi = render(p.id, p.max, CROSS_SIGNAL_WINDOW, PRIMARY_SIGNAL.at);
+      if (lo.failed || hi.failed) continue;
+      let dLo = 0;
+      let dHi = 0;
+      for (let i = 0; i < CROSS_SIGNAL_WINDOW; i++) {
+        const dry = PRIMARY_SIGNAL.at(i);
+        dLo += Math.abs(lo.samples[i] - dry);
+        dHi += Math.abs(hi.samples[i] - dry);
+      }
+      dLo /= CROSS_SIGNAL_WINDOW;
+      dHi /= CROSS_SIGNAL_WINDOW;
+      const ok = !(dHi < dLo * 0.6 && dLo - dHi > 0.01);
+      checks.push({ param: p.id, property: "wet-dry", detail: `distance from dry ${dLo.toFixed(4)} at min -> ${dHi.toFixed(4)} at max`, ok });
+    }
+  }
+
+  return { checks, violations: checks.filter((c) => !c.ok).map((c) => c.param) };
+}
+
+/* ------------------------------------------------------------------ */
+/* Parameter range calibration: FIX unstable extremes, don't just flag */
+/* ------------------------------------------------------------------ */
+
+/** True when the DSP renders clean on every bank signal at this one value. */
+function stableAt(
+  dspFunc: (i: number, p: any, s: any) => number,
+  defaults: Record<string, number>,
+  id: string,
+  value: number
+): boolean {
+  for (const sig of TEST_SIGNALS) {
+    if (renderPass(dspFunc, { ...defaults, [id]: value }, CROSS_SIGNAL_WINDOW, sig.at).failed) return false;
+  }
+  return true;
+}
+
+/**
+ * A parameter that NaNs at an extreme is normally a -15 musicality hit and a
+ * warning the user has to live with. Calibration turns it into a FIX: binary-
+ * search the widest stable interval from the default outward and rewrite
+ * min/max (with a small safety margin), so the shipped knob range is fully
+ * usable. Returns the calibrated parameters and evidence strings; parameters
+ * whose default itself is unstable are left alone (that is a fatal build, not
+ * a range problem).
+ */
+export function calibrateUnstableParams(
+  dspFunction: string,
+  parameters: PluginParameter[],
+  unstableIds: string[]
+): { parameters: PluginParameter[]; fixes: string[]; calibrated: string[] } {
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc || unstableIds.length === 0) return { parameters, fixes: [], calibrated: [] };
+
+  const defaults = defaultParamsMap(parameters);
+  const fixes: string[] = [];
+  const calibrated: string[] = [];
+
+  const next = parameters.map((p) => {
+    if (!unstableIds.includes(p.id)) return { ...p };
+    if (!stableAt(dspFunc, defaults, p.id, p.defaultValue)) return { ...p }; // default broken: not a range problem
+    const range = p.max - p.min;
+    const out: PluginParameter = { ...p };
+
+    for (const which of ["min", "max"] as const) {
+      const extreme = which === "min" ? p.min : p.max;
+      if (stableAt(dspFunc, defaults, p.id, extreme)) continue;
+      // Binary search between the (stable) default and the (unstable) extreme.
+      let good = p.defaultValue;
+      let bad = extreme;
+      for (let step = 0; step < 6; step++) {
+        const mid = (good + bad) / 2;
+        if (stableAt(dspFunc, defaults, p.id, mid)) good = mid;
+        else bad = mid;
+      }
+      // Pull 2% of the range further inside the stable region for margin.
+      const margin = 0.02 * range;
+      const bound = which === "min" ? good + margin : good - margin;
+      const rounded = Math.round(bound * 1000) / 1000;
+      if (which === "min") out.min = rounded;
+      else out.max = rounded;
+      fixes.push(
+        `Calibrated: ${p.name} ${which} pulled from ${extreme} to ${rounded} -- values beyond made the DSP throw or emit NaN, so the shipped range is now fully usable`
+      );
+    }
+
+    if (out.min !== p.min || out.max !== p.max) {
+      out.defaultValue = Math.min(out.max, Math.max(out.min, p.defaultValue));
+      out.value = Math.min(out.max, Math.max(out.min, p.value !== undefined ? p.value : p.defaultValue));
+      calibrated.push(p.id);
+    }
+    return out;
+  });
+
+  return { parameters: next, fixes, calibrated };
+}
+
+/* ------------------------------------------------------------------ */
+/* Preview loudness matching                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Exact unity-loudness trim for auditioning a candidate: unlike the gate's
+ * gain correction (which only kicks in beyond a 1.5 dB deadband), this is
+ * precise -- the blind A/B/C listening test must compare CHARACTER, not
+ * level, because the louder option always sounds "better" to human ears.
+ */
+export function measurePreviewTrim(dspFunction: string, parameters: PluginParameter[]): number {
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return 1;
+  let inSq = 0;
+  for (let i = 0; i < CROSS_SIGNAL_WINDOW; i++) {
+    const x = PRIMARY_SIGNAL.at(i);
+    inSq += x * x;
+  }
+  const inputRms = Math.sqrt(inSq / CROSS_SIGNAL_WINDOW);
+  const out = renderPass(dspFunc, defaultParamsMap(parameters), CROSS_SIGNAL_WINDOW);
+  if (out.failed || out.rms < 1e-5) return 1;
+  return Math.min(8, Math.max(0.125, inputRms / out.rms));
+}
+
 /**
  * Character index: how much the DSP reshapes the dry signal's spectral
  * balance, measured across 8 log-spaced bands via a single-bin Goertzel
@@ -843,12 +1080,16 @@ function scoreLatency(generationMs?: number): number {
   return 60;
 }
 
-function scoreMusicality(m: MusicalityMeasurement, trimmed: boolean, dcBlocked: boolean): number {
+function scoreMusicality(m: MusicalityMeasurement, trimmed: boolean, dcBlocked: boolean, semanticViolations = 0): number {
   // Code that never produced a measurable render (syntax error, NaN on the
   // default pass) is a hard zero -- not an unblemished 100.
   if (m.fatal) return 0;
   let score = 100;
   if (m.isSilent) score -= 60;
+  // A knob that is alive but does the WRONG thing is worse than a dead one --
+  // it actively misleads the player. Penalized like dead params, capped so a
+  // single systematic mistake can't zero an otherwise-working build.
+  score -= Math.min(18, semanticViolations * 6);
 
   const tested = m.audibleParams.length + m.deadParams.length;
   if (tested > 0) {
@@ -878,7 +1119,31 @@ export function runQualityGate(
   const notes: string[] = [];
 
   // --- Musicality: measure, then fix gain staging deterministically ---
-  const m = measureMusicality(plugin.dspFunction, plugin.parameters);
+  let m = measureMusicality(plugin.dspFunction, plugin.parameters);
+  let workingParams = plugin.parameters;
+
+  // Range calibration: an unstable extreme becomes a FIXED range, not a
+  // warning. Only kept when re-measurement proves it actually helped.
+  if (!m.fatal && m.unstableParams.length > 0) {
+    const cal = calibrateUnstableParams(plugin.dspFunction, workingParams, m.unstableParams);
+    if (cal.calibrated.length > 0) {
+      const m2 = measureMusicality(plugin.dspFunction, cal.parameters);
+      if (!m2.fatal && m2.unstableParams.length < m.unstableParams.length) {
+        m = m2;
+        workingParams = cal.parameters;
+        cal.fixes.forEach((f) => notes.push(`${f}.`));
+      }
+    }
+  }
+
+  // --- Parameter semantics: every knob must do what its name claims ---
+  const semantics = m.fatal
+    ? { checks: [] as SemanticCheck[], violations: [] as string[] }
+    : verifyParamSemantics(plugin.dspFunction, workingParams, new Set([...m.deadParams, ...m.unstableParams]));
+  for (const c of semantics.checks) {
+    if (!c.ok) notes.push(`Semantic violation: "${c.param}" is audible but does not behave like its name (${c.property}: ${c.detail}).`);
+  }
+
   let outputTrim = 1;
   let trimmed = false;
 
@@ -910,7 +1175,9 @@ export function runQualityGate(
   }
 
   // --- UI enforcement: guarantee the fixed layout some families require ---
-  const enforced = enforceFamilyRequirements(plugin, opts.family ?? null);
+  // (built on the calibrated parameters so any range fixes actually ship)
+  const measuredPlugin: AudioPlugin = workingParams === plugin.parameters ? plugin : { ...plugin, parameters: workingParams };
+  const enforced = enforceFamilyRequirements(measuredPlugin, opts.family ?? null);
   enforced.changes.forEach((c) => notes.push(`Layout: ${c}.`));
 
   // --- Semantic UI spec -> deterministic layout: rank primary controls
@@ -939,22 +1206,22 @@ export function runQualityGate(
     looks: scoreLooks(polished),
     performance: perf.score,
     latency: scoreLatency(opts.generationMs),
-    musicality: scoreMusicality(m, trimmed, dcBlock),
+    musicality: scoreMusicality(m, trimmed, dcBlock, semantics.violations.length),
   };
 
   // --- Build report: only measured facts, never claims ---
   const minScore = Math.min(scores.looks, scores.performance, scores.latency, scores.musicality);
   const confidence = m.fatal
     ? 0
-    : Math.max(0, Math.min(100, minScore - m.deadParams.length * 5 - m.unstableParams.length * 10));
-  const characterIndex = m.fatal ? 0 : measureCharacterIndex(plugin.dspFunction, plugin.parameters);
+    : Math.max(0, Math.min(100, minScore - m.deadParams.length * 5 - m.unstableParams.length * 10 - semantics.violations.length * 5));
+  const characterIndex = m.fatal ? 0 : measureCharacterIndex(plugin.dspFunction, workingParams);
 
   // Aliasing/harshness: measured always (informational), but only counted a
   // DEFECT for families that are supposed to stay spectrally clean -- a
   // ring-mod, pitch shifter, chorus, or generator is inharmonic by design, so
   // a high index there is character, not a bug. `harsh` drives the refinement
   // penalty and a report warning; it never touches the four headline scores.
-  const aliasingIndex = m.fatal ? 0 : measureAliasing(plugin.dspFunction, plugin.parameters);
+  const aliasingIndex = m.fatal ? 0 : measureAliasing(plugin.dspFunction, workingParams);
   const harsh = !m.fatal && !!opts.family && CLEAN_FAMILIES.has(opts.family) && aliasingIndex > ALIAS_DEFECT_THRESHOLD;
   if (harsh) {
     notes.push(`Aliasing/harshness: ${aliasingIndex.toFixed(2)} inharmonic energy on a clean tone -- a ${opts.family} should stay smooth; this has audible digital fizz (oversample or lowpass the nonlinearity).`);
@@ -972,6 +1239,8 @@ export function runQualityGate(
     deadParams: m.deadParams,
     unstableParams: m.unstableParams,
     silentOnSignals: m.silentOnSignals,
+    semanticChecks: semantics.checks,
+    semanticViolations: semantics.violations,
     fixes: notes.slice(),
     confidence,
     characterIndex,
@@ -1011,6 +1280,11 @@ export function formatBuildReport(r: BuildReport): string {
   if (r.silentOnSignals && r.silentOnSignals.length > 0) {
     lines.push(`- ⚠️ Silent on ${r.silentOnSignals.join(", ")} material (dead on plucks/sustains, alive on the arp)`);
   }
+  if (r.semanticViolations && r.semanticViolations.length > 0) {
+    lines.push(`- ⚠️ Controls that don't do what their name claims: ${r.semanticViolations.join(", ")}`);
+  } else if (r.semanticChecks && r.semanticChecks.length > 0) {
+    lines.push(`- Semantics verified: ${r.semanticChecks.length} control(s) measurably do what their names claim`);
+  }
 
   const repairFixes = r.fixes.filter((f) => /corrected|trim|DC/i.test(f));
   if (repairFixes.length > 0) {
@@ -1041,14 +1315,17 @@ export function formatBuildReport(r: BuildReport): string {
   }
 
   if (r.refinement && r.refinement.length > 0) {
+    // iteration 0 = alternate seed builds considered BEFORE the loop ran.
+    const passes = r.refinement.filter((i) => i.iteration > 0);
     const kept = r.refinement.filter((i) => i.accepted).length;
     lines.push(
-      `- Perfecting loop: ${r.refinement.length} rework ${r.refinement.length === 1 ? "pass" : "passes"} — ${
-        kept > 0 ? `kept ${kept} improvement(s), best from loop ${r.refinement.filter((i) => i.accepted).slice(-1)[0].iteration}` : "no candidate beat the original (kept the first build)"
+      `- Perfecting loop: ${passes.length} rework ${passes.length === 1 ? "pass" : "passes"} — ${
+        kept > 0 ? `kept ${kept} improvement(s)` : "no candidate beat the original (kept the first build)"
       }`
     );
     for (const it of r.refinement) {
-      lines.push(`  - loop ${it.iteration}: ${it.action} → ${it.accepted ? `KEPT (score ${it.score})` : `discarded (score ${it.score})`}`);
+      const tag = it.iteration === 0 ? "seed" : `loop ${it.iteration}`;
+      lines.push(`  - ${tag}: ${it.action} → ${it.accepted ? `KEPT (score ${it.score})` : `discarded (score ${it.score})`}`);
     }
   }
 

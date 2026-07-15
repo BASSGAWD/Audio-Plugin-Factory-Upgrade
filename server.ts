@@ -10,7 +10,10 @@ import { DSP_CODING_RULES, PARAMETER_DESIGN_RULES, AMP_CAB_SCHEMA_GUIDANCE, SAMP
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+// Honor an assigned PORT (preview harness / hosting) and fall back to 3000.
+// The frontend calls the API on the same origin (relative paths), so any port
+// works -- nothing is hardcoded to 3000 on the client side.
+const PORT = Number(process.env.PORT) || 3000;
 
 // Set up JSON body parser with high limits for code content
 app.use(express.json({ limit: "20mb" }));

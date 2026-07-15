@@ -23,6 +23,7 @@ import { buildOfflinePlugin } from "./offlineBuilder";
 import { DSP_PRIMITIVES, composePrimitiveGraph } from "./dspPrimitives";
 import { LLMConfig, callLocalLLM, isLocalProvider } from "./llmGateway";
 import { DSP_CODING_RULES, PARAMETER_DESIGN_RULES, RESPONSE_STYLE_RULES, SOUND_QUALITY_RULES } from "./dspPromptKit";
+import { learnedPitfallsFor } from "./learnedPitfalls";
 import { verifyAndRepairDsp } from "./pluginVerifier";
 import { normalizeModelDspCode } from "./healthcheckRunner";
 import { QualityGateResult, runQualityGate } from "./qualityGate";
@@ -116,7 +117,7 @@ export function buildLocalWorkers(llmConfig: LLMConfig, signal?: AbortSignal): P
       const payload = await callLocalLLM({
         config: llmConfig,
         systemPrompt: DSP_WORKER_PROMPT,
-        userText: `${input.prompt}\n\n${formatSpecContext(input.spec)}\n\nFIXED parameter schema (read every one of these):\n[${paramList}]\n\n${input.recipeContext}`,
+        userText: `${input.prompt}\n\n${formatSpecContext(input.spec)}\n\nFIXED parameter schema (read every one of these):\n[${paramList}]\n\n${input.recipeContext}${learnedPitfallsFor(input.spec.family)}`,
         temperature: 0.25,
         signal,
       });

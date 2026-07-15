@@ -222,19 +222,25 @@ return Math.tanh(state.low);`,
       { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4500, unit: "Hz" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.init = true; }
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.prevIn = 0; state.init = true; }
 let drive = params.drive !== undefined ? params.drive : 8;
 let tone = params.tone !== undefined ? params.tone : 4500;
 let mix = params.mix !== undefined ? params.mix : 1;
 state.smDrive += 0.002 * (drive - state.smDrive);
 let g = Math.pow(10, state.smDrive / 20);
-let wet = Math.tanh(inputSample * g) / Math.pow(g, 0.65);
+// 2x oversampled soft clip: shape the linear-interp midpoint AND the sample,
+// then average (a Nyquist-null halfband decimator). Folded harmonics that
+// read as digital fizz land ~6+ dB lower than shaping the raw sample alone.
+let midIn = 0.5 * (state.prevIn + inputSample);
+let wet = 0.5 * (Math.tanh(midIn * g) + Math.tanh(inputSample * g)) / Math.pow(g, 0.65);
+state.prevIn = inputSample;
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);
 wet = state.lp;
 return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
     pitfalls: [
       "Compensate the drive gain (divide by ~g^0.65) or turning Drive up just makes it louder, not more distorted.",
+      "OVERSAMPLE the nonlinearity 2x: shape the midpoint between the previous and current input as well as the current input, then average the two shaped values -- running tanh on the raw sample alone folds harmonics back as inharmonic digital fizz the quality gate measures and penalizes.",
       "Follow the clipper with a gentle lowpass -- raw tanh harmonics above ~8 kHz read as harsh fizz.",
       "Smooth the drive value per sample so automation doesn't zipper.",
     ],

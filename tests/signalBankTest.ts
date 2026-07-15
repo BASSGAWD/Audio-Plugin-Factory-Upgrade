@@ -83,8 +83,12 @@ check("aliasing: sample-rate reduction reads HIGH (fizz the old gate missed)", m
  *    (should stay clean) but intended character for an inharmonic-by-design
  *    family -- and it NEVER touches the >=97 headline scores. Uses a bitcrush
  *    that aliases yet reads both knobs, so the ONLY blemish is harshness. */
+// The rate knob is deliberately NOT named "cutoff": a decimator gets darker
+// as it crushes harder, so a brightness-family name would be a genuine
+// semantic violation -- a second blemish that would defeat this test's
+// "the ONLY blemish is harshness" premise.
 const crushDsp = `if(!state.i){state.n=0;state.h=0;state.i=1;}
-let rate = params.cutoff !== undefined ? params.cutoff : 0.6;
+let rate = params.crush !== undefined ? params.crush : 0.6;
 let mix = params.mix !== undefined ? params.mix : 1;
 let hold = Math.max(1, Math.round(2 + rate * 10));
 state.n++;
@@ -92,7 +96,7 @@ if(state.n >= hold){state.n=0;state.h=inputSample;}
 return inputSample * (1 - mix) + state.h * mix;`;
 const mkPlugin = (category: AudioPlugin["category"]): AudioPlugin => ({
   id: "t", name: "T", category, description: "",
-  parameters: [P("cutoff", 0, 1, 0.6), P("mix", 0, 1, 1)], dspFunction: crushDsp,
+  parameters: [P("crush", 0, 1, 0.6), P("mix", 0, 1, 1)], dspFunction: crushDsp,
   faustCode: "", cppJuceCode: "", createdAt: "",
 });
 const asFilter = runQualityGate(mkPlugin("filter"), { family: "filter" });

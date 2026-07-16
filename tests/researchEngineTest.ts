@@ -113,23 +113,23 @@ const mem = new Map<string, string>();
   const optoBuild = buildOfflinePlugin("an LA-2A style opto compressor for vocals");
   check("approved opto model is buildable by name", /opto|leveling/i.test(optoBuild.description), optoBuild.description.slice(0, 80));
 
-  /* ---- external sidechain: blocked; internal sidechain: buildable ---- */
+  /* ---- external sidechain: the last blocked concept — the finding is the constraint ---- */
   const sidechain = await runResearch("sidechain-input");
   check("external sidechain reports the single-input constraint", sidechain.conflicts.some((c) => c.severity === "blocking" && /one input|second bus|single/i.test(c.text)));
+  check("external sidechain carries NO proposed module", !sidechain.proposedModule);
+  check("external sidechain cannot be approved", !isApprovable(sidechain) && approveResearch(sidechain.id) === null);
+  check("blocked approval attempt left status pending", readResearchQueue().find((i) => i.id === sidechain.id)?.status === "pending");
   const deEss = await runResearch("sidechain-filter");
   check("internal sidechain (de-esser) IS approvable", isApprovable(deEss) && deEss.proposedModule?.verification.passes === true);
 
-  /* ---- blocked concepts: the constraint is the finding ---- */
-  const convolution = await runResearch("convolution");
-  check("convolution research reports the block-processing constraint", convolution.conflicts.some((c) => c.severity === "blocking" && /impulse|convolution|block/i.test(c.text)));
-  check("convolution carries NO proposed module", !convolution.proposedModule);
-  check("convolution cannot be approved", !isApprovable(convolution) && approveResearch(convolution.id) === null);
-  check("blocked approval attempt left status pending", readResearchQueue().find((i) => i.id === convolution.id)?.status === "pending");
-
-  /* ---- formerly blocked: the stereo engine un-blocked mid-side ---- */
+  /* ---- formerly blocked, now buildable: stereo (mid-side) + block/FFT (convolution, spectral) ---- */
   const midSide = await runResearch("mid-side");
   check("mid-side is no longer blocked (stereo engine landed)", !midSide.conflicts.some((c) => c.severity === "blocking"));
   check("mid-side module was gate-verified stereo", midSide.proposedModule?.verification.passes === true);
+  const convolution = await runResearch("convolution");
+  check("convolution is no longer blocked (block processing landed)", !convolution.conflicts.some((c) => c.severity === "blocking") && convolution.proposedModule?.verification.passes === true);
+  const spectral = await runResearch("spectral-processing");
+  check("spectral/FFT is no longer blocked (inline FFT landed)", !spectral.conflicts.some((c) => c.severity === "blocking") && spectral.proposedModule?.verification.passes === true);
 
   /* ---- unknown concept with no model: honest empty result ---- */
   const unknown = await runResearch("quantum yodel translation");

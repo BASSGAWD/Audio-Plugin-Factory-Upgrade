@@ -10,9 +10,13 @@
  * approve them before the factory may build with them.
  *
  * Entries with `blocked` document concepts the current engine structurally
- * cannot implement (mono per-sample JS, no file IO, no block processing).
- * Researching those yields the CONSTRAINT as the finding — an honest "not
- * yet possible, and here is why" instead of a broken module.
+ * cannot implement. Researching those yields the CONSTRAINT as the finding —
+ * an honest "not yet possible, and here is why" instead of a broken module.
+ * (Block/FFT processing IS available: a body can buffer N samples in
+ * init-guarded state and run an inline FFT on hop boundaries — see the
+ * convolution and spectral-processing entries. What remains blocked needs a
+ * capability the per-sample signature genuinely lacks, e.g. a second input
+ * BUS for external sidechain keying.)
  *
  * A local LLM (when configured) and live web fetches (via /api/proxy) can
  * add findings on top of this corpus; corpus entries exist so the research
@@ -552,15 +556,82 @@ return Math.tanh(osc * level * 0.8);`,
   {
     concept: "convolution",
     area: "Reverbs",
-    match: /convolution|impulse\s*response|\bir\b\s*(?:reverb|loader)/i,
+    match: /convolution|impulse\s*response|\bir\b\s*(?:reverb|loader)|convolv/i,
     claims: [
       {
-        text: "Convolution reverb multiplies the input spectrum by a measured impulse response; practical implementations use partitioned FFT convolution to keep latency low.",
-        citation: { title: "FIR convolution and partitioned convolution", ...JOS_PASP },
+        text: "Convolution reverb filters the input through a room's impulse response: each output sample is the dot product of the recent input history with the (time-reversed) IR — a direct FIR filter.",
+        citation: { title: "FIR convolution", ...JOS_PASP },
+      },
+      {
+        text: "A plausible room/plate IR is exponentially-decaying filtered noise: dense random reflections whose amplitude envelope falls at a rate set by the desired RT60, low-passed for air absorption.",
+        citation: { title: "Statistical reverberation models", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed. (reverberation)", authority: 90 },
+      },
+      {
+        text: "Full-length IRs (~2 s = 88k taps) need partitioned FFT convolution, but a short character IR (10-40 ms) convolves directly within a per-sample real-time budget.",
+        citation: { title: "Partitioned convolution tradeoffs", ...JOS_PASP },
       },
     ],
-    blocked:
-      "This engine has no audio-file loading, so there is no way to import an impulse response, and direct time-domain convolution of a realistic IR (~2 s = 88,200 taps) is far beyond the per-sample JS budget. Prerequisite: sample import + block (FFT) processing.",
+    proposedModule: {
+      family: "reverb",
+      title: "Convolution reverb (procedurally-synthesized room IR, direct FIR — 1024 taps)",
+      parameters: [
+        { id: "size", name: "Size", min: 0.1, max: 1, defaultValue: 0.6, unit: "ratio" },
+        { id: "decay", name: "Decay", min: 0.1, max: 0.98, defaultValue: 0.7, unit: "ratio" },
+        { id: "tone", name: "Tone", min: 800, max: 12000, defaultValue: 5000, unit: "Hz" },
+        { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+      ],
+      // The IR lives in a buffer allocated ONCE (init guard); it is refilled
+      // in place (no allocation) only when Size/Decay/Tone change, so a swept
+      // knob costs one refill per render, not one per sample. Direct FIR
+      // convolution then reads the pre-built IR every sample. No file load:
+      // the "measured" IR is synthesized as decaying, tone-shaped noise.
+      body: `if (!state.init) {
+  state.ir = new Float32Array(1024);
+  state.buf = new Float32Array(1024);
+  state.w = 0;
+  state.key = -1;
+  state.init = true;
+}
+let size = params.size !== undefined ? params.size : 0.6;
+let decay = params.decay !== undefined ? params.decay : 0.7;
+let tone = params.tone !== undefined ? params.tone : 5000;
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let key = Math.round(size * 200) * 100000 + Math.round(decay * 1000) * 100 + Math.round(tone / 120);
+if (key !== state.key) {
+  let taps = Math.max(64, Math.floor(size * 1024));
+  let rng = 22222;
+  let lp = 0;
+  let toneA = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+  let decayRate = 3 + (1 - decay) * 60;
+  let norm = 0;
+  for (let k = 0; k < 1024; k++) {
+    if (k < taps) {
+      rng = (rng * 1664525 + 1013904223) | 0;
+      let wn = (rng / 2147483648);
+      let env = Math.exp(-decayRate * k / taps);
+      lp += toneA * (wn - lp);
+      let early = k < 6 ? 0.9 : 0;
+      let v = (lp + early * wn) * env;
+      state.ir[k] = v;
+      norm += v * v;
+    } else {
+      state.ir[k] = 0;
+    }
+  }
+  let g = norm > 1e-9 ? 0.7 / Math.sqrt(norm) : 0;
+  for (let k = 0; k < taps; k++) state.ir[k] *= g;
+  state.key = key;
+}
+state.buf[state.w] = inputSample;
+let acc = 0;
+for (let k = 0; k < 1024; k++) {
+  let idx = state.w - k;
+  if (idx < 0) idx += 1024;
+  acc += state.ir[k] * state.buf[idx];
+}
+state.w = (state.w + 1) % 1024;
+return Math.tanh(inputSample * (1 - mix) + acc * mix * 1.4);`,
+    },
   },
   {
     concept: "mid-side",
@@ -649,15 +720,103 @@ return Math.tanh(inputSample * (1 - mix) + wl * mix * 1.3);`,
   {
     concept: "spectral-processing",
     area: "Pitch & Time",
-    match: /spectral|fft|frequency.?domain|vocoder|spectral\s*transient/i,
+    match: /spectral|\bfft\b|frequency.?domain|spectral\s*(?:gate|freeze|transient|tilt)/i,
     claims: [
       {
-        text: "Spectral processors window the signal into overlapping blocks, transform with an FFT, operate on magnitude/phase, and resynthesize by overlap-add.",
-        citation: { title: "Spectral audio signal processing", source: "J.O. Smith, Spectral Audio Signal Processing (CCRMA)", url: "https://ccrma.stanford.edu/~jos/sasp/", authority: 95 },
+        text: "Spectral processors window the signal into overlapping blocks, transform each with an FFT, operate on the magnitude/phase bins, and resynthesize by inverse-FFT and overlap-add.",
+        citation: { title: "The short-time Fourier transform", source: "J.O. Smith, Spectral Audio Signal Processing (CCRMA)", url: "https://ccrma.stanford.edu/~jos/sasp/", authority: 95 },
+      },
+      {
+        text: "A Hann analysis window at 50% hop satisfies the constant-overlap-add condition, so an identity spectral operation reconstructs the input exactly (no synthesis window needed).",
+        citation: { title: "COLA and overlap-add reconstruction", source: "J.O. Smith, Spectral Audio Signal Processing (CCRMA)", url: "https://ccrma.stanford.edu/~jos/sasp/", authority: 95 },
+      },
+      {
+        text: "A spectral gate attenuates bins whose magnitude falls below a threshold — a denoiser/detail control — while a spectral tilt scales bin magnitudes along frequency.",
+        citation: { title: "Spectral-domain effects", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed.", authority: 90 },
       },
     ],
-    blocked:
-      "The engine calls the DSP function once per sample with no lookahead block, so windowed FFT processing cannot run inside it. Prerequisite: block-based processing support (buffer N samples, process, overlap-add) in the audio engine and the gate's renderer.",
+    proposedModule: {
+      family: "modulation",
+      title: "Spectral gate + tilt (streaming 256-pt STFT, Hann/50% overlap-add, inline radix-2 FFT)",
+      parameters: [
+        { id: "threshold", name: "Threshold", min: 0, max: 0.5, defaultValue: 0.08, unit: "ratio" },
+        { id: "tilt", name: "Tilt", min: -1, max: 1, defaultValue: 0, unit: "ratio" },
+        { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.7, unit: "ratio" },
+      ],
+      // A genuine streaming STFT inside the per-sample contract: input and an
+      // overlap-add accumulator are ring buffers; every hop (N/2) samples one
+      // frame is windowed, FFT'd, spectrally processed, inverse-FFT'd, and
+      // added back. Latency is one block (~5.8 ms). All buffers are allocated
+      // once (init guard); the FFT runs in place on pre-allocated arrays.
+      body: `if (!state.init) {
+  state.N = 256; state.H = 128;
+  state.inr = new Float32Array(256);
+  state.acc = new Float32Array(256);
+  state.re = new Float32Array(256);
+  state.im = new Float32Array(256);
+  state.win = new Float32Array(256);
+  for (let n = 0; n < 256; n++) state.win[n] = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / 256);
+  state.ip = 0; state.cnt = 0;
+  state.init = true;
+}
+let threshold = params.threshold !== undefined ? params.threshold : 0.08;
+let tilt = params.tilt !== undefined ? params.tilt : 0;
+let mix = params.mix !== undefined ? params.mix : 0.7;
+let N = 256, H = 128;
+state.inr[state.ip] = inputSample;
+let y = state.acc[state.ip];
+state.acc[state.ip] = 0;
+state.ip = (state.ip + 1) % N;
+state.cnt++;
+if (state.cnt >= H) {
+  state.cnt = 0;
+  let re = state.re, im = state.im;
+  for (let j = 0; j < N; j++) { re[j] = state.inr[(state.ip + j) % N] * state.win[j]; im[j] = 0; }
+  for (let i = 1, j = 0; i < N; i++) { let bit = N >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { let tr = re[i]; re[i] = re[j]; re[j] = tr; let ti = im[i]; im[i] = im[j]; im[j] = ti; } }
+  for (let len = 2; len <= N; len <<= 1) {
+    let ang = -2 * Math.PI / len; let wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < (len >> 1); k++) {
+        let ar = re[i + k], ai = im[i + k];
+        let brr = re[i + k + (len >> 1)] * cr - im[i + k + (len >> 1)] * ci;
+        let bii = re[i + k + (len >> 1)] * ci + im[i + k + (len >> 1)] * cr;
+        re[i + k] = ar + brr; im[i + k] = ai + bii;
+        re[i + k + (len >> 1)] = ar - brr; im[i + k + (len >> 1)] = ai - bii;
+        let ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+  let maxMag = 1e-9;
+  for (let b = 0; b <= (N >> 1); b++) { let mg = Math.sqrt(re[b] * re[b] + im[b] * im[b]); if (mg > maxMag) maxMag = mg; }
+  let gate = threshold * maxMag;
+  for (let b = 0; b <= (N >> 1); b++) {
+    let mg = Math.sqrt(re[b] * re[b] + im[b] * im[b]);
+    let g = mg < gate ? 0 : 1;
+    let t = 1 + tilt * (b / (N >> 1) - 0.5) * 2; if (t < 0) t = 0;
+    g *= t;
+    re[b] *= g; im[b] *= g;
+    if (b > 0 && b < (N >> 1)) { re[N - b] *= g; im[N - b] *= g; }
+  }
+  for (let i = 1, j = 0; i < N; i++) { let bit = N >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { let tr = re[i]; re[i] = re[j]; re[j] = tr; let ti = im[i]; im[i] = im[j]; im[j] = ti; } }
+  for (let len = 2; len <= N; len <<= 1) {
+    let ang = 2 * Math.PI / len; let wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < (len >> 1); k++) {
+        let ar = re[i + k], ai = im[i + k];
+        let brr = re[i + k + (len >> 1)] * cr - im[i + k + (len >> 1)] * ci;
+        let bii = re[i + k + (len >> 1)] * ci + im[i + k + (len >> 1)] * cr;
+        re[i + k] = ar + brr; im[i + k] = ai + bii;
+        re[i + k + (len >> 1)] = ar - brr; im[i + k + (len >> 1)] = ai - bii;
+        let ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+  for (let j = 0; j < N; j++) state.acc[(state.ip + j) % N] += re[j] / N;
+}
+return Math.tanh(inputSample * (1 - mix) + y * mix);`,
+    },
   },
 ];
 

@@ -89,6 +89,22 @@ missing), redundancy balance, trust tiers, and a demonstrated-ability table
 where every benchmark is REALLY built and gated at run time. Prompts the
 banks can't confidently serve are logged locally (demand-driven growth).
 
+1.4c BLOCK / FFT PROCESSING  (inside the per-sample DSP contract)
+-----------------------------------------------------------------
+The engine calls the DSP once per sample, but a body can still do real
+BLOCK processing by buffering samples in its (init-guarded) state and acting
+on hop boundaries — no engine change needed. Two effects the factory
+previously called impossible now work this way:
+  • CONVOLUTION REVERB — a 1024-tap FIR whose impulse response is
+    procedurally synthesized (decaying, tone-shaped noise = a plausible
+    room/plate). No file loading; the IR is refilled in place only when a
+    knob changes, so a swept knob costs one refill, not one per sample.
+  • SPECTRAL GATE + TILT — a genuine streaming 256-point STFT with an inline
+    radix-2 FFT: window, FFT, gate/tilt the bins, inverse-FFT, Hann/50%
+    overlap-add. One-block latency (~5.8 ms); identity settings reconstruct
+    the input exactly.
+Both are gate-verified at 100 and proven in a real browser AudioContext.
+
 1.2e THE RESEARCH ENGINE  (src/utils/researchEngine.ts + researchCorpus.ts)
 ---------------------------------------------------------------------------
 The factory researches its own measured gaps: pick a gap in the Research Lab

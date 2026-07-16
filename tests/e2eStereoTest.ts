@@ -92,7 +92,15 @@ const midSide = RESEARCH_CORPUS.find((e) => e.concept === "mid-side")!.proposedM
     check("mid-side width=0 is mono in the browser", msNarrow.diff < 1e-6, `diff=${msNarrow.diff.toExponential(2)}`);
     check("mid-side width=2 is wide in the browser", msWide.diff > 0.01, `diff=${msWide.diff.toFixed(4)}`);
 
-    check("no page errors during stereo rendering", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
+    // 4. Block processing in the browser: convolution tail + STFT round-trip.
+    const convBody = RESEARCH_CORPUS.find((e) => e.concept === "convolution")!.proposedModule!.body;
+    const specBody = RESEARCH_CORPUS.find((e) => e.concept === "spectral-processing")!.proposedModule!.body;
+    const conv = await renderStereo(convBody, { size: 0.8, decay: 0.9, tone: 5000, mix: 1 });
+    check("convolution reverb renders audio in the browser", conv.energy > 1e-3, `rms=${conv.energy.toFixed(4)}`);
+    const spec = await renderStereo(specBody, { threshold: 0.08, tilt: 0, mix: 0.7 });
+    check("spectral (inline FFT) renders audio in the browser", spec.energy > 1e-3, `rms=${spec.energy.toFixed(4)}`);
+
+    check("no page errors during stereo/block rendering", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
   } catch (err: any) {
     check("stereo e2e ran to completion", false, err.message);
   } finally {

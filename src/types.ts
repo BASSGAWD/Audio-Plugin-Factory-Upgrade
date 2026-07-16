@@ -126,6 +126,9 @@ export interface BuildReport {
    *  defaults, 4x oversampled via Catmull-Rom reconstruction. Informational;
    *  a note is added when it risks clipping a DAC (> -0.1 dBTP). */
   truePeakDb?: number;
+  /** True when the DSP produced a measurably distinct right channel
+   *  (state.outR) on the program render — genuine stereo, not dual-mono. */
+  stereoOutput?: boolean;
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

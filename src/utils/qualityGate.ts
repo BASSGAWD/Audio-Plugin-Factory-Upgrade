@@ -58,6 +58,12 @@ export interface MusicalityMeasurement {
    *  sustains). Reported, and penalized by the refinement loop, but NOT
    *  scored into the four headline dimensions. */
   silentOnSignals: string[];
+  /** True when the DSP produced a distinct right channel (state.outR) on the
+   *  program render — genuine stereo output, not dual-mono. */
+  stereoOutput?: boolean;
+  /** RMS of the interchannel (L-R) difference on the program render at
+   *  defaults. 0 for mono/dual-mono. */
+  stereoWidthRms?: number;
   /** Human-readable failure evidence for the repair loop ("" when ok). */
   evidence: string;
   /**
@@ -167,10 +173,14 @@ const TEST_SIGNALS: { name: string; at: (i: number) => number }[] = [
 ];
 const PRIMARY_SIGNAL = TEST_SIGNALS[0];
 
-function compileDspBody(dspFunction: string): ((i: number, p: any, s: any) => number) | null {
+function compileDspBody(dspFunction: string): ((i: number, p: any, s: any, r?: number) => number) | null {
   try {
     const sanitized = sanitizeDspCode(dspFunction);
-    return new Function("inputSample", "params", "state", sanitized) as any;
+    // "inputR" is the OPT-IN stereo contract: mono bodies never reference it
+    // and behave exactly as before; stereo bodies read it (guarded with
+    // `inputR !== undefined ? inputR : inputSample`) and write their right
+    // channel to state.outR each sample, returning the left.
+    return new Function("inputSample", "params", "state", "inputR", sanitized) as any;
   } catch {
     return null;
   }
@@ -190,43 +200,81 @@ interface RenderStats {
   clippingRatio: number;
   failed: boolean;
   samples: Float32Array;
+  /** Right-channel render, present only when the DSP set state.outR. */
+  samplesR: Float32Array | null;
+  /** True when the DSP produced a distinct right channel. */
+  stereo: boolean;
 }
 
+/** Interchannel skew (samples) used to derive the right-channel test feed
+ *  from any signal: ~2.2 ms of decorrelation, enough for mid-side and width
+ *  processing to have real side content to work on, while keeping the same
+ *  energy and character as the left feed. Mono DSP ignores it entirely. */
+const STEREO_SKEW = 97;
+
 function renderPass(
-  dspFunc: (i: number, p: any, s: any) => number,
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
   params: Record<string, number>,
   length: number,
   signal: (i: number) => number = PRIMARY_SIGNAL.at
 ): RenderStats {
   const out = new Float32Array(length);
+  let outR: Float32Array | null = null;
   const state: any = {};
   let sumSq = 0;
+  let sumSqR = 0;
   let dcSum = 0;
   let clipCount = 0;
+
+  const fail = (): RenderStats => ({ rms: 0, dcOffset: 0, clippingRatio: 0, failed: true, samples: out, samplesR: null, stereo: false });
 
   for (let i = 0; i < length; i++) {
     let y = 0;
     try {
-      y = dspFunc(signal(i), params, state);
+      y = dspFunc(signal(i), params, state, signal(i + STEREO_SKEW));
     } catch {
-      return { rms: 0, dcOffset: 0, clippingRatio: 0, failed: true, samples: out };
+      return fail();
     }
     if (!Number.isFinite(y)) {
-      return { rms: 0, dcOffset: 0, clippingRatio: 0, failed: true, samples: out };
+      return fail();
     }
     out[i] = y;
     sumSq += y * y;
     dcSum += y;
     if (y >= 0.999 || y <= -0.999) clipCount++;
+
+    const yr = state.outR;
+    if (yr !== undefined) {
+      if (!Number.isFinite(yr)) return fail();
+      if (!outR) outR = new Float32Array(length);
+      outR[i] = yr;
+      sumSqR += yr * yr;
+      if (yr >= 0.999 || yr <= -0.999) clipCount++;
+    }
   }
 
   return {
-    rms: Math.sqrt(sumSq / length),
+    // Stereo modules are judged on both channels' energy; mono numbers are
+    // byte-identical to the pre-stereo gate.
+    rms: outR ? Math.sqrt((sumSq + sumSqR) / (2 * length)) : Math.sqrt(sumSq / length),
     dcOffset: Math.abs(dcSum / length),
-    clippingRatio: clipCount / length,
+    clippingRatio: clipCount / (outR ? 2 * length : length),
     failed: false,
     samples: out,
+    samplesR: outR,
+    stereo: outR !== null,
   };
+}
+
+/** RMS of the interchannel difference — 0 for mono/dual-mono output. */
+function interchannelDiffRms(r: RenderStats): number {
+  if (!r.samplesR) return 0;
+  let sq = 0;
+  for (let i = 0; i < r.samples.length; i++) {
+    const d = r.samples[i] - r.samplesR[i];
+    sq += d * d;
+  }
+  return Math.sqrt(sq / r.samples.length);
 }
 
 /** Parameters that are purely visual and shouldn't be audibility-tested. */
@@ -338,6 +386,13 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
       if (audible) continue; // already proven audible; keep scanning only for instability
       let diffSum = 0;
       for (let i = 0; i < len; i++) diffSum += Math.abs(a.samples[i] - b.samples[i]);
+      // Stereo-aware: a Width-style knob may change ONLY the right channel;
+      // count its delta too (a missing side falls back to that render's left).
+      if (a.samplesR || b.samplesR) {
+        const ar = a.samplesR || a.samples;
+        const br = b.samplesR || b.samples;
+        for (let i = 0; i < len; i++) diffSum += Math.abs(ar[i] - br[i]);
+      }
       if (diffSum / len >= AUDIBLE_THRESHOLD || Math.abs(a.rms - b.rms) >= AUDIBLE_THRESHOLD) {
         audible = true;
       }
@@ -389,6 +444,8 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
     audibleParams,
     unstableParams,
     silentOnSignals,
+    stereoOutput: main.stereo,
+    stereoWidthRms: interchannelDiffRms(main),
     evidence: [...problems, ...weaknesses].join("; "),
   };
 }
@@ -410,6 +467,7 @@ const BRIGHT_PARAM = /^(cutoff|tone|treble|presence|bright|brightness|air|open)$
 const TAIL_PARAM = /^(feedback|decay|size|room|length|sustain)$/i;
 const DRIVE_PARAM = /^(drive|dist|distortion|saturation|fuzz|gain)$/i;
 const MIX_PARAM = /^(mix|blend|drywet|dry_wet|wet)$/i;
+const WIDTH_PARAM = /^(width|spread|stereo_width|stereowidth|separation)$/i;
 
 export interface SemanticCheck {
   param: string;
@@ -507,6 +565,17 @@ export function verifyParamSemantics(
       const b = harmonicShare(hi.samples);
       const ok = !(b < a * 0.8 && a - b > 0.01);
       checks.push({ param: p.id, property: "harmonics", detail: `2nd+3rd harmonic ratio ${a.toFixed(4)} at min -> ${b.toFixed(4)} at max`, ok });
+    } else if (WIDTH_PARAM.test(p.id)) {
+      // Opening a Width/Spread knob must not NARROW the stereo image. Only
+      // meaningful when the module actually produces a right channel; the
+      // render feed is already the decorrelated stereo pair.
+      const lo = render(p.id, p.min, CROSS_SIGNAL_WINDOW, PRIMARY_SIGNAL.at);
+      const hi = render(p.id, p.max, CROSS_SIGNAL_WINDOW, PRIMARY_SIGNAL.at);
+      if (lo.failed || hi.failed || (!lo.stereo && !hi.stereo)) continue;
+      const a = interchannelDiffRms(lo);
+      const b = interchannelDiffRms(hi);
+      const ok = !(b < a * 0.5 && a > 1e-4);
+      checks.push({ param: p.id, property: "stereo-width", detail: `interchannel difference RMS ${a.toFixed(5)} at min -> ${b.toFixed(5)} at max`, ok });
     } else if (MIX_PARAM.test(p.id)) {
       // Raising Mix must move the output AWAY from the dry signal, not toward it.
       const lo = render(p.id, p.min, CROSS_SIGNAL_WINDOW, PRIMARY_SIGNAL.at);
@@ -800,19 +869,21 @@ export function measureTruePeak(dspFunction: string, parameters: PluginParameter
   if (!dspFunc) return -Infinity;
   const wet = renderPass(dspFunc, defaultParamsMap(parameters), 22050);
   if (wet.failed) return -Infinity;
-  const s = wet.samples;
   let peak = 0;
-  for (let i = 1; i < s.length - 2; i++) {
-    const p0 = s[i - 1], p1 = s[i], p2 = s[i + 1], p3 = s[i + 2];
-    const a1 = Math.abs(p1);
-    if (a1 > peak) peak = a1;
-    for (let k = 1; k < 4; k++) {
-      const t = k / 4;
-      const v =
-        0.5 *
-        (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t);
-      const av = Math.abs(v);
-      if (av > peak) peak = av;
+  const channels = wet.samplesR ? [wet.samples, wet.samplesR] : [wet.samples];
+  for (const s of channels) {
+    for (let i = 1; i < s.length - 2; i++) {
+      const p0 = s[i - 1], p1 = s[i], p2 = s[i + 1], p3 = s[i + 2];
+      const a1 = Math.abs(p1);
+      if (a1 > peak) peak = a1;
+      for (let k = 1; k < 4; k++) {
+        const t = k / 4;
+        const v =
+          0.5 *
+          (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t);
+        const av = Math.abs(v);
+        if (av > peak) peak = av;
+      }
     }
   }
   return peak <= 1e-9 ? -Infinity : 20 * Math.log10(peak);
@@ -1271,6 +1342,12 @@ export function runQualityGate(
     }
   }
 
+  if (m.stereoOutput) {
+    notes.push(
+      `Stereo output verified: distinct left/right channels (interchannel difference RMS ${(m.stereoWidthRms ?? 0).toFixed(4)} on program material). Native VST3 export currently renders the left/mono path.`
+    );
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -1291,6 +1368,7 @@ export function runQualityGate(
     aliasingIndex,
     harsh,
     truePeakDb: Number.isFinite(truePeakDb) ? Math.round(truePeakDb * 100) / 100 : undefined,
+    stereoOutput: !!m.stereoOutput,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

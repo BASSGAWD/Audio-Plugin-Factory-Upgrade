@@ -839,8 +839,9 @@ export default function App() {
   const compileDsp = (codeString: string) => {
     try {
       const sanitized = sanitizeDspCode(codeString);
-      // Create a fresh clean executable function: function(inputSample, params, state) { ... }
-      const compiled = new Function("inputSample", "params", "state", sanitized);
+      // Create a fresh clean executable function: function(inputSample, params, state, inputR) { ... }
+      // (inputR is the opt-in stereo contract; mono DSP never references it)
+      const compiled = new Function("inputSample", "params", "state", "inputR", sanitized);
       compiledFunctionRef.current = compiled;
       setDspError(null);
       if (workletNodeRef.current) {
@@ -874,7 +875,7 @@ export default function App() {
           // This prevents a broken/corrupt localStorage state from bricking the startup experience.
           try {
             const testSanitized = sanitizeDspCode(parsed.dspFunction);
-            new Function("inputSample", "params", "state", testSanitized);
+            new Function("inputSample", "params", "state", "inputR", testSanitized);
             setPlugin(parsed);
             setScratchCode(parsed.dspFunction);
           } catch (compileErr) {
@@ -985,9 +986,13 @@ export default function App() {
       // Anti-alias smoother state for the ScriptProcessor fallback's precision mode
       let aa1 = 0.0;
       let aa2 = 0.0;
+      let aa1R = 0.0;
+      let aa2R = 0.0;
       // One-pole DC blocker state for the ScriptProcessor fallback
       let dcX1 = 0.0;
       let dcY1 = 0.0;
+      let dcX1R = 0.0;
+      let dcY1R = 0.0;
 
       // Double-threaded dynamic DSP execution code running on background worker thread
       const workletCode = `
@@ -1040,19 +1045,23 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     this.sourceType = "synth";
     this.outputTrim = 1.0;
     this.dcBlockOn = false;
-    // One-pole DC blocker state (y = x - x1 + 0.995 * y1)
+    // One-pole DC blocker state (y = x - x1 + 0.995 * y1), per channel
     this.dcX1 = 0.0;
     this.dcY1 = 0.0;
-    // Anti-alias smoother state for precision mode
+    this.dcX1R = 0.0;
+    this.dcY1R = 0.0;
+    // Anti-alias smoother state for precision mode, per channel
     this.aa1 = 0.0;
     this.aa2 = 0.0;
+    this.aa1R = 0.0;
+    this.aa2R = 0.0;
 
     this.port.onmessage = (event) => {
       const data = event.data;
       if (data.type === "code") {
         try {
           const sanitized = sanitizeDspCode(data.code);
-          this.dspFunc = new Function("inputSample", "params", "state", sanitized);
+          this.dspFunc = new Function("inputSample", "params", "state", "inputR", sanitized);
         } catch (e) {
           this.port.postMessage({ type: "error", message: "Compile error in Worklet: " + e.message });
         }
@@ -1073,51 +1082,73 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
         this.timeIndex = 0;
         this.aa1 = 0.0;
         this.aa2 = 0.0;
+        this.aa1R = 0.0;
+        this.aa2R = 0.0;
         this.dcX1 = 0.0;
         this.dcY1 = 0.0;
+        this.dcX1R = 0.0;
+        this.dcY1R = 0.0;
       }
     };
+  }
+
+  // The test source at an absolute sample index. The right channel reads the
+  // same program 97 samples (~2.2 ms) ahead -- a decorrelated but musically
+  // identical feed, matching the quality gate's stereo measurement pair, so
+  // mid-side and width processing have real side content to work on. Mono
+  // DSP ignores the second channel entirely and stays dual-mono.
+  sourceAt(index) {
+    const t = index / 44100;
+    if (this.sourceType === "sine") {
+      return Math.sin(2 * Math.PI * 440 * t) * 0.35;
+    } else if (this.sourceType === "noise") {
+      // Deterministic hash noise so the L/R skew decorrelates properly
+      let h = (index * 374761393 + 668265263) | 0;
+      h = Math.imul(h ^ (h >>> 13), 1274126177);
+      return ((h ^ (h >>> 16)) / 2147483648) * 0.15;
+    }
+    const bar = Math.floor(t * 3.5);
+    const notes = [220, 261.63, 329.63, 392, 440, 523.25, 659.25, 783.99];
+    const rootFreq = notes[bar % notes.length];
+    const vibrato = 1.0 + Math.sin(2 * Math.PI * 5 * t) * 0.008;
+    const baseOsc = Math.sin(2 * Math.PI * rootFreq * vibrato * t);
+    const subOsc = Math.sin(2 * Math.PI * (rootFreq * 0.5) * t) * 0.45;
+    const chorusOsc = Math.sin(2 * Math.PI * (rootFreq * 1.01) * t) * 0.25;
+    return (baseOsc + subOsc + chorusOsc) * 0.18;
   }
 
   process(inputs, outputs, parameters) {
     const output = outputs[0];
     const outputChannel = output[0];
     if (!outputChannel) return true;
+    const outputRight = output.length > 1 ? output[1] : null;
     const len = outputChannel.length;
 
     for (let i = 0; i < len; i++) {
-      let originalSrc = 0.0;
-      const t = this.timeIndex / 44100;
+      const srcL = this.sourceAt(this.timeIndex);
+      const srcR = this.sourceAt(this.timeIndex + 97);
       this.timeIndex++;
 
-      if (this.sourceType === "sine") {
-        originalSrc = Math.sin(2 * Math.PI * 440 * t) * 0.35;
-      } else if (this.sourceType === "noise") {
-        originalSrc = (Math.random() * 2 - 1) * 0.15;
-      } else {
-        const bar = Math.floor(t * 3.5); 
-        const notes = [220, 261.63, 329.63, 392, 440, 523.25, 659.25, 783.99]; 
-        const rootFreq = notes[bar % notes.length];
-        const vibrato = 1.0 + Math.sin(2 * Math.PI * 5 * t) * 0.008;
-
-        const baseOsc = Math.sin(2 * Math.PI * rootFreq * vibrato * t);
-        const subOsc = Math.sin(2 * Math.PI * (rootFreq * 0.5) * t) * 0.45; 
-        const chorusOsc = Math.sin(2 * Math.PI * (rootFreq * 1.01) * t) * 0.25; 
-
-        originalSrc = (baseOsc + subOsc + chorusOsc) * 0.18;
-      }
-
       if (this.bypass) {
-        outputChannel[i] = originalSrc;
+        outputChannel[i] = srcL;
+        if (outputRight) outputRight[i] = srcR;
       } else if (this.dspFunc) {
         try {
-          let res = (this.dspFunc(originalSrc, this.params, this.dspState) || 0) * this.outputTrim;
+          let resL = (this.dspFunc(srcL, this.params, this.dspState, srcR) || 0) * this.outputTrim;
+          // Opt-in stereo contract: a stereo DSP writes its right channel to
+          // state.outR each sample; mono DSP never touches it -> dual-mono.
+          const rawR = this.dspState.outR;
+          let resR = rawR !== undefined && isFinite(rawR) ? rawR * this.outputTrim : resL;
 
           if (this.dcBlockOn) {
-            const blocked = res - this.dcX1 + 0.995 * this.dcY1;
-            this.dcX1 = res;
-            this.dcY1 = blocked;
-            res = blocked;
+            const blockedL = resL - this.dcX1 + 0.995 * this.dcY1;
+            this.dcX1 = resL;
+            this.dcY1 = blockedL;
+            resL = blockedL;
+            const blockedR = resR - this.dcX1R + 0.995 * this.dcY1R;
+            this.dcX1R = resR;
+            this.dcY1R = blockedR;
+            resR = blockedR;
           }
 
           if (this.isPrecisionOversampled) {
@@ -1125,23 +1156,29 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
             // aliasing harshness from nonlinear DSP. (The previous approach ran
             // the DSP twice per sample, which silently detuned all time-based
             // effects by advancing their state at 2x speed.)
-            this.aa1 += 0.9 * (res - this.aa1);
+            this.aa1 += 0.9 * (resL - this.aa1);
             this.aa2 += 0.9 * (this.aa1 - this.aa2);
-            res = this.aa2;
+            resL = this.aa2;
+            this.aa1R += 0.9 * (resR - this.aa1R);
+            this.aa2R += 0.9 * (this.aa1R - this.aa2R);
+            resR = this.aa2R;
           }
 
-          outputChannel[i] = Math.max(-1.0, Math.min(1.0, res));
+          outputChannel[i] = Math.max(-1.0, Math.min(1.0, resL));
+          if (outputRight) outputRight[i] = Math.max(-1.0, Math.min(1.0, resR));
         } catch (runtimeErr) {
           this.port.postMessage({ type: "error", message: "Runtime crash: " + runtimeErr.message });
           outputChannel[i] = 0;
+          if (outputRight) outputRight[i] = 0;
         }
       } else {
-        outputChannel[i] = originalSrc;
+        outputChannel[i] = srcL;
+        if (outputRight) outputRight[i] = srcR;
       }
     }
 
-    for (let channel = 1; channel < output.length; channel++) {
-      output[channel].set(outputChannel);
+    for (let channel = 2; channel < output.length; channel++) {
+      output[channel].set(output[channel % 2]);
     }
 
     return true;
@@ -1166,7 +1203,11 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
       }
 
       if (useWorklet) {
-        const workletNode = new AudioWorkletNode(activeCtx, "dynamic-dsp-processor");
+        // outputChannelCount [2]: a source-style worklet defaults to ONE
+        // output channel, which would silently fold the stereo path to mono.
+        const workletNode = new AudioWorkletNode(activeCtx, "dynamic-dsp-processor", {
+          outputChannelCount: [2],
+        });
         workletNodeRef.current = workletNode;
 
         // Populate baseline data
@@ -1187,14 +1228,34 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
 
         workletNode.connect(analyser);
       } else {
-        // Safe 100% compliant ScriptProcessor Fallback
-        const processor = activeCtx.createScriptProcessor(512, 1, 1);
+        // Safe 100% compliant ScriptProcessor Fallback (stereo out)
+        const processor = activeCtx.createScriptProcessor(512, 1, 2);
         processorNodeRef.current = processor;
 
+        // Same source math as the worklet, callable at an absolute index so
+        // the right channel can read 97 samples ahead (decorrelated pair).
+        const sourceAt = (index: number): number => {
+          const t = index / 44100;
+          if (sourceType === "sine") return Math.sin(2 * Math.PI * 440 * t) * 0.35;
+          if (sourceType === "noise") {
+            let h = (index * 374761393 + 668265263) | 0;
+            h = Math.imul(h ^ (h >>> 13), 1274126177);
+            return ((h ^ (h >>> 16)) / 2147483648) * 0.15;
+          }
+          const bar = Math.floor(t * 3.5);
+          const notes = [220, 261.63, 329.63, 392, 440, 523.25, 659.25, 783.99];
+          const rootFreq = notes[bar % notes.length];
+          const vibrato = 1.0 + Math.sin(2 * Math.PI * 5 * t) * 0.008;
+          const baseOsc = Math.sin(2 * Math.PI * rootFreq * vibrato * t);
+          const subOsc = Math.sin(2 * Math.PI * (rootFreq * 0.5) * t) * 0.45;
+          const chorusOsc = Math.sin(2 * Math.PI * (rootFreq * 1.01) * t) * 0.25;
+          return (baseOsc + subOsc + chorusOsc) * 0.18;
+        };
+
         processor.onaudioprocess = (audioEvent) => {
-          const inputData = audioEvent.inputBuffer.getChannelData(0);
           const outputData = audioEvent.outputBuffer.getChannelData(0);
-          const len = inputData.length;
+          const outputDataR = audioEvent.outputBuffer.numberOfChannels > 1 ? audioEvent.outputBuffer.getChannelData(1) : null;
+          const len = outputData.length;
 
           const currentParams = activeParamsRef.current;
           const currentState = dspStateRef.current;
@@ -1202,55 +1263,51 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           const isHighPrec = isPrecisionOversampledRef.current;
 
           for (let i = 0; i < len; i++) {
-            let originalSrc = 0.0;
-            const t = timeIndexRef.current / 44100;
+            const srcL = sourceAt(timeIndexRef.current);
+            const srcR = sourceAt(timeIndexRef.current + 97);
             timeIndexRef.current++;
 
-            if (sourceType === "sine") {
-              originalSrc = Math.sin(2 * Math.PI * 440 * t) * 0.35;
-            } else if (sourceType === "noise") {
-              originalSrc = (Math.random() * 2 - 1) * 0.15;
-            } else {
-              const bar = Math.floor(t * 3.5); 
-              const notes = [220, 261.63, 329.63, 392, 440, 523.25, 659.25, 783.99]; 
-              const rootFreq = notes[bar % notes.length];
-              const vibrato = 1.0 + Math.sin(2 * Math.PI * 5 * t) * 0.008;
-
-              const baseOsc = Math.sin(2 * Math.PI * rootFreq * vibrato * t);
-              const subOsc = Math.sin(2 * Math.PI * (rootFreq * 0.5) * t) * 0.45; 
-              const chorusOsc = Math.sin(2 * Math.PI * (rootFreq * 1.01) * t) * 0.25; 
-
-              originalSrc = (baseOsc + subOsc + chorusOsc) * 0.18;
-            }
-
             if (bypass) {
-              outputData[i] = originalSrc;
+              outputData[i] = srcL;
+              if (outputDataR) outputDataR[i] = srcR;
             } else if (dspCompiledFunc) {
               try {
-                let res = (dspCompiledFunc(originalSrc, currentParams, currentState) || 0) * outputTrimRef.current;
+                let resL = (dspCompiledFunc(srcL, currentParams, currentState, srcR) || 0) * outputTrimRef.current;
+                const rawR = (currentState as any).outR;
+                let resR = rawR !== undefined && isFinite(rawR) ? rawR * outputTrimRef.current : resL;
 
                 if (dcBlockRef.current) {
-                  const blocked = res - dcX1 + 0.995 * dcY1;
-                  dcX1 = res;
-                  dcY1 = blocked;
-                  res = blocked;
+                  const blockedL = resL - dcX1 + 0.995 * dcY1;
+                  dcX1 = resL;
+                  dcY1 = blockedL;
+                  resL = blockedL;
+                  const blockedR = resR - dcX1R + 0.995 * dcY1R;
+                  dcX1R = resR;
+                  dcY1R = blockedR;
+                  resR = blockedR;
                 }
 
                 if (isHighPrec) {
                   // Honest precision mode: gentle 2-pole anti-alias smoother
                   // (see the AudioWorklet path for rationale).
-                  aa1 += 0.9 * (res - aa1);
+                  aa1 += 0.9 * (resL - aa1);
                   aa2 += 0.9 * (aa1 - aa2);
-                  res = aa2;
+                  resL = aa2;
+                  aa1R += 0.9 * (resR - aa1R);
+                  aa2R += 0.9 * (aa1R - aa2R);
+                  resR = aa2R;
                 }
 
-                outputData[i] = Math.max(-1.0, Math.min(1.0, res));
+                outputData[i] = Math.max(-1.0, Math.min(1.0, resL));
+                if (outputDataR) outputDataR[i] = Math.max(-1.0, Math.min(1.0, resR));
               } catch (runtimeErr: any) {
                 setDspError(`Runtime Crash: ${runtimeErr.message}`);
                 outputData[i] = 0;
+                if (outputDataR) outputDataR[i] = 0;
               }
             } else {
-              outputData[i] = originalSrc;
+              outputData[i] = srcL;
+              if (outputDataR) outputDataR[i] = srcR;
             }
           }
         };

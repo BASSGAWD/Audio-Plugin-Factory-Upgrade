@@ -568,12 +568,83 @@ return Math.tanh(osc * level * 0.8);`,
     match: /mid.?side|\bm\/s\b|stereo.?(?:width|link|linking|image)/i,
     claims: [
       {
-        text: "Mid-side processing encodes L/R into sum (mid) and difference (side) channels so dynamics or EQ can treat center and width independently.",
+        text: "Mid-side processing encodes L/R into sum (mid) and difference (side) channels so dynamics or EQ can treat center and width independently; decoding is L = M+S, R = M-S.",
         citation: { title: "M/S matrixing", source: "Wikipedia: Joint (audio engineering)", url: "https://en.wikipedia.org/wiki/Joint_(audio_engineering)", authority: 75 },
       },
+      {
+        text: "Detecting on the MID channel and applying the same gain to both outputs is stereo LINKING — it prevents the image from lurching left/right when one side gets loud.",
+        citation: { title: "Stereo-linked dynamics", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed.", authority: 90 },
+      },
     ],
-    blocked:
-      "The DSP engine is strictly mono (one inputSample in, one sample out) — there is no second channel to matrix against. Prerequisite: a stereo engine (dual-channel processing path in audioEngine + gate).",
+    proposedModule: {
+      family: "dynamics",
+      title: "Mid-side glue compressor (mid-detected linked gain, width control on the side channel)",
+      parameters: [
+        { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -24, unit: "dB" },
+        { id: "ratio", name: "Ratio", min: 1, max: 12, defaultValue: 3, unit: ":1" },
+        { id: "width", name: "Width", min: 0, max: 2, defaultValue: 1.2, unit: "x" },
+        { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      ],
+      body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -24;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 3);
+let width = params.width !== undefined ? params.width : 1.2;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let inR = inputR !== undefined ? inputR : inputSample;
+let mid = (inputSample + inR) * 0.5;
+let side = (inputSample - inR) * 0.5;
+let x = Math.abs(mid);
+state.env += (x > state.env ? 0.004 : 0.0005) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let grDb = overDb > 0 ? overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (-grDb + makeup) / 20);
+let m2 = mid * g;
+let s2 = side * width * g;
+state.outR = Math.tanh(m2 - s2);
+return Math.tanh(m2 + s2);`,
+    },
+  },
+  /* ================================================================ */
+  {
+    concept: "ping-pong",
+    area: "Delays",
+    match: /ping.?pong|bouncing\s*(?:delay|echo)|stereo\s*(?:delay|echo)|alternat\w*\s*(?:delay|echo)/i,
+    claims: [
+      {
+        text: "A ping-pong delay cross-feeds two delay lines: the input enters the left line, the left tap regenerates into the right line and the right back into the left, so each repeat alternates sides.",
+        citation: { title: "Cross-coupled delay networks", ...JOS_PASP },
+      },
+    ],
+    proposedModule: {
+      family: "delay",
+      title: "Ping-pong delay (cross-fed L/R lines, alternating repeats, width control)",
+      parameters: [
+        { id: "time", name: "Time", min: 50, max: 1200, defaultValue: 350, unit: "ms" },
+        { id: "feedback", name: "Feedback", min: 0, max: 0.9, defaultValue: 0.45, unit: "ratio" },
+        { id: "width", name: "Width", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+        { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+      ],
+      body: `if (!state.init) { state.bufL = new Float32Array(96000); state.bufR = new Float32Array(96000); state.p = 0; state.init = true; }
+let time = params.time !== undefined ? params.time : 350;
+let fb = Math.min(0.9, params.feedback !== undefined ? params.feedback : 0.45);
+let width = params.width !== undefined ? params.width : 1;
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let inR = inputR !== undefined ? inputR : inputSample;
+let x = (inputSample + inR) * 0.5;
+let d = Math.max(1, Math.min(52900, Math.floor(time * 44.1)));
+let read = (state.p - d + 96000) % 96000;
+let wetL = state.bufL[read];
+let wetR = state.bufR[read];
+state.bufL[state.p] = x + wetR * fb;
+state.bufR[state.p] = wetL * fb;
+state.p = (state.p + 1) % 96000;
+let ms = (wetL + wetR) * 0.5;
+let wl = ms + (wetL - ms) * width;
+let wr = ms + (wetR - ms) * width;
+state.outR = Math.tanh(inR * (1 - mix) + wr * mix * 1.3);
+return Math.tanh(inputSample * (1 - mix) + wl * mix * 1.3);`,
+    },
   },
   {
     concept: "spectral-processing",

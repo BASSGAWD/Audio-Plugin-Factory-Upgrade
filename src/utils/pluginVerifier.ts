@@ -35,7 +35,7 @@ export function checkDsp(dspFunction: string, parameters: PluginParameter[]): Ch
   // 1. Compile check
   try {
     const sanitized = sanitizeDspCode(dspFunction);
-    new Function("inputSample", "params", "state", sanitized);
+    new Function("inputSample", "params", "state", "inputR", sanitized);
   } catch (err: any) {
     return { ok: false, evidence: `JavaScript syntax error: ${err.message}` };
   }

@@ -37,6 +37,7 @@ const TEST_FILES = [
   "topologyTest.ts",
   "knowledgeAuditTest.ts",
   "researchEngineTest.ts",
+  "stereoEngineTest.ts",
 ];
 
 let failed = 0;

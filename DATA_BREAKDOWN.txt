@@ -122,6 +122,19 @@ prompt map to visual themes (colors, glow styles, fonts, faceplate patterns).
 The generative faceplate artwork is seeded from the plugin's own name, so every
 plugin gets a unique look that stays stable across reloads.
 
+1.4b THE STEREO ENGINE  (src/App.tsx audio worklet + qualityGate.ts)
+--------------------------------------------------------------------
+The audio engine is now genuinely stereo, but OPT-IN so nothing old breaks.
+A DSP body still receives one input and returns one sample (the left/mono
+output) — mono effects are byte-for-byte identical to before. A STEREO
+effect additionally reads a right-channel input (inputR) and writes its
+right output to state.outR each sample; the engine and the quality gate both
+feed a decorrelated L/R pair (~2.2 ms skew) and render both channels. This
+is what makes true stereo effects possible: ping-pong delay, mid-side
+compression, width/spread controls. The gate detects real stereo output
+(vs. dual-mono), measures the interchannel difference, and enforces a new
+honesty rule — opening a "Width" knob must not NARROW the image.
+
 1.5  THE QUALITY GATE'S TEST-SIGNAL BANK  (src/utils/qualityGate.ts)
 --------------------------------------------------------------------
 Every build is auditioned — mathematically, in milliseconds — against a bank of
@@ -133,8 +146,9 @@ noise, and a clean tone. The gate measures and FIXES:
   • knobs that break at extremes      • aliasing "digital fizz" harshness
     (ranges auto-calibrated)          • per-knob HONESTY: a "Cutoff" must
   • cross-signal dead spots             brighten as it opens, "Feedback" must
-                                        lengthen the tail, "Drive" must add
-                                        harmonics, "Mix" must move dry->wet
+  • inter-sample TRUE PEAK (dBTP)       lengthen the tail, "Drive" must add
+  • genuine stereo vs. dual-mono        harmonics, "Mix" moves dry->wet, a
+                                        "Width" knob must not narrow the image
 
 A build only ships when all four headline scores (looks, performance, latency,
 musicality) are at or above 97/100.
@@ -226,5 +240,5 @@ PART 4 — OPTIONAL OUTSIDE CONNECTIONS (all off by default, none required)
 
 ================================================================================
 Updated 2026-07-16 from the current codebase. Everything above is enforced
-by the 20-suite regression test pack (npm test). Audit dashboard: npm run audit.
+by the 21-suite regression test pack (npm test). Audit dashboard: npm run audit.
 ================================================================================

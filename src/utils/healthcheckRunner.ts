@@ -68,10 +68,10 @@ export function runPluginDiagnostics(plugin: AudioPlugin): DiagnosticsReport {
   const sampleRate = 44100;
   
   // Dynamic JavaScript function compilation
-  let dspFunc: (inputSample: number, params: Record<string, number>, state: any) => number;
+  let dspFunc: (inputSample: number, params: Record<string, number>, state: any, inputR?: number) => number;
   try {
     const sanitized = sanitizeDspCode(plugin.dspFunction);
-    dspFunc = new Function("inputSample", "params", "state", sanitized) as any;
+    dspFunc = new Function("inputSample", "params", "state", "inputR", sanitized) as any;
   } catch (err: any) {
     return {
       timestamp: new Date().toLocaleTimeString(),

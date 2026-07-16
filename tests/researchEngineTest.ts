@@ -120,11 +120,16 @@ const mem = new Map<string, string>();
   check("internal sidechain (de-esser) IS approvable", isApprovable(deEss) && deEss.proposedModule?.verification.passes === true);
 
   /* ---- blocked concepts: the constraint is the finding ---- */
+  const convolution = await runResearch("convolution");
+  check("convolution research reports the block-processing constraint", convolution.conflicts.some((c) => c.severity === "blocking" && /impulse|convolution|block/i.test(c.text)));
+  check("convolution carries NO proposed module", !convolution.proposedModule);
+  check("convolution cannot be approved", !isApprovable(convolution) && approveResearch(convolution.id) === null);
+  check("blocked approval attempt left status pending", readResearchQueue().find((i) => i.id === convolution.id)?.status === "pending");
+
+  /* ---- formerly blocked: the stereo engine un-blocked mid-side ---- */
   const midSide = await runResearch("mid-side");
-  check("mid-side research reports the mono-engine constraint", midSide.conflicts.some((c) => c.severity === "blocking" && /mono/i.test(c.text)));
-  check("mid-side carries NO proposed module", !midSide.proposedModule);
-  check("mid-side cannot be approved", !isApprovable(midSide) && approveResearch(midSide.id) === null);
-  check("blocked approval attempt left status pending", readResearchQueue().find((i) => i.id === midSide.id)?.status === "pending");
+  check("mid-side is no longer blocked (stereo engine landed)", !midSide.conflicts.some((c) => c.severity === "blocking"));
+  check("mid-side module was gate-verified stereo", midSide.proposedModule?.verification.passes === true);
 
   /* ---- unknown concept with no model: honest empty result ---- */
   const unknown = await runResearch("quantum yodel translation");

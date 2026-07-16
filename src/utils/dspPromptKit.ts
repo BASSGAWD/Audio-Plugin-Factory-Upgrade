@@ -15,8 +15,13 @@
  * missing state init, unclamped output.
  */
 export const DSP_CODING_RULES = `DSP FUNCTION CONTRACT -- the "dspFunction" string is the BODY of:
-  function(inputSample, params, state) { ...; return outputSample; }
-It runs once per audio sample at 44100 Hz in a real-time loop. Hard rules:
+  function(inputSample, params, state, inputR) { ...; return outputSample; }
+It runs once per audio sample at 44100 Hz in a real-time loop.
+STEREO (opt-in): for mono effects, ignore inputR entirely and just return the sample.
+For genuinely stereo effects (ping-pong, mid-side, width), read the right input as
+  let inR = inputR !== undefined ? inputR : inputSample;
+write the right output to state.outR EVERY sample, and return the left output.
+Never set state.outR from a mono effect. Hard rules:
 1. Initialize ALL persistent state exactly once:
    if (!state.init) { state.buf = new Float32Array(44100); state.ptr = 0; state.y1 = 0; state.init = true; }
    NEVER allocate arrays/objects outside that init guard -- per-sample allocation stutters audio.

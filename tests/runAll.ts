@@ -34,6 +34,8 @@ const TEST_FILES = [
   "oneShotQualityTest.ts",
   "editPassTest.ts",
   "canvasFactoryTest.ts",
+  "topologyTest.ts",
+  "knowledgeAuditTest.ts",
 ];
 
 let failed = 0;

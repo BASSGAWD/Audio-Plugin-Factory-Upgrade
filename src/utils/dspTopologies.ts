@@ -1,0 +1,357 @@
+/**
+ * Topology bank: the engineering CHOICES within a plugin family.
+ *
+ * The golden recipe bank answers "what is a compressor"; this bank answers
+ * "which compressor" -- feed-forward RMS for glue, peak-detector for drums,
+ * feedback with color for vocals, lookahead soft-knee for mastering. Each
+ * family's DEFAULT topology is its golden recipe, so a prompt with no
+ * requirements builds exactly what it always built; the alternates only win
+ * when the requirements (src/utils/requirements.ts) point at them, and they
+ * additionally compete as best-of-N seeds under the same strictly-higher
+ * refinement rule as everything else.
+ *
+ * Contract for every body (same as dspRecipes):
+ *   - the string is the BODY of function(inputSample, params, state)
+ *   - exactly ONE return statement (chainStage/composers block-wrap bodies)
+ *   - guard every log/division, clamp every feedback below 1
+ *   - nonlinearities use the 2x midpoint-average oversampling idiom
+ *   - every parameter audibly works min->max and honors its name's semantics
+ *     (the gate measures both; a topology that fails does not ship)
+ */
+
+import { DSP_RECIPES, DspRecipe } from "./dspRecipes";
+import { PluginFamily } from "./pluginSpec";
+import { CharacterGoal, SourceMaterial } from "./requirements";
+
+export interface TopologyTags {
+  /** Structural name, e.g. "feed-forward-rms", "fdn-plate". */
+  topology: string;
+  /** Character goals this design serves ("any" never appears here). */
+  character: CharacterGoal[];
+  /** Source material this design suits. */
+  sources: SourceMaterial[];
+  /** "lookahead" designs are excluded when the latency budget is live. */
+  latency: "zero" | "lookahead";
+  cpu: "light" | "medium";
+}
+
+export interface DspTopology {
+  id: string;
+  family: PluginFamily;
+  title: string;
+  /** The one-sentence engineering rationale, shown to the user. */
+  rationale: string;
+  parameters: DspRecipe["parameters"];
+  body: string;
+  tags: TopologyTags;
+  /** The family's golden-recipe default; wins whenever requirements are neutral. */
+  isDefault?: boolean;
+}
+
+const golden = (id: string): DspRecipe => {
+  const r = DSP_RECIPES.find((x) => x.id === id);
+  if (!r) throw new Error(`Golden recipe "${id}" missing from DSP_RECIPES`);
+  return r;
+};
+
+export const DSP_TOPOLOGIES: DspTopology[] = [
+  /* ================================================================ */
+  /* DYNAMICS: four compressor designs                                 */
+  /* ================================================================ */
+  {
+    id: "comp_ff_rms",
+    family: "dynamics",
+    title: golden("dynamics").title,
+    rationale: "the proven general-purpose design — feed-forward dB-domain envelope, musical on anything",
+    parameters: golden("dynamics").parameters,
+    body: golden("dynamics").body,
+    tags: { topology: "feed-forward-rms", character: ["transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "comp_peak_punch",
+    family: "dynamics",
+    title: "Peak-detector punch compressor (fast instant-peak envelope, user attack, quick release)",
+    rationale: "drums want a peak detector and a real Attack knob — slow the attack to let transients crack through, then clamp the body",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -20, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 6, unit: ":1" },
+      { id: "attack", name: "Attack", min: 0.05, max: 30, defaultValue: 1, unit: "ms" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -20;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 6);
+let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 1);
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let x = Math.abs(inputSample);
+let aC = 1 - Math.exp(-1 / (attack * 44.1));
+let rC = 0.0015;
+state.env += (x > state.env ? aC : rC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (gainDb + makeup) / 20);
+return Math.tanh(inputSample * g);`,
+    tags: { topology: "feed-forward-peak", character: ["aggressive"], sources: ["drums"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_feedback_glue",
+    family: "dynamics",
+    title: "Feedback-topology glue compressor (detector listens to the OUTPUT, gentle warmth stage)",
+    rationale: "the vintage trick — detecting the already-compressed output self-smooths the gain curve, and a touch of tanh warmth flatters vocals and busses",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -26, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 12, defaultValue: 3, unit: ":1" },
+      { id: "warmth", name: "Warmth", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.prevOut = 0; state.prevIn = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -26;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 3);
+let warmth = params.warmth !== undefined ? params.warmth : 0.35;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let x = Math.abs(state.prevOut);
+let coeff = x > state.env ? 0.0015 : 0.0003;
+state.env += coeff * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (gainDb + makeup) / 20);
+let hot = 1 + warmth * 4;
+let norm = 1 + warmth * 2.2;
+let lin = inputSample * g;
+let mid = 0.5 * (state.prevIn + inputSample) * g;
+let out = 0.5 * (Math.tanh(mid * hot) + Math.tanh(lin * hot)) / norm;
+state.prevIn = inputSample;
+state.prevOut = out;
+return out;`,
+    tags: { topology: "feedback-colored", character: ["colored"], sources: ["vocals", "mix_bus", "guitar", "bass"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_lookahead_master",
+    family: "dynamics",
+    title: "Lookahead soft-knee mastering compressor (1.5 ms lookahead, 6 dB knee, gentle ratios)",
+    rationale: "mastering can spend latency — the detector reads the input 64 samples before the audio path plays it, so transients are caught without a hard knee's distortion",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -18, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 8, defaultValue: 2.5, unit: ":1" },
+      { id: "makeup", name: "Makeup", min: 0, max: 12, defaultValue: 2, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(64); state.p = 0; state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -18;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 2.5);
+let makeup = params.makeup !== undefined ? params.makeup : 2;
+let x = Math.abs(inputSample);
+state.env += (x > state.env ? 0.004 : 0.0004) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let knee = 6;
+let red = 0;
+if (overDb >= knee / 2) red = overDb * (1 - 1 / ratio);
+else if (overDb > -knee / 2) red = ((overDb + knee / 2) * (overDb + knee / 2)) / (2 * knee) * (1 - 1 / ratio);
+let g = Math.pow(10, (-red + makeup) / 20);
+let delayed = state.buf[state.p];
+state.buf[state.p] = inputSample;
+state.p = (state.p + 1) % 64;
+return Math.tanh(delayed * g);`,
+    tags: { topology: "lookahead-soft-knee", character: ["transparent"], sources: ["master", "mix_bus"], latency: "lookahead", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* REVERB: three room designs                                        */
+  /* ================================================================ */
+  {
+    id: "reverb_schroeder",
+    family: "reverb",
+    title: golden("reverb").title,
+    rationale: "the proven general-purpose hall — parallel prime combs with in-loop damping",
+    parameters: golden("reverb").parameters,
+    body: golden("reverb").body,
+    tags: { topology: "schroeder-hall", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "reverb_fdn_plate",
+    family: "reverb",
+    title: "4x4 FDN plate (Hadamard feedback matrix, short mutually-prime lines, bright damping)",
+    rationale: "vocals want a plate — a feedback-delay-network's cross-mixed short lines go dense immediately instead of echoing like a hall",
+    parameters: [
+      { id: "decay", name: "Decay", min: 0, max: 0.95, defaultValue: 0.8, unit: "ratio" },
+      { id: "damp", name: "Damping", min: 0, max: 0.9, defaultValue: 0.25, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.3, unit: "ratio" },
+    ],
+    body: `if (!state.init) {
+  state.b0 = new Float32Array(443); state.b1 = new Float32Array(557);
+  state.b2 = new Float32Array(683); state.b3 = new Float32Array(811);
+  state.i0 = 0; state.i1 = 0; state.i2 = 0; state.i3 = 0;
+  state.d0 = 0; state.d1 = 0; state.d2 = 0; state.d3 = 0;
+  state.init = true;
+}
+let decay = params.decay !== undefined ? params.decay : 0.8;
+let damp = params.damp !== undefined ? params.damp : 0.25;
+let mix = params.mix !== undefined ? params.mix : 0.3;
+let hf = 1 - damp * 0.75;
+let y0 = state.b0[state.i0]; state.d0 += hf * (y0 - state.d0); y0 = state.d0;
+let y1 = state.b1[state.i1]; state.d1 += hf * (y1 - state.d1); y1 = state.d1;
+let y2 = state.b2[state.i2]; state.d2 += hf * (y2 - state.d2); y2 = state.d2;
+let y3 = state.b3[state.i3]; state.d3 += hf * (y3 - state.d3); y3 = state.d3;
+let fb = decay * 0.62;
+let m0 = (y0 + y1 + y2 + y3) * 0.5;
+let m1 = (y0 - y1 + y2 - y3) * 0.5;
+let m2 = (y0 + y1 - y2 - y3) * 0.5;
+let m3 = (y0 - y1 - y2 + y3) * 0.5;
+state.b0[state.i0] = inputSample + m0 * fb; state.i0 = (state.i0 + 1) % 443;
+state.b1[state.i1] = inputSample * 0.8 + m1 * fb; state.i1 = (state.i1 + 1) % 557;
+state.b2[state.i2] = inputSample * 0.6 + m2 * fb; state.i2 = (state.i2 + 1) % 683;
+state.b3[state.i3] = inputSample * 0.4 + m3 * fb; state.i3 = (state.i3 + 1) % 811;
+let wet = (y0 + y1 + y2 + y3) * 0.3;
+return Math.tanh(inputSample * (1 - mix) + wet * mix * 1.5);`,
+    tags: { topology: "fdn-plate", character: ["colored", "transparent"], sources: ["vocals", "synth"], latency: "zero", cpu: "medium" },
+  },
+  {
+    id: "reverb_room_er",
+    family: "reverb",
+    title: "Early-reflection room (4 spread taps + damped regeneration, sized by one knob)",
+    rationale: "drums and live sources want a tight ROOM, not a hall — discrete early reflections keep transients readable while Size grows the space",
+    parameters: [
+      { id: "size", name: "Size", min: 0, max: 0.95, defaultValue: 0.5, unit: "ratio" },
+      { id: "damp", name: "Damping", min: 0, max: 0.9, defaultValue: 0.35, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.3, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(8820); state.p = 0; state.d = 0; state.dw = 0; state.init = true; }
+let size = params.size !== undefined ? params.size : 0.5;
+let damp = params.damp !== undefined ? params.damp : 0.35;
+let mix = params.mix !== undefined ? params.mix : 0.3;
+let base = 260 + size * 5800;
+let t1 = Math.max(1, Math.floor(base * 0.31));
+let t2 = Math.max(2, Math.floor(base * 0.53));
+let t3 = Math.max(3, Math.floor(base * 0.79));
+let t4 = Math.max(4, Math.floor(base));
+let s1 = state.buf[(state.p - t1 + 8820) % 8820];
+let s2 = state.buf[(state.p - t2 + 8820) % 8820];
+let s3 = state.buf[(state.p - t3 + 8820) % 8820];
+let s4 = state.buf[(state.p - t4 + 8820) % 8820];
+let wet = s1 * 0.32 + s2 * 0.27 + s3 * 0.23 + s4 * 0.28;
+let hf = 1 - damp * 0.8;
+state.d += hf * (s4 - state.d);
+let regen = 0.22 + size * 0.6;
+state.buf[state.p] = inputSample + state.d * regen;
+state.p = (state.p + 1) % 8820;
+state.dw += hf * (wet - state.dw);
+wet = state.dw;
+return Math.tanh(inputSample * (1 - mix) + wet * mix * 1.1);`,
+    tags: { topology: "early-reflection-room", character: ["transparent"], sources: ["drums", "guitar"], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* DELAY: two echo designs                                           */
+  /* ================================================================ */
+  {
+    id: "delay_tape",
+    family: "delay",
+    title: golden("delay").title,
+    rationale: "the proven default — repeats darken as they regenerate, like tape",
+    parameters: golden("delay").parameters,
+    body: golden("delay").body,
+    tags: { topology: "tape-damped-loop", character: ["colored", "lofi"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "delay_digital",
+    family: "delay",
+    title: "Pristine digital delay (undamped loop — every repeat is an exact copy)",
+    rationale: "transparent material wants repeats that stay full-bandwidth instead of darkening — no lowpass in the regeneration loop",
+    parameters: [
+      { id: "time", name: "Time", min: 20, max: 1500, defaultValue: 350, unit: "ms" },
+      { id: "feedback", name: "Feedback", min: 0, max: 0.9, defaultValue: 0.4, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(96000); state.ptr = 0; state.init = true; }
+let time = params.time !== undefined ? params.time : 350;
+let fb = Math.min(0.9, params.feedback !== undefined ? params.feedback : 0.4);
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let d = Math.max(1, Math.min(95999, Math.floor(time * 44.1)));
+let read = (state.ptr - d + 96000) % 96000;
+let wet = state.buf[read];
+state.buf[state.ptr] = inputSample + wet * fb;
+state.ptr = (state.ptr + 1) % 96000;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "digital-clean-loop", character: ["transparent"], sources: ["vocals", "synth", "master"], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* DISTORTION: three drive designs                                   */
+  /* ================================================================ */
+  {
+    id: "dist_softclip",
+    family: "distortion",
+    title: golden("distortion").title,
+    rationale: "the proven default — symmetric soft clip with gain compensation and a tone filter",
+    parameters: golden("distortion").parameters,
+    body: golden("distortion").body,
+    tags: { topology: "softclip-symmetric", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "dist_tube_asym",
+    family: "distortion",
+    title: "Asymmetric tube stage (biased tanh — even harmonics, DC-compensated, 2x oversampled)",
+    rationale: "warmth lives in EVEN harmonics — a biased transfer curve clips the two half-waves differently, like a single-ended tube stage",
+    parameters: [
+      { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 8, unit: "dB" },
+      { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4200, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.prevIn = 0; state.init = true; }
+let drive = params.drive !== undefined ? params.drive : 8;
+let tone = params.tone !== undefined ? params.tone : 4200;
+let mix = params.mix !== undefined ? params.mix : 1;
+state.smDrive += 0.002 * (drive - state.smDrive);
+let g = Math.pow(10, state.smDrive / 20);
+let bias = 0.22;
+let biasRest = Math.tanh(bias);
+let midIn = 0.5 * (state.prevIn + inputSample);
+let shapedMid = Math.tanh(midIn * g + bias) - biasRest;
+let shapedCur = Math.tanh(inputSample * g + bias) - biasRest;
+let wet = 0.5 * (shapedMid + shapedCur) / Math.pow(g, 0.65);
+state.prevIn = inputSample;
+let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+state.lp += a * (wet - state.lp);
+wet = state.lp;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "asymmetric-tube", character: ["colored"], sources: ["guitar", "bass", "vocals"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "dist_fuzz",
+    family: "distortion",
+    title: "Hard fuzz (softsign fold-back curve, heavy compensation, fizz-taming tone filter)",
+    rationale: "aggression wants a flatter-topped curve than tanh — softsign squashes into a near-square while the 2x oversampling and tone filter keep the fizz out of the gate's red zone",
+    parameters: [
+      { id: "drive", name: "Drive", min: 0, max: 36, defaultValue: 14, unit: "dB" },
+      { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 3600, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 14; state.prevIn = 0; state.init = true; }
+let drive = params.drive !== undefined ? params.drive : 14;
+let tone = params.tone !== undefined ? params.tone : 3600;
+let mix = params.mix !== undefined ? params.mix : 1;
+state.smDrive += 0.002 * (drive - state.smDrive);
+let g = Math.pow(10, state.smDrive / 20);
+let midIn = 0.5 * (state.prevIn + inputSample) * g;
+let curIn = inputSample * g;
+let shapedMid = midIn / (1 + Math.abs(midIn));
+let shapedCur = curIn / (1 + Math.abs(curIn));
+let wet = 0.5 * (shapedMid + shapedCur) / Math.pow(g, 0.7);
+state.prevIn = inputSample;
+let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+state.lp += a * (wet - state.lp);
+wet = state.lp;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "softsign-fuzz", character: ["aggressive", "lofi"], sources: ["guitar", "drums", "synth"], latency: "zero", cpu: "light" },
+  },
+];
+
+export function topologiesForFamily(family: PluginFamily): DspTopology[] {
+  return DSP_TOPOLOGIES.filter((t) => t.family === family);
+}

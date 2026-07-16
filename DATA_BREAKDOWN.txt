@@ -53,6 +53,42 @@ Ten small, verified building blocks. When your prompt is something novel
 Keywords in your prompt "vote" for stages (e.g. "underwater" votes for the
 wobble filter and tone lowpass; "dream" votes for the echo and pitch grains).
 
+1.2b THE TOPOLOGY BANK  (src/utils/dspTopologies.ts)
+-----------------------------------------------------
+The engineering CHOICES within a family — 12 gate-verified designs. "Make a
+compressor" is not a spec: compressing a vocal, gluing a mix bus, smashing a
+drum room, and mastering are four different designs. The factory now has:
+
+  COMPRESSORS: feed-forward RMS (default) / peak-detector punch (drums) /
+               feedback+warmth glue (vintage, vocals) / lookahead soft-knee
+               (mastering — excluded automatically on a live latency budget)
+  REVERBS:     Schroeder hall (default) / FDN plate (vocals) /
+               early-reflection room (drums, live)
+  DELAYS:      tape (default, repeats darken) / pristine digital (transparent)
+  DISTORTION:  soft-clip (default) / asymmetric tube (even harmonics, warm) /
+               hard fuzz (aggressive)
+
+1.2c THE REQUIREMENTS ENGINEER  (src/utils/requirements.ts)
+-----------------------------------------------------------
+Before choosing a topology, the factory reads the engineering requirements
+out of your wording: SOURCE MATERIAL (vocals/drums/bass/master...), CHARACTER
+(transparent/colored/aggressive/lo-fi), LATENCY BUDGET (live excludes
+lookahead designs). Every inference records its evidence ("chosen because
+you said 'live'") and is shown in the build summary. Neutral prompts build
+the proven default — behavior only changes when your words ask for it.
+Runner-up designs still enter the best-of-N pool, so the blind measurement
+gets the final word over the heuristic.
+
+1.2d THE KNOWLEDGE GRAPH + AUDITOR  (src/utils/knowledgeGraph.ts, knowledgeAudit.ts)
+------------------------------------------------------------------------------------
+Every module carries concept tags and links (compressor -> envelope-detector
+-> attack-release -> lookahead...). `npm run audit` regenerates
+KNOWLEDGE_AUDIT.md: inventory, curriculum coverage per area with a gap
+report (the honest shopping list — convolution, FFT, mid-side are known
+missing), redundancy balance, trust tiers, and a demonstrated-ability table
+where every benchmark is REALLY built and gated at run time. Prompts the
+banks can't confidently serve are logged locally (demand-driven growth).
+
 1.3  THE INTENT CLASSIFIER  (src/utils/pluginSpec.ts)
 -----------------------------------------------------
 A deterministic classifier that reads your prompt and files it into one of
@@ -124,6 +160,8 @@ is safe — the app just forgets that one thing.
   • orange_juce_memories_triumphs   — Memory Core: proven plugin structures
   • orange_juce_memories_research   — Memory Core: harvested DSP formulas
   • audio_factory_job_durations     — how long builds take (for the ETA timer)
+  • orange_juce_prompt_gaps_v1      — prompts the banks couldn't confidently
+                                      serve; the shopping list for new modules
 
 
 ================================================================================
@@ -134,7 +172,10 @@ PART 3 — WHAT HAPPENS ON EVERY BUILD (the data flowing through)
      |
      v
   1. SPEC       classifier files it into a family + goal  (Part 1.3)
-  2. BUILD      best-of-N candidates from recipes (1.1) or primitives (1.2)
+  1b. REQUIRE   requirements engineer reads source/character/latency (1.2c)
+                and the knowledge graph picks the topology (1.2b, 1.2d)
+  2. BUILD      best-of-N candidates: chosen topology + runner-up designs
+                + recipes (1.1) or primitives (1.2)
   3. GATE       every candidate measured against the signal bank (1.5);
                 deterministic fixes applied; scored on 4 dimensions
   4. PERFECT    the perfecting loop reworks the winner N times, keeping a
@@ -167,6 +208,6 @@ PART 4 — OPTIONAL OUTSIDE CONNECTIONS (all off by default, none required)
     server; nothing remote.
 
 ================================================================================
-Generated 2026-07-15 from the current codebase. Everything above is enforced
-by the 17-suite regression test pack (npm test).
+Updated 2026-07-16 from the current codebase. Everything above is enforced
+by the 19-suite regression test pack (npm test). Audit dashboard: npm run audit.
 ================================================================================

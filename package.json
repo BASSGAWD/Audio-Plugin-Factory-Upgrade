@@ -10,7 +10,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "tsx tests/runAll.ts",
-    "test:e2e": "tsx tests/e2eSmokeTest.ts"
+    "test:e2e": "tsx tests/e2eSmokeTest.ts",
+    "audit": "tsx scripts/knowledgeAuditReport.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

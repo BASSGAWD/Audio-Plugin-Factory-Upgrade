@@ -24,7 +24,10 @@ import {
   familyToCategory,
 } from "./pluginSpec";
 import { DSP_RECIPES, DspRecipe, PITCH_SHIFT_RECIPE, scoreRecipes } from "./dspRecipes";
-import { buildPrimitiveGraph } from "./dspPrimitives";
+import { buildPrimitiveGraph, DSP_PRIMITIVES } from "./dspPrimitives";
+import { inferRequirements, hasRequirements, BuildRequirements } from "./requirements";
+import { rankTopologies, logPromptGap } from "./knowledgeGraph";
+import { DspTopology } from "./dspTopologies";
 
 export interface OfflineBuild {
   name: string;
@@ -475,11 +478,13 @@ function toLiveParams(recipeParams: DspRecipe["parameters"]): PluginParameter[] 
 export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | null): OfflineBuild {
   const spec = specIn ?? classifyPluginIntent(prompt);
   const scored = scoreRecipes(prompt, spec);
+  const requirements = inferRequirements(prompt);
 
   let parameters: PluginParameter[];
   let dspFunction: string;
   let structure: string;
   let friendly: string;
+  let engineeringChoice: DspTopology | null = null;
   const honesty: string[] = [];
 
   // A real shimmer is a reverb with a pitched-up sheen in the tail, not a
@@ -525,13 +530,30 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
       if (note) honesty.push(note);
     }
   } else if (scored.length >= 1) {
-    const recipe = scored[0].recipe;
-    parameters = toLiveParams(recipe.parameters);
-    dspFunction = recipe.body;
-    structure = recipe.title;
-    friendly = FRIENDLY_STRUCTURE[recipe.id] || recipe.title;
-    const note = HONESTY_NOTES[recipe.id];
-    if (note) honesty.push(note);
+    // Requirements-driven topology selection: when this family has competing
+    // engineering designs, the knowledge graph ranks them against what the
+    // wording asked for (source material / character / latency budget). With
+    // no requirements the family default IS the golden recipe -- neutral
+    // prompts build exactly what they always built.
+    const rankedTopologies = rankTopologies(spec.family, requirements);
+    if (rankedTopologies.length > 0) {
+      const chosen = rankedTopologies[0];
+      parameters = toLiveParams(chosen.parameters);
+      dspFunction = chosen.body;
+      structure = chosen.title;
+      friendly = FRIENDLY_STRUCTURE[spec.family] || FRIENDLY_STRUCTURE[scored[0].recipe.id] || chosen.title;
+      if (!chosen.isDefault) engineeringChoice = chosen;
+      const note = HONESTY_NOTES[scored[0].recipe.id];
+      if (note) honesty.push(note);
+    } else {
+      const recipe = scored[0].recipe;
+      parameters = toLiveParams(recipe.parameters);
+      dspFunction = recipe.body;
+      structure = recipe.title;
+      friendly = FRIENDLY_STRUCTURE[recipe.id] || recipe.title;
+      const note = HONESTY_NOTES[recipe.id];
+      if (note) honesty.push(note);
+    }
   } else {
     // No recipe at all: compose a chain of verified DSP primitives inferred
     // from the prompt's wording — novel requests get a genuinely custom
@@ -541,6 +563,13 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     dspFunction = graph.body;
     structure = `composed primitive chain: ${graph.title}`;
     friendly = `a custom-composed signal chain — ${graph.title}`;
+    // Demand-driven growth: when the wording voted for fewer than two
+    // primitives, the chain is mostly fallback stages -- record the prompt
+    // so the next primitives get added where real requests point.
+    const votes = DSP_PRIMITIVES.filter((p) => p.match.test(prompt)).length;
+    if (votes < 2) {
+      logPromptGap(prompt, spec.family, `only ${votes} primitive keyword match(es) — served by fallback chain`);
+    }
   }
 
   const flavorNotes = applyPromptFlavor(prompt, parameters);
@@ -548,6 +577,7 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
 
   const descriptionParts = [
     `${FAMILY_LABELS[spec.family]}: ${structure}.`,
+    engineeringChoice ? `Engineering choice: ${engineeringChoice.rationale}.` : "",
     spec.dspIdentity && spec.source === "llm" ? spec.dspIdentity : "",
     ...honesty,
   ].filter(Boolean);
@@ -569,6 +599,12 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
   }
   knobs.slice(0, 8).forEach((p) => summaryLines.push(controlLine(p)));
 
+  if (engineeringChoice && hasRequirements(requirements)) {
+    summaryLines.push(
+      "",
+      `Engineering choice: **${engineeringChoice.tags.topology}** — ${engineeringChoice.rationale}. Read from your wording: ${requirements.evidence.join("; ")}.`
+    );
+  }
   if (flavorNotes.length > 0) {
     summaryLines.push("", `Voiced from your wording: ${flavorNotes.join("; ")}.`);
   }
@@ -618,7 +654,7 @@ export function buildOfflineCandidates(prompt: string, specIn?: AudioPluginSpec 
   const seen = new Set([main.dspFunction]);
 
   const push = (dspFunction: string, parameters: PluginParameter[], take: string) => {
-    if (seen.has(dspFunction) || out.length >= 3) return;
+    if (seen.has(dspFunction) || out.length >= 4) return;
     seen.add(dspFunction);
     out.push({
       ...main,
@@ -627,6 +663,15 @@ export function buildOfflineCandidates(prompt: string, specIn?: AudioPluginSpec 
       dspFunction,
     });
   };
+
+  // Competing engineering designs: the requirement-ranked runner-up
+  // topologies enter the seed pool, so the blind measurement — not the
+  // ranking heuristic — gets the final word.
+  const requirements = inferRequirements(prompt);
+  const rankedTopologies = rankTopologies(spec.family, requirements);
+  for (const alt of rankedTopologies.slice(1, 3)) {
+    push(alt.body, toLiveParams(alt.parameters), alt.title);
+  }
 
   // Alternate interpretation: hybrid <-> single, whichever the main is NOT.
   const scored = scoreRecipes(prompt, spec);

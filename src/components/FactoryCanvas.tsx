@@ -432,11 +432,23 @@ export default function FactoryCanvas({
   const cardsRef = useRef(cards);
   cardsRef.current = cards;
 
-  /* ---- persistence (debounced) ---- */
+  /* ---- persistence (debounced, flushed on leave) ---- */
   useEffect(() => {
     const t = setTimeout(() => saveCanvasWorkspace({ cards, view }), 350);
     return () => clearTimeout(t);
   }, [cards, view]);
+  useEffect(() => {
+    // The debounce loses the newest state if the tab closes/reloads (or the
+    // user switches modes) inside the 350 ms window — flush from refs on
+    // pagehide and on unmount so a just-spawned card always survives.
+    const flush = () => saveCanvasWorkspace({ cards: cardsRef.current, view: viewRef.current });
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ---- engine stopped externally -> no card is live ---- */
   useEffect(() => {

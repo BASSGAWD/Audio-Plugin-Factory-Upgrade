@@ -1,0 +1,172 @@
+================================================================================
+  ORANGEJUCE PLUGIN FACTORY — WHAT IT RUNS ON (THE "DATABASE"), IN PLAIN ENGLISH
+================================================================================
+
+THE HEADLINE
+------------
+There is no external database. No SQL, no cloud storage, no accounts.
+Everything the factory knows lives in exactly two places:
+
+  1. KNOWLEDGE BAKED INTO THE APP'S CODE  (the recipe banks — same for everyone)
+  2. YOUR BROWSER'S LOCAL STORAGE          (your plugins, settings, and what the
+                                            app has learned on YOUR machine)
+
+Delete the browser data and the app forgets your work but keeps all its skills.
+Nothing ever leaves your computer unless you turn on a cloud model (Gemini).
+
+
+================================================================================
+PART 1 — THE BUILT-IN KNOWLEDGE BANKS (compiled into the app)
+================================================================================
+
+1.1  THE GOLDEN RECIPE BANK  (src/utils/dspRecipes.ts)
+------------------------------------------------------
+Ten hand-verified, complete DSP algorithms. When your prompt matches a known
+effect type, the factory starts from one of these instead of guessing:
+
+  • reverb      — Schroeder reverb (4 parallel combs into 2 allpasses)
+  • delay       — Tape-style feedback delay (damped loop, dry/wet mix)
+  • modulation  — Chorus (LFO-modulated fractional delay)
+  • dynamics    — Compressor (dB-domain envelope, attack/release, makeup)
+  • eq          — 3-band parametric EQ with sweepable mid
+  • filter      — State-variable resonant lowpass
+  • distortion  — Soft-clip drive with gain compensation and tone control
+  • sampler     — 8-voice pad-triggered synth (pad grid UI)
+  • pitch       — Autotune (real pitch detection -> key/scale snap -> resynthesis)
+  • synth       — Detuned 2-oscillator pad voice with filter
+  plus a fixed PITCH SHIFTER recipe (dual-tap delay-line, crossfaded heads)
+
+Every recipe in this bank must score at least 97/100 through the quality gate
+before it is allowed to ship in the app (enforced by the test suite).
+
+1.2  THE PRIMITIVE STAGE BANK  (src/utils/dspPrimitives.ts)
+-----------------------------------------------------------
+Ten small, verified building blocks. When your prompt is something novel
+("underwater dream machine") that matches no single recipe, the factory chains
+2–4 of these into a custom effect:
+
+  • granular pitch shifter    • ring modulator        • bit crusher
+  • wavefolder                • soft-clip drive       • comb resonator
+  • wobble filter (LFO sweep) • tone lowpass          • rhythmic chopper
+  • damped echo
+
+Keywords in your prompt "vote" for stages (e.g. "underwater" votes for the
+wobble filter and tone lowpass; "dream" votes for the echo and pitch grains).
+
+1.3  THE INTENT CLASSIFIER  (src/utils/pluginSpec.ts)
+-----------------------------------------------------
+A deterministic classifier that reads your prompt and files it into one of
+15 plugin families BEFORE any code is written:
+
+  eq, filter, distortion, saturator, multiband_saturator, delay, reverb,
+  modulation, dynamics, synthesizer, pitch, amp_sim, sampler, utility,
+  hybrid_other (= "novel, compose from primitives")
+
+It separates what the plugin should LOOK like from what it must DO to audio,
+so "an EQ that saturates each band" doesn't collapse into a plain EQ.
+
+1.4  THE DESIGN LANGUAGE BANK  (src/utils/uiSpec.ts)
+----------------------------------------------------
+Words like "vintage", "aggressive", "dreamy", "clinical", "luxurious" in your
+prompt map to visual themes (colors, glow styles, fonts, faceplate patterns).
+The generative faceplate artwork is seeded from the plugin's own name, so every
+plugin gets a unique look that stays stable across reloads.
+
+1.5  THE QUALITY GATE'S TEST-SIGNAL BANK  (src/utils/qualityGate.ts)
+--------------------------------------------------------------------
+Every build is auditioned — mathematically, in milliseconds — against a bank of
+realistic signals: an arpeggio, plucks, sustained pads, percussive bursts,
+noise, and a clean tone. The gate measures and FIXES:
+
+  • silence / NaN / blow-ups          • gain staging (auto output trim)
+  • DC offset (auto blocker)          • dead knobs (no audible effect)
+  • knobs that break at extremes      • aliasing "digital fizz" harshness
+    (ranges auto-calibrated)          • per-knob HONESTY: a "Cutoff" must
+  • cross-signal dead spots             brighten as it opens, "Feedback" must
+                                        lengthen the tail, "Drive" must add
+                                        harmonics, "Mix" must move dry->wet
+
+A build only ships when all four headline scores (looks, performance, latency,
+musicality) are at or above 97/100.
+
+
+================================================================================
+PART 2 — WHAT'S STORED ON YOUR MACHINE (browser localStorage)
+================================================================================
+
+Open DevTools > Application > Local Storage to see these. Deleting any of them
+is safe — the app just forgets that one thing.
+
+  YOUR WORK
+  • audio_factory_plugin_state      — the plugin currently loaded in the Studio
+  • audio_factory_chat_history      — your Studio conversation
+  • audio_factory_canvas_v1         — every card on the Factory Canvas (its
+                                      prompt, position, full plugin, scores).
+                                      Cards interrupted mid-build resume as
+                                      "queued" next time the canvas opens.
+  • orangejuce_user_presets         — presets you've saved
+
+  YOUR SETTINGS
+  • audio_factory_ui_mode           — which mode you were in (simple/pro/canvas)
+  • audio_factory_refine_loops      — how many perfecting passes per build
+  • orange_juce_llm_config          — which AI engine you picked (offline
+                                      compiler / Ollama / LM Studio / Gemini)
+                                      and its URLs + model names
+
+  WHAT THE FACTORY HAS LEARNED (self-improvement, all local)
+  • orange_juce_learned_pitfalls_v1 — per-family lessons distilled from every
+                                      measured defect a model build ever had
+                                      ("delay builds tend to ship dead Tone
+                                      knobs") — fed back into future prompts
+  • orange_juce_candidate_recipes   — high-scoring DSP from past builds, reused
+                                      when you ask for something similar again
+  • orange_juce_memories_mistakes   — Memory Core: code patterns that failed
+  • orange_juce_memories_triumphs   — Memory Core: proven plugin structures
+  • orange_juce_memories_research   — Memory Core: harvested DSP formulas
+  • audio_factory_job_durations     — how long builds take (for the ETA timer)
+
+
+================================================================================
+PART 3 — WHAT HAPPENS ON EVERY BUILD (the data flowing through)
+================================================================================
+
+  your prompt
+     |
+     v
+  1. SPEC       classifier files it into a family + goal  (Part 1.3)
+  2. BUILD      best-of-N candidates from recipes (1.1) or primitives (1.2)
+  3. GATE       every candidate measured against the signal bank (1.5);
+                deterministic fixes applied; scored on 4 dimensions
+  4. PERFECT    the perfecting loop reworks the winner N times, keeping a
+                version only if it scores STRICTLY higher (optional: a local
+                AI model proposes reworks; without one, deterministic
+                voicing variants are used)
+  5. SHIP       only if every score >= 97 — with a build report listing
+                measured evidence, never claims
+     |
+     v
+  saved to localStorage (Part 2) + Faust and C++/JUCE code attached
+
+
+================================================================================
+PART 4 — OPTIONAL OUTSIDE CONNECTIONS (all off by default, none required)
+================================================================================
+
+  • OFFLINE COMPILER (default) — 100% in-browser, deterministic, no network.
+  • OLLAMA / LM STUDIO — local AI models on YOUR machine (localhost). Used for
+    the "model rework" strategy in the perfecting loop, planned builds, and
+    edit requests the deterministic rules can't map. If no model is loaded,
+    the factory automatically falls back to its deterministic strategies —
+    builds still ship at >= 97.
+       NOTE: "model rework failed (model 'x' not found)" means Ollama is
+       running but the model isn't pulled. Fix:  ollama pull qwen2.5-coder:7b
+       (or load any chat model in LM Studio and pick it in the model picker).
+  • GEMINI (cloud, optional) — only if you configure an API key. This is the
+    only path where your prompt leaves your computer.
+  • NATIVE VST3 BUILD — runs CMake/C++ on your own machine via the local
+    server; nothing remote.
+
+================================================================================
+Generated 2026-07-15 from the current codebase. Everything above is enforced
+by the 17-suite regression test pack (npm test).
+================================================================================

@@ -529,7 +529,12 @@ app.post("/api/proxy", async (req, res) => {
       // Body may not be JSON
     }
 
-    res.status(response.status).json({
+    // Always answer 200 from the relay itself: the upstream's status lives in
+    // the payload. Mirroring it (the old behavior) made an upstream 404 like
+    // Ollama's "model 'x' not found" indistinguishable from the relay route
+    // being missing -- the client reported "Server proxy failed with code
+    // 404" instead of the actual, actionable model error.
+    res.json({
       status: response.status,
       ok: response.ok,
       responseText,

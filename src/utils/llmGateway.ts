@@ -86,13 +86,21 @@ async function fetchViaServerProxy(
 
   if (!relayResponse.ok) {
     const errorJson = await relayResponse.json().catch(() => ({}));
-    throw new Error(errorJson.error || `Server proxy failed with code ${relayResponse.status}`);
+    throw new Error(
+      errorJson.error ||
+        (relayResponse.status === 404
+          ? "This app's backend isn't serving /api/proxy — run the app via `npm run dev` (or `npm start`), not a static file server."
+          : `Server proxy failed with code ${relayResponse.status}`)
+    );
   }
 
   const relayData = await relayResponse.json();
   if (!relayData.ok) {
-    const errMsg = relayData.responseText || `Remote server returned error code ${relayData.status}`;
-    throw new Error(errMsg);
+    // Surface the UPSTREAM error body (e.g. Ollama's "model 'x' not found",
+    // LM Studio's "No models loaded") -- that's the actionable message.
+    const upstream = relayData.jsonPayload?.error;
+    const upstreamMsg = typeof upstream === "string" ? upstream : upstream?.message;
+    throw new Error(upstreamMsg || relayData.responseText || `Remote server returned error code ${relayData.status}`);
   }
 
   return {
@@ -317,7 +325,11 @@ export async function callLocalLLM(params: LocalLLMCallParams): Promise<any> {
         options: { temperature },
       },
     });
-    if (!res.ok) throw new Error(`Ollama gateway returned status ${res.status}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const detail = typeof body?.error === "string" ? body.error : body?.error?.message;
+      throw new Error(detail ? `Ollama: ${detail}` : `Ollama gateway returned status ${res.status}`);
+    }
     const data = await res.json();
     return parseModelJson(data.message?.content || "{}");
   }
@@ -346,7 +358,11 @@ export async function callLocalLLM(params: LocalLLMCallParams): Promise<any> {
       if (err?.name === "AbortError" || !/400|response_format/i.test(err?.message || "")) throw err;
       res = await request(false);
     }
-    if (!res.ok) throw new Error(`LM Studio gateway returned status ${res.status}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const detail = typeof body?.error === "string" ? body.error : body?.error?.message;
+      throw new Error(detail ? `LM Studio: ${detail}` : `LM Studio gateway returned status ${res.status}`);
+    }
     const data = await res.json();
     return parseModelJson(data.choices?.[0]?.message?.content || "{}");
   }

@@ -266,8 +266,289 @@ return Math.tanh(y);`,
     },
   },
   /* ================================================================ */
+  {
+    concept: "opto-model",
+    area: "Compressors",
+    match: /opto|la-?2a|electro.?optical|tube\s*level/i,
+    claims: [
+      {
+        text: "Opto compressors (LA-2A family) derive gain reduction from a light source driving a photocell whose resistance recovers non-linearly: release starts fast (~60 ms) then slows dramatically (1-5 s) the longer and harder the unit has been compressing — the classic program-dependent release.",
+        citation: { title: "Optical compressor behavior", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed. (dynamic range control)", authority: 90 },
+      },
+      {
+        text: "The LA-2A exposes only Peak Reduction and Gain; ratio (~3:1) and time constants are emergent from the T4 optical cell, not user controls.",
+        citation: { title: "LA-2A design", source: "Wikipedia: LA-2A Leveling Amplifier", url: "https://en.wikipedia.org/wiki/LA-2A_Leveling_Amplifier", authority: 75 },
+      },
+    ],
+    proposedModule: {
+      family: "dynamics",
+      title: "Opto leveling amplifier (photocell-style program-dependent release, fixed gentle ratio)",
+      parameters: [
+        { id: "reduction", name: "Peak Reduction", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+        { id: "makeup", name: "Gain", min: 0, max: 24, defaultValue: 5, unit: "dB" },
+      ],
+      body: `if (!state.init) { state.env = 0; state.memory = 0; state.init = true; }
+let reduction = params.reduction !== undefined ? params.reduction : 0.5;
+let makeup = params.makeup !== undefined ? params.makeup : 5;
+let thresh = -8 - reduction * 30;
+let x = Math.abs(inputSample);
+let releaseC = 0.0008 / (1 + state.memory * 40);
+state.env += (x > state.env ? 0.005 : releaseC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let grDb = overDb > 0 ? overDb * (1 - 1 / 3) : 0;
+state.memory += 0.00002 * (Math.min(1, grDb / 12) - state.memory);
+let g = Math.pow(10, (-grDb + makeup) / 20);
+return Math.tanh(inputSample * g);`,
+    },
+  },
+  /* ================================================================ */
+  {
+    concept: "fet-model",
+    area: "Compressors",
+    match: /fet\b|1176|all.?buttons/i,
+    claims: [
+      {
+        text: "FET compressors (1176 family) use a field-effect transistor as the gain element, giving microsecond-class attack (20-800 us) — fast enough to clamp individual transient wavefronts — with input drive setting how hard the signal hits a fixed threshold.",
+        citation: { title: "FET dynamic range control", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed.", authority: 90 },
+      },
+      {
+        text: "The 1176 has no threshold control: turning Input up pushes more signal over the fixed threshold, so drive doubles as intensity — and the FET stage adds a touch of harmonic color at high drive.",
+        citation: { title: "1176 Peak Limiter design", source: "Wikipedia: 1176 Peak Limiter", url: "https://en.wikipedia.org/wiki/1176_Peak_Limiter", authority: 75 },
+      },
+    ],
+    proposedModule: {
+      family: "dynamics",
+      title: "FET peak limiter (microsecond attack, fixed threshold, input-driven intensity)",
+      parameters: [
+        { id: "input", name: "Input", min: 0, max: 24, defaultValue: 8, unit: "dB" },
+        { id: "ratio", name: "Ratio", min: 4, max: 20, defaultValue: 8, unit: ":1" },
+        { id: "attack", name: "Attack", min: 0.05, max: 5, defaultValue: 0.3, unit: "ms" },
+        { id: "makeup", name: "Output", min: 0, max: 24, defaultValue: 3, unit: "dB" },
+      ],
+      body: `if (!state.init) { state.env = 0; state.init = true; }
+let input = params.input !== undefined ? params.input : 8;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 8);
+let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 0.3);
+let makeup = params.makeup !== undefined ? params.makeup : 3;
+let gIn = Math.pow(10, input / 20);
+let driven = inputSample * gIn;
+let x = Math.abs(driven);
+let aC = 1 - Math.exp(-1 / (attack * 44.1));
+state.env += (x > state.env ? aC : 0.0007) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - (-16);
+let grDb = overDb > 0 ? overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (-grDb + makeup) / 20) / Math.pow(gIn, 0.7);
+return Math.tanh(driven * g);`,
+    },
+  },
+  /* ================================================================ */
+  {
+    concept: "multiband-compression",
+    area: "Compressors",
+    match: /multi.?band\s*comp|band.?split\s*comp|ott\b/i,
+    claims: [
+      {
+        text: "A multiband compressor splits the signal with crossover filters and compresses each band independently, so low-end energy cannot pump the highs; the bands are summed after per-band gain reduction.",
+        citation: { title: "Multiband dynamics", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed.", authority: 90 },
+      },
+      {
+        text: "Complementary one-pole (or Linkwitz-Riley) crossovers keep the recombined spectrum flat when both bands are at unity gain.",
+        citation: { title: "Crossover filters", ...JOS_PASP },
+      },
+    ],
+    proposedModule: {
+      family: "dynamics",
+      title: "2-band multiband compressor (complementary crossover, independent band envelopes)",
+      parameters: [
+        { id: "crossover", name: "Crossover", min: 150, max: 4000, defaultValue: 800, unit: "Hz" },
+        { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -24, unit: "dB" },
+        { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 4, unit: ":1" },
+        { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      ],
+      body: `if (!state.init) { state.lp = 0; state.smX = 800; state.envL = 0; state.envH = 0; state.init = true; }
+let crossover = params.crossover !== undefined ? params.crossover : 800;
+let thresh = params.threshold !== undefined ? params.threshold : -24;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 4);
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+state.smX += 0.002 * (crossover - state.smX);
+let a = 1 - Math.exp(-2 * Math.PI * state.smX / 44100);
+state.lp += a * (inputSample - state.lp);
+let low = state.lp;
+let high = inputSample - low;
+let xl = Math.abs(low);
+state.envL += (xl > state.envL ? 0.004 : 0.0005) * (xl - state.envL);
+let dbL = 20 * Math.log10(Math.max(1e-6, state.envL));
+let grL = dbL > thresh ? (dbL - thresh) * (1 - 1 / ratio) : 0;
+let xh = Math.abs(high);
+state.envH += (xh > state.envH ? 0.004 : 0.0005) * (xh - state.envH);
+let dbH = 20 * Math.log10(Math.max(1e-6, state.envH));
+let grH = dbH > thresh ? (dbH - thresh) * (1 - 1 / ratio) : 0;
+let mk = Math.pow(10, makeup / 20);
+let out = low * Math.pow(10, -grL / 20) * mk + high * Math.pow(10, -grH / 20) * mk;
+return Math.tanh(out);`,
+    },
+  },
+  /* ================================================================ */
+  {
+    concept: "sidechain-filter",
+    area: "Compressors",
+    match: /de.?ess|sibilan|sidechain\s*filter|harsh\s*s\b/i,
+    claims: [
+      {
+        text: "A de-esser is a compressor whose DETECTOR listens through a highpass/bandpass filter tuned to the sibilance region (~4-9 kHz), reducing gain only when 'ess' energy spikes — internal sidechain filtering in its most common form.",
+        citation: { title: "De-essing / sidechain filtering", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed.", authority: 90 },
+      },
+    ],
+    proposedModule: {
+      family: "dynamics",
+      title: "De-esser (highpass-filtered detector, high-band gain reduction)",
+      parameters: [
+        { id: "frequency", name: "Ess Frequency", min: 1500, max: 8000, defaultValue: 3000, unit: "Hz" },
+        { id: "amount", name: "Amount", min: 0, max: 1, defaultValue: 0.6, unit: "ratio" },
+        { id: "makeup", name: "Makeup", min: 0, max: 12, defaultValue: 0, unit: "dB" },
+      ],
+      body: `if (!state.init) { state.lp = 0; state.smF = 3000; state.env = 0; state.init = true; }
+let frequency = params.frequency !== undefined ? params.frequency : 3000;
+let amount = params.amount !== undefined ? params.amount : 0.6;
+let makeup = params.makeup !== undefined ? params.makeup : 0;
+state.smF += 0.002 * (frequency - state.smF);
+let a = 1 - Math.exp(-2 * Math.PI * state.smF / 44100);
+state.lp += a * (inputSample - state.lp);
+let low = state.lp;
+let high = inputSample - low;
+let xs = Math.abs(high);
+state.env += (xs > state.env ? 0.03 : 0.002) * (xs - state.env);
+let essDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = essDb - (-26 - amount * 22);
+let grDb = overDb > 0 ? Math.min(24, overDb * amount) : 0;
+let mk = Math.pow(10, makeup / 20);
+return Math.tanh((low + high * Math.pow(10, -grDb / 20)) * mk);`,
+    },
+  },
+  /* ================================================================ */
+  {
+    concept: "wavetable",
+    area: "Synthesis",
+    match: /wavetable/i,
+    claims: [
+      {
+        text: "A wavetable oscillator reads a stored single-cycle waveform with a phase accumulator and interpolated lookup; morphing crossfades between adjacent tables to sweep timbre continuously.",
+        citation: { title: "Wavetable synthesis", ...JOS_PASP },
+      },
+      {
+        text: "Band-limit each table (sum only the partials below Nyquist for the intended pitch range) or high tables alias audibly.",
+        citation: { title: "Band-limited wavetables", source: "musicdsp.org community archive", url: "https://www.musicdsp.org/", authority: 70 },
+      },
+    ],
+    proposedModule: {
+      family: "synthesizer",
+      title: "Morphing wavetable oscillator (4 band-limited tables, interpolated scan, airy noise layer)",
+      parameters: [
+        { id: "pitch", name: "Pitch", min: 55, max: 880, defaultValue: 220, unit: "Hz" },
+        { id: "morph", name: "Morph", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+        { id: "cutoff", name: "Cutoff", min: 800, max: 12000, defaultValue: 4000, unit: "Hz" },
+        { id: "level", name: "Level", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      ],
+      body: `if (!state.init) {
+  state.tables = [];
+  for (let t = 0; t < 4; t++) {
+    let tab = new Float32Array(2048);
+    for (let i = 0; i < 2048; i++) {
+      let ph = 2 * Math.PI * i / 2048;
+      let v = 0;
+      if (t === 0) v = Math.sin(ph);
+      else if (t === 1) { for (let k = 1; k <= 5; k += 2) v += Math.sin(k * ph) / (k * k); v *= 1.2; }
+      else if (t === 2) { for (let k = 1; k <= 16; k++) v += Math.sin(k * ph) / k; v *= 0.55; }
+      else { for (let k = 1; k <= 9; k += 2) v += Math.sin(k * ph) / k; v *= 0.75; }
+      tab[i] = v;
+    }
+    state.tables.push(tab);
+  }
+  state.ph = 0; state.lp = 0; state.smP = 220; state.rng = 12345; state.init = true;
+}
+let pitch = params.pitch !== undefined ? params.pitch : 220;
+let morph = Math.min(1, Math.max(0, params.morph !== undefined ? params.morph : 0.5));
+let cutoff = params.cutoff !== undefined ? params.cutoff : 4000;
+let level = params.level !== undefined ? params.level : 0.5;
+state.smP += 0.002 * (pitch - state.smP);
+state.ph += state.smP * 2048 / 44100;
+if (state.ph >= 2048) state.ph -= 2048;
+let pos = morph * 3;
+let ti = Math.min(2, Math.floor(pos));
+let frac = pos - ti;
+let i0 = Math.floor(state.ph);
+let i1 = (i0 + 1) % 2048;
+let sf = state.ph - i0;
+let ta = state.tables[ti];
+let tb = state.tables[ti + 1];
+let va = ta[i0] * (1 - sf) + ta[i1] * sf;
+let vb = tb[i0] * (1 - sf) + tb[i1] * sf;
+let osc = va * (1 - frac) + vb * frac;
+state.rng = (state.rng * 1664525 + 1013904223) | 0;
+let air = (state.rng / 2147483648) * 0.05;
+let a = 1 - Math.exp(-2 * Math.PI * cutoff / 44100);
+state.lp += a * (osc + air - state.lp);
+return Math.tanh(state.lp * level * 0.8);`,
+    },
+  },
+  /* ================================================================ */
+  {
+    concept: "fm-synthesis",
+    area: "Synthesis",
+    match: /\bfm\b|frequency\s*modulation|dx7/i,
+    claims: [
+      {
+        text: "Two-operator FM: a modulator oscillator at ratio*f modulates the carrier's phase; the modulation index (in radians) sets sideband count and brightness — Chowning's founding result behind the DX7.",
+        citation: { title: "The Synthesis of Complex Audio Spectra by Means of Frequency Modulation", source: "J. Chowning, J. Audio Eng. Soc. 21(7), 1973", authority: 95 },
+      },
+      {
+        text: "Integer carrier:modulator ratios give harmonic spectra; non-integer ratios give bells and metallic inharmonics.",
+        citation: { title: "FM synthesis ratios", ...JOS_PASP },
+      },
+    ],
+    proposedModule: {
+      family: "synthesizer",
+      title: "2-operator FM voice (phase-modulated carrier, ratio + index timbre control)",
+      parameters: [
+        { id: "pitch", name: "Pitch", min: 55, max: 880, defaultValue: 220, unit: "Hz" },
+        { id: "opRatio", name: "Op Ratio", min: 0.5, max: 8, defaultValue: 2, unit: "x" },
+        { id: "fmAmount", name: "FM Amount", min: 0, max: 8, defaultValue: 2.5, unit: "rad" },
+        { id: "level", name: "Level", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      ],
+      body: `if (!state.init) { state.phC = 0; state.phM = 0; state.smP = 220; state.smI = 2.5; state.init = true; }
+let pitch = params.pitch !== undefined ? params.pitch : 220;
+let opRatio = Math.max(0.1, params.opRatio !== undefined ? params.opRatio : 2);
+let fmAmount = params.fmAmount !== undefined ? params.fmAmount : 2.5;
+let level = params.level !== undefined ? params.level : 0.5;
+state.smP += 0.002 * (pitch - state.smP);
+state.smI += 0.002 * (fmAmount - state.smI);
+state.phM += 2 * Math.PI * state.smP * opRatio / 44100;
+if (state.phM > 2 * Math.PI) state.phM -= 2 * Math.PI;
+state.phC += 2 * Math.PI * state.smP / 44100;
+if (state.phC > 2 * Math.PI) state.phC -= 2 * Math.PI;
+let osc = Math.sin(state.phC + state.smI * Math.sin(state.phM));
+return Math.tanh(osc * level * 0.8);`,
+    },
+  },
+
+  /* ================================================================ */
   /* Structurally blocked concepts — the finding IS the constraint     */
   /* ================================================================ */
+  {
+    concept: "sidechain-input",
+    area: "Compressors",
+    match: /sidechain\s*(?:input|key)|external\s*(?:key|sidechain)|duck\s*(?:from|to)\s/i,
+    claims: [
+      {
+        text: "An external sidechain feeds a DIFFERENT signal into the compressor's detector (kick ducking a bass, voiceover ducking music) while the audio path processes the main input.",
+        citation: { title: "Sidechain keying", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed.", authority: 90 },
+      },
+    ],
+    blocked:
+      "The engine's DSP function receives exactly one input signal, so there is no second bus to key the detector from. INTERNAL sidechain filtering IS available — research 'sidechain-filter' (de-esser) for that. Prerequisite for external keying: a second input bus through audioEngine, the gate's renderer, and the plugin signature.",
+  },
   {
     concept: "convolution",
     area: "Reverbs",

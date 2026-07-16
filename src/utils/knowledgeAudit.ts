@@ -52,7 +52,8 @@ export const CURRICULUM: CurriculumItem[] = [
   { area: "Compressors", concept: "Program dependence", satisfiedBy: ["program-dependence"] },
   { area: "Compressors", concept: "Parallel (NY) compression", satisfiedBy: ["parallel-compression"] },
   { area: "Compressors", concept: "Multiband compression", satisfiedBy: ["multiband-compression"] },
-  { area: "Compressors", concept: "Sidechain input", satisfiedBy: ["sidechain-input"] },
+  { area: "Compressors", concept: "Sidechain input (external key)", satisfiedBy: ["sidechain-input"] },
+  { area: "Compressors", concept: "Internal sidechain filtering (de-esser)", satisfiedBy: ["sidechain-filter"] },
   { area: "Compressors", concept: "Opto/VCA/FET circuit models", satisfiedBy: ["opto-model", "vca-model", "fet-model"] },
   { area: "Compressors", concept: "Stereo linking / mid-side", satisfiedBy: ["stereo-linking", "mid-side"] },
   // -- Reverbs -------------------------------------------------------
@@ -124,6 +125,8 @@ const GATE_CAPABILITIES = new Set([
   "gate:semantic-honesty",
   "gate:realtime-safety",
   "gate:range-calibration",
+  // measureTruePeak(): 4x Catmull-Rom inter-sample peak, reported per build
+  "gate:true-peak",
 ]);
 
 /* ------------------------------------------------------------------ */

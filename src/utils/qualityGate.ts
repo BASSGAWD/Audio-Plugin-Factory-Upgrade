@@ -787,6 +787,37 @@ function cleanToneAt(index: number): number {
   return Math.sin((2 * Math.PI * ALIAS_FUNDAMENTAL * index) / SAMPLE_RATE) * 0.5;
 }
 
+/**
+ * Inter-sample TRUE peak (dBTP) of the program render at default settings.
+ * Sample peaks miss overs that appear between samples after DAC
+ * reconstruction; this estimates them by 4x oversampling with Catmull-Rom
+ * interpolation (a good local approximation of the sinc reconstruction the
+ * BS.1770 true-peak meter mandates). Informational measurement — the gate
+ * notes it when a build risks clipping a converter.
+ */
+export function measureTruePeak(dspFunction: string, parameters: PluginParameter[]): number {
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return -Infinity;
+  const wet = renderPass(dspFunc, defaultParamsMap(parameters), 22050);
+  if (wet.failed) return -Infinity;
+  const s = wet.samples;
+  let peak = 0;
+  for (let i = 1; i < s.length - 2; i++) {
+    const p0 = s[i - 1], p1 = s[i], p2 = s[i + 1], p3 = s[i + 2];
+    const a1 = Math.abs(p1);
+    if (a1 > peak) peak = a1;
+    for (let k = 1; k < 4; k++) {
+      const t = k / 4;
+      const v =
+        0.5 *
+        (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t);
+      const av = Math.abs(v);
+      if (av > peak) peak = av;
+    }
+  }
+  return peak <= 1e-9 ? -Infinity : 20 * Math.log10(peak);
+}
+
 export function measureAliasing(dspFunction: string, parameters: PluginParameter[]): number {
   const dspFunc = compileDspBody(dspFunction);
   if (!dspFunc) return 0;
@@ -1227,6 +1258,19 @@ export function runQualityGate(
     notes.push(`Aliasing/harshness: ${aliasingIndex.toFixed(2)} inharmonic energy on a clean tone -- a ${opts.family} should stay smooth; this has audible digital fizz (oversample or lowpass the nonlinearity).`);
   }
 
+  // Inter-sample true peak (dBTP), 4x Catmull-Rom reconstruction. The trim
+  // computed above is applied at the ENGINE's output stage, so report the
+  // trimmed level -- what a converter would actually see.
+  const rawTruePeakDb = m.fatal ? -Infinity : measureTruePeak(plugin.dspFunction, workingParams);
+  const truePeakDb = Number.isFinite(rawTruePeakDb) ? rawTruePeakDb + 20 * Math.log10(Math.max(1e-6, outputTrim)) : rawTruePeakDb;
+  if (Number.isFinite(truePeakDb)) {
+    if (truePeakDb > -0.1) {
+      notes.push(`True peak: ${truePeakDb.toFixed(2)} dBTP after trim -- inter-sample overs can clip a DAC; leave ~1 dB of headroom.`);
+    } else {
+      notes.push(`True peak: ${truePeakDb.toFixed(2)} dBTP (inter-sample, 4x oversampled) -- safe converter headroom.`);
+    }
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -1246,6 +1290,7 @@ export function runQualityGate(
     characterIndex,
     aliasingIndex,
     harsh,
+    truePeakDb: Number.isFinite(truePeakDb) ? Math.round(truePeakDb * 100) / 100 : undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

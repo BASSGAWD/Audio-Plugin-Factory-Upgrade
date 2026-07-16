@@ -33,6 +33,8 @@ check("covered: lookahead compression no longer a gap", !allMissing.some((m) => 
 check("covered: FDN no longer a gap", !allMissing.some((m) => /delay network/i.test(m)));
 check("every curriculum area is scored", audit.coverage.length >= 8, `${audit.coverage.length} areas`);
 check("curriculum is non-trivial", CURRICULUM.length >= 50, `${CURRICULUM.length} items`);
+const hygiene = audit.coverage.find((a) => a.area === "Engineering hygiene");
+check("Engineering hygiene fully covered (incl. true-peak measurement)", hygiene?.pct === 100, JSON.stringify(hygiene?.missing));
 
 /* ---- balance sees the concept clusters ---- */
 const comp = audit.balance.find((b) => b.concept === "compressor");

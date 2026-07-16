@@ -1,6 +1,6 @@
 # OrangeJuce Knowledge Audit
 
-Generated 2026-07-16T07:33:57.164Z — every number below is measured, not claimed.
+Generated 2026-07-16T09:46:40.131Z — every number below is measured, not claimed.
 
 ## 1. Inventory
 
@@ -9,9 +9,9 @@ Generated 2026-07-16T07:33:57.164Z — every number below is measured, not claim
 - Topology variants (engineering choices): **12**
 - Graph nodes: **32**, reachable concepts: **83**
 
-## 2. Curriculum coverage — overall 75%
+## 2. Curriculum coverage — overall 76%
 
-`██████░░░░` **Compressors** 62% (8/13)
+`██████░░░░` **Compressors** 57% (8/14)
 `█████████░` **Reverbs** 86% (6/7)
 `███████░░░` **Delays** 67% (4/6)
 `█████████░` **Distortion** 86% (6/7)
@@ -19,11 +19,11 @@ Generated 2026-07-16T07:33:57.164Z — every number below is measured, not claim
 `████████░░` **Modulation** 75% (3/4)
 `████████░░` **Pitch & Time** 80% (4/5)
 `██████░░░░` **Synthesis** 60% (3/5)
-`█████████░` **Engineering hygiene** 88% (7/8)
+`██████████` **Engineering hygiene** 100% (8/8)
 
 ### Gap report (the shopping list)
 
-- **Compressors**: Parallel (NY) compression; Multiband compression; Sidechain input; Opto/VCA/FET circuit models; Stereo linking / mid-side
+- **Compressors**: Parallel (NY) compression; Multiband compression; Sidechain input (external key); Internal sidechain filtering (de-esser); Opto/VCA/FET circuit models; Stereo linking / mid-side
 - **Reverbs**: Convolution / impulse responses
 - **Delays**: Multi-tap patterns; Ping-pong / stereo spread
 - **Distortion**: Dynamic (level-tracking) saturation
@@ -31,7 +31,6 @@ Generated 2026-07-16T07:33:57.164Z — every number below is measured, not claim
 - **Modulation**: Phaser (allpass cascade)
 - **Pitch & Time**: Spectral (FFT) processing
 - **Synthesis**: Wavetable synthesis; FM synthesis
-- **Engineering hygiene**: True-peak / loudness normalization
 
 ## 3. Balance (modules per concept)
 

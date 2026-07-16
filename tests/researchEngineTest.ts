@@ -92,6 +92,7 @@ const mem = new Map<string, string>();
   );
   const gbMin = Math.min(gatedBuild.scores.looks, gatedBuild.scores.performance, gatedBuild.scores.latency, gatedBuild.scores.musicality);
   check("researched build still ships at the floor", gbMin >= 97, `min=${gbMin}`);
+  check("gate reports a measured true peak (dBTP)", typeof gatedBuild.report.truePeakDb === "number" && Number.isFinite(gatedBuild.report.truePeakDb), `${gatedBuild.report.truePeakDb}`);
 
   /* ---- coverage audit reflects the approval ---- */
   const audit = runKnowledgeAudit({ withBenchmarks: false });
@@ -104,6 +105,19 @@ const mem = new Map<string, string>();
   rejectResearch(multitap.id);
   check("rejected research does NOT extend coverage", !knownConcepts().includes("multi-tap"));
   check("rejected research is NOT buildable", findApprovedModuleForPrompt("a multi-tap rhythmic delay") === null);
+
+  /* ---- circuit models: opto research is approvable and routes ---- */
+  const opto = await runResearch("opto-model");
+  check("opto research is approvable with a verified module", isApprovable(opto) && opto.proposedModule?.verification.passes === true);
+  approveResearch(opto.id);
+  const optoBuild = buildOfflinePlugin("an LA-2A style opto compressor for vocals");
+  check("approved opto model is buildable by name", /opto|leveling/i.test(optoBuild.description), optoBuild.description.slice(0, 80));
+
+  /* ---- external sidechain: blocked; internal sidechain: buildable ---- */
+  const sidechain = await runResearch("sidechain-input");
+  check("external sidechain reports the single-input constraint", sidechain.conflicts.some((c) => c.severity === "blocking" && /one input|second bus|single/i.test(c.text)));
+  const deEss = await runResearch("sidechain-filter");
+  check("internal sidechain (de-esser) IS approvable", isApprovable(deEss) && deEss.proposedModule?.verification.passes === true);
 
   /* ---- blocked concepts: the constraint is the finding ---- */
   const midSide = await runResearch("mid-side");

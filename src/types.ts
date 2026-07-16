@@ -122,6 +122,10 @@ export interface BuildReport {
    *  genuine digital fizz, not intended grit. Drives the refinement penalty;
    *  never a headline score. */
   harsh?: boolean;
+  /** Measured inter-sample true peak (dBTP) of the program render at
+   *  defaults, 4x oversampled via Catmull-Rom reconstruction. Informational;
+   *  a note is added when it risks clipping a DAC (> -0.1 dBTP). */
+  truePeakDb?: number;
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

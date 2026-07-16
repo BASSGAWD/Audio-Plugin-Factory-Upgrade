@@ -23,7 +23,8 @@ import {
   Download,
   Bookmark,
   Github,
-  Cpu
+  Cpu,
+  BookOpen
 } from "lucide-react";
 import { AudioPlugin, ChatMessage, DSPAnalysisResult, DspCritiqueItem, Agent, PluginParameter } from "./types";
 import { DEFAULT_AGENTS } from "./defaultAgents";
@@ -64,6 +65,7 @@ import CanvasStudio from "./components/CanvasStudio";
 import DiagnosticsLab from "./components/DiagnosticsLab";
 import UIDesigner from "./components/UIDesigner";
 import MemoryCore from "./components/MemoryCore";
+import ResearchLab from "./components/ResearchLab";
 import PresetManager from "./components/PresetManager";
 import GitHubAudioDiscovery from "./components/GitHubAudioDiscovery";
 import NativeBuildPanel from "./components/NativeBuildPanel";
@@ -252,7 +254,7 @@ const STORAGE_KEY_UI_MODE = "audio_factory_ui_mode";
 
 type CompanionTabId =
   | "chat" | "playground" | "code" | "diagnostics" | "terminal" | "canvas"
-  | "lab" | "export" | "memory_core" | "presets" | "architect" | "github" | "cpp_harness";
+  | "lab" | "export" | "memory_core" | "presets" | "architect" | "github" | "cpp_harness" | "research";
 
 interface WorkspaceTab {
   id: CompanionTabId;
@@ -300,6 +302,7 @@ const WORKSPACE_TAB_GROUPS: Array<{ label: string; tabs: WorkspaceTab[] }> = [
     label: "System",
     tabs: [
       { id: "memory_core", label: "Models & Memory", icon: Workflow, iconColor: "text-orange-400", accent: "orange" },
+      { id: "research", label: "Research Lab", icon: BookOpen, iconColor: "text-sky-400", accent: "indigo" },
       { id: "github", label: "GitHub Search", icon: Github, iconColor: "text-indigo-400", accent: "indigo" },
     ],
   },
@@ -4428,6 +4431,13 @@ return inputSample * dynamicVolumeMod;`
                   }}
                   triggerToast={triggerToast}
                 />
+              </div>
+            )}
+
+            {/* Companion TAB Content: Research Engine gap->approve workflow */}
+            {companionTab === "research" && (
+              <div className="space-y-4">
+                <ResearchLab triggerToast={triggerToast} />
               </div>
             )}
 

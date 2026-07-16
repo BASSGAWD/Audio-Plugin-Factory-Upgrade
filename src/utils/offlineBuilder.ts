@@ -28,6 +28,7 @@ import { buildPrimitiveGraph, DSP_PRIMITIVES } from "./dspPrimitives";
 import { inferRequirements, hasRequirements, BuildRequirements } from "./requirements";
 import { rankTopologies, logPromptGap } from "./knowledgeGraph";
 import { DspTopology } from "./dspTopologies";
+import { findApprovedModuleForPrompt } from "./researchEngine";
 
 export interface OfflineBuild {
   name: string;
@@ -492,7 +493,22 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
   // the pitch stage as a subtle octave-up blend.
   const wantsShimmer = /shimmer/i.test(prompt) && spec.family === "reverb";
 
-  if (spec.family === "amp_sim") {
+  // Human-approved research first: a gate-verified module the user approved
+  // in the Research Lab whose concept wording matches this prompt beats the
+  // generic banks -- that's the whole point of researching a gap.
+  const researched = spec.family === "amp_sim" || wantsShimmer ? null : findApprovedModuleForPrompt(prompt);
+
+  if (researched?.proposedModule) {
+    const m = researched.proposedModule;
+    parameters = toLiveParams(m.parameters);
+    dspFunction = m.body;
+    structure = m.title;
+    friendly = `an approved researched design — ${m.title}`;
+    const topCitation = researched.claims[0]?.citation;
+    if (topCitation) {
+      honesty.push(`Built from research you approved (${researched.concept}), sourced from: ${topCitation.source}.`);
+    }
+  } else if (spec.family === "amp_sim") {
     parameters = toLiveParams(AMP_CHANNEL.parameters);
     dspFunction = AMP_CHANNEL.body;
     structure = AMP_CHANNEL.title;

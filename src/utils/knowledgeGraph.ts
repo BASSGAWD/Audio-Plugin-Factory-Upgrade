@@ -116,13 +116,34 @@ export function nodesForConcept(concept: string): KnowledgeNode[] {
   return KNOWLEDGE_GRAPH.filter((n) => n.concept === concept || n.related.includes(concept));
 }
 
-/** Every distinct concept the graph can currently reach (nodes + edges). */
+/**
+ * Research-queue storage key. The queue is WRITTEN by researchEngine.ts;
+ * the graph only READS approved concepts from it (defined here, not there,
+ * so the engine can import the graph without a dependency cycle).
+ */
+export const RESEARCH_QUEUE_KEY = "orange_juce_research_queue_v1";
+
+/** Concepts added by human-APPROVED research (see researchEngine.ts).
+ *  Pending and rejected items contribute nothing — approval is the boundary. */
+export function approvedResearchConcepts(): string[] {
+  try {
+    if (typeof localStorage === "undefined") return [];
+    const queue: Array<{ status?: string; concept?: string }> = JSON.parse(localStorage.getItem(RESEARCH_QUEUE_KEY) || "[]");
+    return queue.filter((i) => i.status === "approved" && typeof i.concept === "string").map((i) => i.concept as string);
+  } catch {
+    return [];
+  }
+}
+
+/** Every distinct concept the graph can currently reach (nodes + edges +
+ *  approved research). */
 export function knownConcepts(): string[] {
   const set = new Set<string>();
   for (const n of KNOWLEDGE_GRAPH) {
     set.add(n.concept);
     n.related.forEach((r) => set.add(r));
   }
+  approvedResearchConcepts().forEach((c) => set.add(c));
   return [...set].sort();
 }
 

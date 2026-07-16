@@ -36,6 +36,7 @@ const TEST_FILES = [
   "canvasFactoryTest.ts",
   "topologyTest.ts",
   "knowledgeAuditTest.ts",
+  "researchEngineTest.ts",
 ];
 
 let failed = 0;

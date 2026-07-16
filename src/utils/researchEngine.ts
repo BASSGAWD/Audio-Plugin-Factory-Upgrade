@@ -1,0 +1,327 @@
+/**
+ * Milestone 2 — the Research Engine.
+ *
+ * Pipeline for turning a knowledge GAP into approved factory knowledge:
+ *
+ *   gap concept
+ *     -> planResearch()        what to find out, where, and what "good" means
+ *     -> gather                built-in corpus (always) + local LLM (optional)
+ *     -> extractKnowledge()    claims with citations, ranked by authority
+ *     -> detectConflicts()     structural blocks, overlap with verified banks,
+ *                              weak-authority warnings
+ *     -> verify                proposed DSP modules run through the REAL gate
+ *     -> queue                 status "pending" in localStorage
+ *     -> HUMAN APPROVAL        nothing becomes factory knowledge until the
+ *                              user approves it in the Research Lab
+ *
+ * Approved items extend the knowledge graph's reachable concepts (coverage
+ * rises) and — when they carry a gate-verified module — become buildable:
+ * the offline builder prefers an approved researched module whose concept
+ * matches the prompt. Rejected items stay visible as history.
+ *
+ * The model gatherer is OPTIONAL by design: with no local LLM the corpus
+ * still yields real, cited findings, so the engine is deterministic and
+ * testable offline. Model findings enter at authority 20 (lowest tier) and
+ * can never outrank literature.
+ */
+
+import { AudioPlugin } from "../types";
+import { RESEARCH_CORPUS, CorpusEntry, ResearchClaim, corpusEntriesFor } from "./researchCorpus";
+import { RESEARCH_QUEUE_KEY, knownConcepts } from "./knowledgeGraph";
+import { runQualityGate } from "./qualityGate";
+import { familyToCategory, PluginFamily } from "./pluginSpec";
+import { DspRecipe } from "./dspRecipes";
+import { LLMConfig, callLocalLLM, isLocalProvider } from "./llmGateway";
+
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
+
+export interface ResearchPlan {
+  concept: string;
+  questions: string[];
+  sources: string[];
+  acceptance: string[];
+}
+
+export interface ResearchConflict {
+  severity: "blocking" | "info" | "warning";
+  text: string;
+}
+
+export interface ModuleVerification {
+  minScore: number;
+  scores: { looks: number; performance: number; latency: number; musicality: number };
+  passes: boolean;
+  defects: string[];
+}
+
+export interface ResearchItem {
+  id: string;
+  concept: string;
+  area: string;
+  claims: ResearchClaim[];
+  /** Highest citation authority across claims (0-100). */
+  topAuthority: number;
+  conflicts: ResearchConflict[];
+  proposedModule?: {
+    family: PluginFamily;
+    title: string;
+    parameters: DspRecipe["parameters"];
+    body: string;
+    verification: ModuleVerification;
+  };
+  status: "pending" | "approved" | "rejected";
+  createdAt: string;
+  decidedAt?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Storage                                                             */
+/* ------------------------------------------------------------------ */
+
+function storage(): Storage | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readResearchQueue(): ResearchItem[] {
+  const store = storage();
+  if (!store) return [];
+  try {
+    return JSON.parse(store.getItem(RESEARCH_QUEUE_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function writeResearchQueue(items: ResearchItem[]): void {
+  const store = storage();
+  if (!store) return;
+  try {
+    store.setItem(RESEARCH_QUEUE_KEY, JSON.stringify(items.slice(-60)));
+  } catch (err) {
+    console.warn("[researchEngine] could not persist research queue:", err);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 1. Research planner                                                 */
+/* ------------------------------------------------------------------ */
+
+export function planResearch(concept: string): ResearchPlan {
+  return {
+    concept,
+    questions: [
+      `What is the canonical signal-flow / algorithm for "${concept}"?`,
+      `What are the design parameters an engineer exposes, and their musical ranges?`,
+      `What are the stability constraints and classic implementation pitfalls?`,
+      `Can the current engine (mono, per-sample JS) implement it — and if not, what is the prerequisite?`,
+    ],
+    sources: [
+      "built-in corpus (academic texts, cookbook specs, curated community archives — cited per claim)",
+      "local LLM proposal (authority 20; only when a local model is configured and reachable)",
+    ],
+    acceptance: [
+      "every claim carries a citation with an authority score",
+      "a proposed module must pass the quality gate at >= 97 with zero defects",
+      "structural conflicts must be declared, not worked around",
+      "nothing lands in factory knowledge without explicit human approval",
+    ],
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 2-3. Gather + extract                                               */
+/* ------------------------------------------------------------------ */
+
+interface Gathered {
+  entries: CorpusEntry[];
+  modelClaims: ResearchClaim[];
+}
+
+async function gatherFromModel(concept: string, llmConfig: LLMConfig | null): Promise<ResearchClaim[]> {
+  if (!llmConfig || !isLocalProvider(llmConfig)) return [];
+  try {
+    const parsed = await callLocalLLM({
+      config: llmConfig,
+      systemPrompt:
+        'You are a DSP research assistant. Reply with JSON: {"claims": ["..."]} — 1-3 short factual statements about the requested audio DSP concept (algorithm structure, parameters, stability constraints). No code.',
+      userText: `Concept: ${concept}`,
+      temperature: 0.2,
+    });
+    const claims: string[] = Array.isArray(parsed?.claims) ? parsed.claims : [];
+    return claims.slice(0, 3).map((text) => ({
+      text: String(text).slice(0, 400),
+      citation: { title: `Local model note (${llmConfig.provider})`, source: "model-generated — verify before trusting", authority: 20 },
+    }));
+  } catch {
+    return []; // model enrichment is best-effort by contract
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. Conflict detection                                               */
+/* ------------------------------------------------------------------ */
+
+function detectConflicts(concept: string, entries: CorpusEntry[], topAuthority: number): ResearchConflict[] {
+  const conflicts: ResearchConflict[] = [];
+  for (const e of entries) {
+    if (e.blocked) {
+      conflicts.push({ severity: "blocking", text: e.blocked });
+    }
+  }
+  const covered = new Set(knownConcepts());
+  if (covered.has(concept)) {
+    conflicts.push({
+      severity: "info",
+      text: `The banks already hold tier-1 verified modules reaching "${concept}" — approving adds an alternative, it does not replace the verified default.`,
+    });
+  }
+  if (topAuthority < 60) {
+    conflicts.push({
+      severity: "warning",
+      text: `Best available authority is ${topAuthority}/100 (community/model grade). Prefer confirming against a book or academic source before approving.`,
+    });
+  }
+  return conflicts;
+}
+
+/* ------------------------------------------------------------------ */
+/* 5. Empirical verification                                           */
+/* ------------------------------------------------------------------ */
+
+function verifyModule(family: PluginFamily, title: string, parameters: DspRecipe["parameters"], body: string): ModuleVerification {
+  const plugin: AudioPlugin = {
+    id: "research", name: title, category: familyToCategory(family), description: "",
+    parameters: parameters.map((p) => ({ ...p, value: p.defaultValue })),
+    dspFunction: body, faustCode: "", cppJuceCode: "", createdAt: "",
+  };
+  try {
+    const g = runQualityGate(plugin, { family, prompt: title });
+    const minScore = Math.min(g.scores.looks, g.scores.performance, g.scores.latency, g.scores.musicality);
+    const defects = [
+      ...g.report.deadParams.map((p) => `dead control: ${p}`),
+      ...g.report.unstableParams.map((p) => `unstable control: ${p}`),
+      ...(g.report.semanticViolations || []).map((v) => `dishonest control: ${v}`),
+      ...(g.report.harsh ? [`aliasing harshness ${g.report.aliasingIndex?.toFixed(3)}`] : []),
+    ];
+    return { minScore, scores: g.scores, passes: minScore >= 97 && defects.length === 0, defects };
+  } catch (err: any) {
+    return {
+      minScore: 0,
+      scores: { looks: 0, performance: 0, latency: 0, musicality: 0 },
+      passes: false,
+      defects: [`module threw during gating: ${err?.message || err}`],
+    };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* The pipeline                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Research one concept end-to-end and queue the result for human approval.
+ * Returns the queued (or already-pending) item. Deterministic without a
+ * model; `llmConfig` adds optional low-authority enrichment.
+ */
+export async function runResearch(concept: string, llmConfig: LLMConfig | null = null): Promise<ResearchItem> {
+  const existing = readResearchQueue().find((i) => i.concept === concept && i.status === "pending");
+  if (existing) return existing;
+
+  const gathered: Gathered = {
+    entries: corpusEntriesFor(concept),
+    modelClaims: await gatherFromModel(concept, llmConfig),
+  };
+
+  // Extraction: merge claims, literature first, ranked by authority.
+  const claims: ResearchClaim[] = [
+    ...gathered.entries.flatMap((e) => e.claims),
+    ...gathered.modelClaims,
+  ].sort((a, b) => b.citation.authority - a.citation.authority);
+  const topAuthority = claims.length > 0 ? claims[0].citation.authority : 0;
+
+  const primary = gathered.entries[0];
+  const conflicts = detectConflicts(primary?.concept ?? concept, gathered.entries, topAuthority);
+  if (claims.length === 0) {
+    conflicts.push({
+      severity: "blocking",
+      text: "No findings: the corpus has no entry for this concept and no local model contributed. Add corpus material or configure a local model, then research again.",
+    });
+  }
+
+  const blocked = conflicts.some((c) => c.severity === "blocking");
+  let proposedModule: ResearchItem["proposedModule"];
+  if (primary?.proposedModule && !blocked) {
+    const m = primary.proposedModule;
+    proposedModule = { ...m, verification: verifyModule(m.family, m.title, m.parameters, m.body) };
+  }
+
+  const item: ResearchItem = {
+    id: `research_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`,
+    concept: primary?.concept ?? concept,
+    area: primary?.area ?? "General",
+    claims,
+    topAuthority,
+    conflicts,
+    proposedModule,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+  };
+  writeResearchQueue([...readResearchQueue(), item]);
+  return item;
+}
+
+/** True when the item may be approved: no blocking conflicts, and any
+ *  proposed module must have PASSED the gate. Claims-only items (no module)
+ *  are approvable — they extend concept coverage without becoming buildable. */
+export function isApprovable(item: ResearchItem): boolean {
+  if (item.conflicts.some((c) => c.severity === "blocking")) return false;
+  if (item.proposedModule && !item.proposedModule.verification.passes) return false;
+  return item.claims.length > 0;
+}
+
+function decide(id: string, status: "approved" | "rejected"): ResearchItem | null {
+  const queue = readResearchQueue();
+  const item = queue.find((i) => i.id === id);
+  if (!item || item.status !== "pending") return null;
+  if (status === "approved" && !isApprovable(item)) return null;
+  item.status = status;
+  item.decidedAt = new Date().toISOString();
+  writeResearchQueue(queue);
+  return item;
+}
+
+export function approveResearch(id: string): ResearchItem | null {
+  return decide(id, "approved");
+}
+
+export function rejectResearch(id: string): ResearchItem | null {
+  return decide(id, "rejected");
+}
+
+/* ------------------------------------------------------------------ */
+/* Consumers of APPROVED knowledge                                     */
+/* ------------------------------------------------------------------ */
+
+/** Approved research items that carry a gate-verified buildable module. */
+export function approvedModules(): ResearchItem[] {
+  return readResearchQueue().filter((i) => i.status === "approved" && i.proposedModule?.verification.passes);
+}
+
+/**
+ * The build hook: an approved researched module whose concept wording
+ * matches the prompt. The corpus match regex travels with the concept so
+ * "a swirling phaser" finds the approved phaser.
+ */
+export function findApprovedModuleForPrompt(prompt: string): ResearchItem | null {
+  for (const item of approvedModules()) {
+    const entry = RESEARCH_CORPUS.find((e) => e.concept === item.concept);
+    if (entry && entry.match.test(prompt)) return item;
+  }
+  return null;
+}

@@ -89,6 +89,20 @@ missing), redundancy balance, trust tiers, and a demonstrated-ability table
 where every benchmark is REALLY built and gated at run time. Prompts the
 banks can't confidently serve are logged locally (demand-driven growth).
 
+1.2e THE RESEARCH ENGINE  (src/utils/researchEngine.ts + researchCorpus.ts)
+---------------------------------------------------------------------------
+The factory researches its own measured gaps: pick a gap in the Research Lab
+(Pro mode > System > Research Lab), and the engine plans the questions,
+gathers findings from its cited corpus (academic texts, the RBJ cookbook,
+curated archives — plus an optional local-model note at the lowest
+authority tier), detects conflicts (structurally impossible concepts are
+BLOCKED with the constraint explained — e.g. mid-side needs a stereo
+engine), and verifies any proposed DSP module through the quality gate
+BEFORE you ever see it. NOTHING becomes factory knowledge until you click
+Approve. Approved modules are instantly buildable ("make me a phaser") and
+carry their research provenance in the build notes; rejected ones stay in
+history and change nothing.
+
 1.3  THE INTENT CLASSIFIER  (src/utils/pluginSpec.ts)
 -----------------------------------------------------
 A deterministic classifier that reads your prompt and files it into one of
@@ -162,6 +176,9 @@ is safe — the app just forgets that one thing.
   • audio_factory_job_durations     — how long builds take (for the ETA timer)
   • orange_juce_prompt_gaps_v1      — prompts the banks couldn't confidently
                                       serve; the shopping list for new modules
+  • orange_juce_research_queue_v1   — the Research Lab queue: pending items
+                                      awaiting YOUR approval, plus the
+                                      approved/rejected decision history
 
 
 ================================================================================
@@ -209,5 +226,5 @@ PART 4 — OPTIONAL OUTSIDE CONNECTIONS (all off by default, none required)
 
 ================================================================================
 Updated 2026-07-16 from the current codebase. Everything above is enforced
-by the 19-suite regression test pack (npm test). Audit dashboard: npm run audit.
+by the 20-suite regression test pack (npm test). Audit dashboard: npm run audit.
 ================================================================================

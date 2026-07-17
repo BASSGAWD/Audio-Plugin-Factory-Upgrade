@@ -15,6 +15,7 @@ import { rankTopologies, KNOWLEDGE_GRAPH, logPromptGap, readPromptGaps } from ".
 import { inferRequirements } from "../src/utils/requirements";
 import { buildOfflinePlugin, buildOfflineCandidates } from "../src/utils/offlineBuilder";
 import { runQualityGate } from "../src/utils/qualityGate";
+import { refinementScore, NEAR_TIE_MARGIN } from "../src/utils/refinementLoop";
 import { classifyPluginIntent, familyToCategory } from "../src/utils/pluginSpec";
 import { DSP_RECIPES } from "../src/utils/dspRecipes";
 import { AudioPlugin } from "../src/types";
@@ -105,6 +106,29 @@ for (const prompt of [
   const g = runQualityGate(plugin, { family: b.family, prompt });
   const min = Math.min(g.scores.looks, g.scores.performance, g.scores.latency, g.scores.musicality);
   check(`routed build ships: "${prompt}"`, min >= 97, `min=${min}`);
+}
+
+/* ---- 4b. Best-of-N SELECTION honors the requirement match on near-ties ----
+ * The engineering pick is candidate[0]; a runner-up must beat it by MORE than
+ * a near-tie to displace it. Regression for the canvas building a punchy-drum
+ * compressor (Attack) for a "warm vintage vocals" request when every clean
+ * candidate ties at the gate ceiling. */
+{
+  const select = (prompt: string): string[] => {
+    const cands = buildOfflineCandidates(prompt, classifyPluginIntent(prompt));
+    let bestScore = -Infinity;
+    let pick = cands[0];
+    for (const c of cands) {
+      const gp: AudioPlugin = { id: "t", name: c.name, category: c.category, description: c.description, parameters: c.parameters.map((p) => ({ ...p, value: p.value ?? p.defaultValue })), dspFunction: c.dspFunction, faustCode: "", cppJuceCode: "", createdAt: "" };
+      const s = refinementScore(runQualityGate(gp, { family: c.family, prompt }));
+      if (s > bestScore + NEAR_TIE_MARGIN) { bestScore = s; pick = c; }
+    }
+    return pick.parameters.map((p) => p.name);
+  };
+  const vintage = select("a warm vintage compressor for vocals");
+  check("near-tie selection: vintage vocals keeps the Warmth (feedback) topology", vintage.some((n) => /warmth/i.test(n)) && !vintage.some((n) => /attack/i.test(n)), vintage.join(", "));
+  const drums = select("an aggressive punchy drum compressor");
+  check("near-tie selection: punchy drums keeps the Attack (peak) topology", drums.some((n) => /attack/i.test(n)), drums.join(", "));
 }
 
 /* ---- 5. Gap logging (localStorage stub) ---- */

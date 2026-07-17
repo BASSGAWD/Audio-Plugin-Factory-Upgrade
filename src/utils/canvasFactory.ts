@@ -17,7 +17,7 @@ import { AudioPlugin, BuildReport } from "../types";
 import { AudioPluginSpec, classifyPluginIntent } from "./pluginSpec";
 import { buildOfflineCandidates } from "./offlineBuilder";
 import { QualityGateResult, runQualityGate } from "./qualityGate";
-import { refinementScore, voicingVariant, paramDeltas, MAX_REFINE_LOOPS } from "./refinementLoop";
+import { refinementScore, voicingVariant, paramDeltas, MAX_REFINE_LOOPS, NEAR_TIE_MARGIN } from "./refinementLoop";
 import { buildPortableScaffolds } from "./portableCodegen";
 
 export interface CanvasBuildProgress {
@@ -76,7 +76,12 @@ export async function buildCanvasPlugin(prompt: string, opts: CanvasBuildOptions
   throwIfAborted();
 
   // Gate every distinct candidate; the best gated seed becomes the base the
-  // perfecting loop reworks. Strictly-higher acceptance from the very start.
+  // perfecting loop reworks. Candidates arrive in preference order — the
+  // requirements-matched topology first (e.g. the vintage/Warmth compressor
+  // for "warm vintage vocals"), then alternates. A later candidate must beat
+  // the current best by MORE than a near-tie to displace it, so an
+  // ear-indistinguishable score win never silently overrides the deliberate
+  // engineering choice.
   report({ stage: "gate" });
   let best: { plugin: AudioPlugin; gate: QualityGateResult } | null = null;
   let bestScore = -Infinity;
@@ -99,7 +104,7 @@ export async function buildCanvasPlugin(prompt: string, opts: CanvasBuildOptions
     const gate = runQualityGate(candidatePlugin, { family: cand.family, prompt, intent: spec.interpretedGoal });
     versionsTried++;
     const score = refinementScore(gate);
-    if (score > bestScore) {
+    if (score > bestScore + NEAR_TIE_MARGIN) {
       best = { plugin: gate.plugin, gate };
       bestScore = score;
     }

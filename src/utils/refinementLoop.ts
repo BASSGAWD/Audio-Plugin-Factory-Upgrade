@@ -246,14 +246,19 @@ export async function runRefinementLoop(
     { label: "v1", plugin: initial.plugin, gate: initial.gate, score: initialScore, changeSummary: "initial build" },
   ];
 
-  // Best-of-N seeds: alternate builds compete for "best" before any rework
-  // pass, under the same strictly-higher rule, and join the ranked pool. If a
-  // deterministic alternate beats the model build, the alternate ships.
+  // Best-of-N seeds: alternate builds join the ranked pool and compete for
+  // "best" before any rework pass. An alternate must beat the base by MORE
+  // than a near-tie to displace it. The base is either the model build or the
+  // requirements-matched topology (candidate[0], e.g. the vintage compressor
+  // for "warm vintage vocals"); a marginal, ear-indistinguishable score win
+  // must not silently override that deliberate choice. A genuinely better
+  // alternate (> NEAR_TIE_MARGIN) still ships, and every seed stays in the
+  // ranked pool for the user to A/B regardless.
   const seedTrace: RefinementIteration[] = [];
   for (let s = 0; s < (opts.seedCandidates?.length ?? 0); s++) {
     const seed = opts.seedCandidates![s];
     const score = refinementScore(seed.gate);
-    const accepted = score > bestScore;
+    const accepted = score > bestScore + NEAR_TIE_MARGIN;
     const label = `alt${s + 1}`;
     if (accepted) {
       best = { plugin: seed.plugin, gate: seed.gate };

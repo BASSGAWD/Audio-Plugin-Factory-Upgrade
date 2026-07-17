@@ -30,6 +30,14 @@ import { rankTopologies, logPromptGap } from "./knowledgeGraph";
 import { DspTopology } from "./dspTopologies";
 import { findApprovedModuleForPrompt } from "./researchEngine";
 
+/** Why a particular topology was chosen — the "engineering brain" made
+ *  visible: the design name, the one-line rationale, and the wording it read. */
+export interface EngineeringChoice {
+  topology: string;
+  rationale: string;
+  evidence: string[];
+}
+
 export interface OfflineBuild {
   name: string;
   category: AudioPlugin["category"];
@@ -37,6 +45,9 @@ export interface OfflineBuild {
   parameters: PluginParameter[];
   dspFunction: string;
   family: PluginFamily;
+  /** Present only on the requirements-matched build (candidate[0]) when the
+   *  wording drove a non-default topology; alternates carry none. */
+  engineeringChoice?: EngineeringChoice;
   /** Markdown bullet list describing what was built, for the chat reply. */
   summary: string;
 }
@@ -642,6 +653,10 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     dspFunction,
     family: spec.family,
     summary: summaryLines.join("\n"),
+    engineeringChoice:
+      engineeringChoice && hasRequirements(requirements)
+        ? { topology: engineeringChoice.tags.topology, rationale: engineeringChoice.rationale, evidence: requirements.evidence }
+        : undefined,
   };
 }
 
@@ -677,6 +692,9 @@ export function buildOfflineCandidates(prompt: string, specIn?: AudioPluginSpec 
       description: `${FAMILY_LABELS[spec.family]}: alternate take — ${take}.`,
       parameters,
       dspFunction,
+      // Alternates are runner-ups, not the requirement match — they carry no
+      // "why this design" rationale (only candidate[0] does).
+      engineeringChoice: undefined,
     });
   };
 

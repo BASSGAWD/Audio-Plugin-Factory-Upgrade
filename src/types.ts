@@ -135,6 +135,9 @@ export interface BuildReport {
   codeHealth?: number;
   /** Concrete, actionable engineering findings from the code auditor. */
   codeFindings?: string[];
+  /** Why this topology was chosen — the engineering brain made visible.
+   *  Present only when the prompt's wording drove a non-default design. */
+  engineeringChoice?: { topology: string; rationale: string; evidence: string[] };
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

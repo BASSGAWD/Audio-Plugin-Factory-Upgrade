@@ -142,6 +142,24 @@ const CanvasPluginCard: React.FC<CardProps> = ({
         “{card.prompt}”
       </p>
 
+      {/* Why this design — the engineering brain made visible */}
+      {card.plugin?.buildReport?.engineeringChoice && (
+        <div
+          className="rounded-lg border border-orange-900/40 bg-orange-950/20 px-2.5 py-2"
+          title={`Read from your wording: ${card.plugin.buildReport.engineeringChoice.evidence.join("; ")}`}
+        >
+          <div className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-orange-400/90">
+            <Sparkles className="w-2.5 h-2.5" />
+            Why this design
+          </div>
+          <p className="mt-1 text-[10px] leading-relaxed text-neutral-300">
+            <span className="font-mono text-orange-300">{card.plugin.buildReport.engineeringChoice.topology}</span>
+            {" — "}
+            {card.plugin.buildReport.engineeringChoice.rationale}
+          </p>
+        </div>
+      )}
+
       {card.status === "failed" && (
         <div className="rounded-lg border border-rose-900/60 bg-rose-950/30 p-3 space-y-2">
           <div className="flex items-center gap-1.5 text-rose-300 text-[11px] font-semibold">

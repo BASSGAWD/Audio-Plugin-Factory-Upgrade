@@ -15,7 +15,7 @@
 
 import { AudioPlugin, BuildReport } from "../types";
 import { AudioPluginSpec, classifyPluginIntent } from "./pluginSpec";
-import { buildOfflineCandidates } from "./offlineBuilder";
+import { buildOfflineCandidates, OfflineBuild } from "./offlineBuilder";
 import { QualityGateResult, runQualityGate } from "./qualityGate";
 import { refinementScore, voicingVariant, paramDeltas, MAX_REFINE_LOOPS, NEAR_TIE_MARGIN } from "./refinementLoop";
 import { buildPortableScaffolds } from "./portableCodegen";
@@ -85,6 +85,7 @@ export async function buildCanvasPlugin(prompt: string, opts: CanvasBuildOptions
   report({ stage: "gate" });
   let best: { plugin: AudioPlugin; gate: QualityGateResult } | null = null;
   let bestScore = -Infinity;
+  let bestChoice: OfflineBuild["engineeringChoice"] = undefined;
   let versionsTried = 0;
   const seenDsp = new Set<string>();
   for (const cand of candidates) {
@@ -107,6 +108,7 @@ export async function buildCanvasPlugin(prompt: string, opts: CanvasBuildOptions
     if (score > bestScore + NEAR_TIE_MARGIN) {
       best = { plugin: gate.plugin, gate };
       bestScore = score;
+      bestChoice = cand.engineeringChoice;
     }
     report({ stage: "gate", detail: `seed ${versionsTried}`, bestMinScore: best ? minOf(best.gate) : undefined, versionsTried });
     await yieldToUi();
@@ -141,6 +143,12 @@ export async function buildCanvasPlugin(prompt: string, opts: CanvasBuildOptions
   if (refinementTrace.length > 0) {
     best.gate.report.refinement = refinementTrace;
     if (best.plugin.buildReport) best.plugin.buildReport.refinement = refinementTrace;
+  }
+  // Carry the winning candidate's "why this design" onto the shipped report so
+  // the card can show it. Voicing reworks keep the same topology, so the
+  // rationale survives the perfecting loop.
+  if (bestChoice && best.plugin.buildReport) {
+    best.plugin.buildReport.engineeringChoice = bestChoice;
   }
 
   // Ship with portable code attached so "Open in Studio" and the exporter

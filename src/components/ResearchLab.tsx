@@ -20,7 +20,7 @@ import {
 import { runKnowledgeAudit, CURRICULUM } from "../utils/knowledgeAudit";
 import { readPromptGaps } from "../utils/knowledgeGraph";
 import { getLLMConfig, isLocalProvider } from "../utils/llmGateway";
-import { Globe } from "lucide-react";
+import { Globe, Github } from "lucide-react";
 
 interface ResearchLabProps {
   triggerToast: (message: string) => void;
@@ -144,7 +144,7 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
           <Globe className="w-3 h-3 text-sky-400" />
           <span className="text-[10px] text-neutral-300">
             Include <strong className="text-sky-300">live web sources</strong>
-            <span className="text-neutral-500"> — fetches a curated allowlist of authoritative references (Wikipedia, CCRMA, W3C) for extra cited evidence. Off by default; web text is data only — it can never build or approve anything on its own.</span>
+            <span className="text-neutral-500"> — fetches a curated allowlist of authoritative references (Wikipedia, CCRMA, W3C) for cited evidence, and links to matching open-source implementations from the OpenAudio index for code examples. Off by default; everything fetched is data only — it can never build or approve anything on its own.</span>
           </span>
         </label>
       </div>
@@ -258,6 +258,25 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
                     {item.proposedModule.verification.defects.length > 0 && (
                       <div className="mt-0.5">{item.proposedModule.verification.defects.join("; ")}</div>
                     )}
+                  </div>
+                )}
+
+                {/* Reference implementations (OpenAudio) — links only, never built */}
+                {item.references && item.references.length > 0 && (
+                  <div className="rounded-md px-2 py-1.5 border bg-neutral-900/40 border-neutral-800 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[9.5px] font-bold text-neutral-300">
+                      <Github className="w-3 h-3" />
+                      Reference implementations — {item.references[0].source}
+                      <span className="ml-auto text-[8px] font-normal text-neutral-500 uppercase tracking-wide">links only · not ingested</span>
+                    </div>
+                    <ul className="space-y-0.5">
+                      {item.references.map((r, i) => (
+                        <li key={i} className="text-[9.5px] text-neutral-400 leading-relaxed">
+                          <a href={r.url} target="_blank" rel="noreferrer" className="text-sky-400 hover:text-sky-300 font-semibold">{r.name}</a>
+                          {r.description ? <span> — {r.description}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
 

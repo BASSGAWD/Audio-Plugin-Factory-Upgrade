@@ -57,6 +57,113 @@ export function webSourcesFor(concept: string): WebSource[] {
   return WEB_SOURCES[concept] ?? [];
 }
 
+/* ------------------------------------------------------------------ */
+/* OpenAudio index — a curated list of open-source audio projects.     */
+/* We surface LINKS to real implementations as reference material for   */
+/* the human, never ingesting or shipping their code (copyright + the   */
+/* same data-only safety model as every web source).                    */
+/* ------------------------------------------------------------------ */
+
+export const OPENAUDIO_INDEX = {
+  url: "https://raw.githubusercontent.com/webprofusion/OpenAudio/master/README.md",
+  source: "OpenAudio (webprofusion) — curated open-source audio index",
+  /** Community-curated index tier (above forums 55, below books 90). */
+  authority: 68,
+};
+
+export interface IndexEntry {
+  name: string;
+  url: string;
+  description: string;
+}
+
+const MD_LINK = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/;
+
+/**
+ * Parse the OpenAudio README (markdown) into {name, url, description}
+ * entries. Handles both the plugin TABLE rows (`| [Name](url) | desc | … |`)
+ * and the Code-Samples BULLET list (`* [Name](url) — desc`). Pure and
+ * deterministic; treats the markdown as inert data.
+ */
+export function parseOpenAudioIndex(markdown: string): IndexEntry[] {
+  const entries: IndexEntry[] = [];
+  const seen = new Set<string>();
+  for (const line of markdown.split("\n")) {
+    const link = line.match(MD_LINK);
+    if (!link) continue;
+    const name = link[1].trim();
+    const url = link[2].trim();
+    if (seen.has(url) || !/^https?:\/\//.test(url)) continue;
+
+    let description = "";
+    if (line.trimStart().startsWith("|")) {
+      const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+      const idx = cells.findIndex((c) => c.includes(url));
+      description = idx >= 0 && cells[idx + 1] ? cells[idx + 1] : "";
+    } else {
+      const after = line.slice(line.indexOf(link[0]) + link[0].length);
+      description = after.replace(/^[\s—–\-:|]+/, "").trim();
+    }
+    description = description.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/\s+/g, " ").slice(0, 220);
+
+    entries.push({ name, url, description });
+    seen.add(url);
+  }
+  return entries;
+}
+
+/** Search terms for matching index entries to a research concept. Falls back
+ *  to the concept slug's own words when no explicit mapping exists. */
+const CONCEPT_SEARCH_TERMS: Record<string, string[]> = {
+  convolution: ["convolution", "convolv", "impulse response", "convolution reverb"],
+  reverb: ["reverb", "reverberation", "room", "hall", "plate"],
+  phaser: ["phaser", "allpass", "phase"],
+  compressor: ["compressor", "compression", "dynamics", "limiter"],
+  "parallel-compression": ["parallel compression", "compressor", "dynamics"],
+  "multiband-compression": ["multiband", "compressor"],
+  delay: ["delay", "echo"],
+  "multi-tap": ["delay", "echo", "multi-tap"],
+  "ping-pong": ["ping-pong", "delay", "stereo delay"],
+  distortion: ["distortion", "saturation", "overdrive", "waveshaper", "fuzz"],
+  "dynamic-saturation": ["saturation", "distortion", "tape"],
+  filter: ["filter", "svf", "state variable"],
+  biquad: ["biquad", "eq", "equalizer", "filter"],
+  chorus: ["chorus", "flanger", "modulation"],
+  "fm-synthesis": ["fm synth", "frequency modulation", "operator", "dexed"],
+  wavetable: ["wavetable", "vital", "wavetable synth"],
+  synthesizer: ["synth", "synthesizer", "oscillator"],
+  "spectral-processing": ["spectral", "fft", "vocoder", "phase vocoder"],
+  "pitch-correction": ["pitch", "autotune", "auto-tune", "pitch correction"],
+  "granular-pitch-shift": ["granular", "pitch shift"],
+  "opto-model": ["opto", "la-2a", "compressor"],
+  "fet-model": ["fet", "1176", "compressor"],
+  "sidechain-filter": ["de-esser", "sidechain", "compressor"],
+  "sidechain-input": ["sidechain", "ducking"],
+};
+
+export function searchTermsFor(concept: string): string[] {
+  if (CONCEPT_SEARCH_TERMS[concept]) return CONCEPT_SEARCH_TERMS[concept];
+  const words = concept.split(/[-_]/).filter((w) => w.length >= 3);
+  return words.length > 0 ? words : [concept];
+}
+
+/** Rank index entries by how many search terms appear in name+description
+ *  (hyphen/space-insensitive), returning the top `max` with any match. */
+export function matchIndexEntries(entries: IndexEntry[], terms: string[], max = 4): IndexEntry[] {
+  const norm = (s: string) => s.toLowerCase().replace(/[\s-]+/g, "");
+  const nterms = terms.map(norm).filter(Boolean);
+  return entries
+    .map((e) => {
+      const hay = norm(`${e.name} ${e.description}`);
+      const score = nterms.reduce((n, t) => (hay.includes(t) ? n + 1 : n), 0);
+      return { e, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, max)
+    .map((x) => x.e);
+}
+
 /**
  * Extract the most relevant sentences from a fetched reference page. Pure and
  * deterministic: strips HTML/scripts, splits into sentences, ranks by keyword

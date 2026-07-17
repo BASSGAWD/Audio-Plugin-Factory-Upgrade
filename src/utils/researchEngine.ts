@@ -32,7 +32,10 @@ import { runQualityGate } from "./qualityGate";
 import { familyToCategory, PluginFamily } from "./pluginSpec";
 import { DspRecipe } from "./dspRecipes";
 import { LLMConfig, callLocalLLM, isLocalProvider, fetchLLMRoute } from "./llmGateway";
-import { webSourcesFor, extractRelevantPassages } from "./researchSources";
+import {
+  webSourcesFor, extractRelevantPassages,
+  OPENAUDIO_INDEX, parseOpenAudioIndex, matchIndexEntries, searchTermsFor,
+} from "./researchSources";
 
 /**
  * Fetches a curated reference URL and returns its raw text, or null on any
@@ -73,6 +76,20 @@ export interface ModuleVerification {
   defects: string[];
 }
 
+/**
+ * A link to an external open-source implementation (from the OpenAudio index).
+ * REFERENCE MATERIAL ONLY — a pointer to code the human can read. It is never
+ * ingested, never verified into a module, and never affects approval. It
+ * exists so a human building a plugin can study real implementations.
+ */
+export interface CodeReference {
+  name: string;
+  url: string;
+  description: string;
+  source: string;
+  authority: number;
+}
+
 export interface ResearchItem {
   id: string;
   concept: string;
@@ -88,6 +105,8 @@ export interface ResearchItem {
     body: string;
     verification: ModuleVerification;
   };
+  /** External code-example links (OpenAudio). Reference only — see above. */
+  references?: CodeReference[];
   status: "pending" | "approved" | "rejected";
   createdAt: string;
   decidedAt?: string;
@@ -142,6 +161,7 @@ export function planResearch(concept: string): ResearchPlan {
       "built-in corpus (academic texts, cookbook specs, curated community archives — cited per claim)",
       "local LLM proposal (authority 20; only when a local model is configured and reachable)",
       "live web (opt-in; a curated allowlist of authoritative references, extracted verbatim and cited — data only, never buildable)",
+      "OpenAudio index (opt-in; links to matching open-source implementations for code examples — reference only, never ingested or built)",
     ],
     acceptance: [
       "every claim carries a citation with an authority score",
@@ -228,6 +248,32 @@ async function gatherFromWeb(concept: string, fetcher: WebFetcher | null | undef
   return claims;
 }
 
+/**
+ * OPT-IN: fetch the OpenAudio index and surface the open-source projects most
+ * relevant to this concept as CODE-EXAMPLE LINKS. This is "the source and its
+ * sources": OpenAudio is the curated index, the repos it lists are its
+ * sources. We point at that code for the human to study — we never fetch,
+ * ingest, or ship it (copyright + the data-only safety contract). Best-effort:
+ * a failed fetch just contributes no references.
+ */
+async function gatherFromIndex(concept: string, fetcher: WebFetcher | null | undefined): Promise<CodeReference[]> {
+  if (!fetcher) return [];
+  try {
+    const raw = await fetcher(OPENAUDIO_INDEX.url);
+    if (!raw) return [];
+    const entries = matchIndexEntries(parseOpenAudioIndex(raw), searchTermsFor(concept), 5);
+    return entries.map((e) => ({
+      name: e.name,
+      url: e.url,
+      description: e.description,
+      source: OPENAUDIO_INDEX.source,
+      authority: OPENAUDIO_INDEX.authority,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* 4. Conflict detection                                               */
 /* ------------------------------------------------------------------ */
@@ -307,9 +353,10 @@ export async function runResearch(
   const existing = readResearchQueue().find((i) => i.concept === concept && i.status === "pending");
   if (existing) return existing;
 
-  const [modelClaims, webClaims] = await Promise.all([
+  const [modelClaims, webClaims, references] = await Promise.all([
     gatherFromModel(concept, resolved.llmConfig ?? null),
     gatherFromWeb(concept, resolved.webFetcher),
+    gatherFromIndex(concept, resolved.webFetcher),
   ]);
   const gathered: Gathered = { entries: corpusEntriesFor(concept), modelClaims };
 
@@ -346,6 +393,10 @@ export async function runResearch(
     topAuthority,
     conflicts,
     proposedModule,
+    // Reference links attach regardless of block/approval status — they never
+    // change what can be built or approved, they only give the human real
+    // implementations to study.
+    references: references.length > 0 ? references : undefined,
     status: "pending",
     createdAt: new Date().toISOString(),
   };

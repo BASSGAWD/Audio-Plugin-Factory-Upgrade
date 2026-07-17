@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import { auditCppRealtimeSafety, formatCppAudit } from "../src/utils/cppAudit";
 
 // ---------------------------------------------------------------------------
 // Real native VST3 build pipeline: turns an AudioPlugin JSON blob into an
@@ -508,6 +509,10 @@ export interface ScaffoldResult {
   projectName: string;
   dspTranslated: boolean;
   warning?: string;
+  /** Real-time-safety score (0-100) of the translated C++ DSP core. */
+  cppRealtimeScore?: number;
+  /** Concrete real-time-safety findings on the generated core. */
+  cppAuditFindings?: string[];
 }
 
 export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: LocalLLMConfig): Promise<ScaffoldResult> {
@@ -542,9 +547,25 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
     warning = `DSP translation via local model failed (${err.message}); wrote a passthrough placeholder instead.`;
   }
 
+  // Real-time-safety audit of the translated DSP core BEFORE it ships: a
+  // local model can introduce a heap allocation / lock / IO call the JS
+  // original never had. Reviewer-grade findings are written next to the code
+  // and surfaced in the scaffold result; a non-safe core is flagged loudly.
+  const coreAudit = auditCppRealtimeSafety(translation.methodBody, "core");
+  const cppAuditFindings = coreAudit.findings.map((f) => `[${f.severity}] ${f.message}`);
+  console.log(`[native-build] ${formatCppAudit(coreAudit)}`);
+  if (!coreAudit.realtimeSafe && dspTranslated) {
+    const rt = `Translated C++ core is NOT real-time-safe (score ${coreAudit.score}/100): ${coreAudit.findings.filter((f) => f.severity === "critical").map((f) => f.message).join("; ")}`;
+    warning = warning ? `${warning} ${rt}` : rt;
+  }
+
   fs.writeFileSync(path.join(projectDir, "CMakeLists.txt"), generateCMakeLists(projectName, pluginCode));
   fs.writeFileSync(path.join(projectDir, "Source", "Parameters.h"), generateParametersHeader(plugin.parameters));
   fs.writeFileSync(path.join(projectDir, "Source", "dsp", "ProcessorCore.h"), generateProcessorCoreHeader(translation));
+  fs.writeFileSync(
+    path.join(projectDir, "Source", "dsp", "REALTIME_AUDIT.txt"),
+    `${formatCppAudit(coreAudit)}\n\n${cppAuditFindings.length ? cppAuditFindings.join("\n") : "No heap allocation, locks, IO, or logging found in the audio path."}\n`
+  );
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.h"), generatePluginProcessorHeader(projectName));
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.cpp"), generatePluginProcessorCpp(projectName, plugin.parameters));
   fs.writeFileSync(path.join(projectDir, "Source", "PluginEditor.h"), generatePluginEditorHeader(projectName));
@@ -559,7 +580,7 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
     JSON.stringify({ projectName, slug, paramIds, dspTranslated }, null, 2)
   );
 
-  return { projectDir, slug, projectName, dspTranslated, warning };
+  return { projectDir, slug, projectName, dspTranslated, warning, cppRealtimeScore: coreAudit.score, cppAuditFindings };
 }
 
 // ---------------------------------------------------------------------------

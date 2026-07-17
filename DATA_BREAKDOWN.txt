@@ -268,9 +268,15 @@ PART 4 — OPTIONAL OUTSIDE CONNECTIONS (all off by default, none required)
   • GEMINI (cloud, optional) — only if you configure an API key. This is the
     only path where your prompt leaves your computer.
   • NATIVE VST3 BUILD — runs CMake/C++ on your own machine via the local
-    server; nothing remote.
+    server; nothing remote. The generated C++ DSP core is REAL-TIME-SAFETY
+    AUDITED before it ships (src/utils/cppAudit.ts): the scaffold scans the
+    model's JS->C++ translation for heap allocation (new/delete/malloc),
+    locks, file/network IO, logging, sleeps, and a missing ScopedNoDenormals,
+    writes the findings to Source/dsp/REALTIME_AUDIT.txt next to the code, and
+    flags a non-safe core loudly. A professional plugin reviewer's checklist,
+    run automatically.
 
 ================================================================================
 Updated 2026-07-16 from the current codebase. Everything above is enforced
-by the 23-suite regression test pack (npm test). Audit dashboard: npm run audit.
+by the 24-suite regression test pack (npm test). Audit dashboard: npm run audit.
 ================================================================================

@@ -1,6 +1,6 @@
 # OrangeJuce Knowledge Audit
 
-Generated 2026-07-16T21:29:45.737Z — every number below is measured, not claimed.
+Generated 2026-07-17T00:19:09.097Z — every number below is measured, not claimed.
 
 ## 1. Inventory
 
@@ -49,28 +49,28 @@ Generated 2026-07-16T21:29:45.737Z — every number below is measured, not claim
 | 4 | Learned, re-validated at use | candidate recipe memory, learned pitfalls (localStorage) | re-gated before reuse; pitfalls only bias prompts, never ship code |
 | 5 | Model proposals | local LLM rework/edit suggestions | never trusted: must beat the incumbent's measured score to survive |
 
-## 5. Demonstrated ability — 100% of benchmarks ship at the >= 97 floor
+## 5. Demonstrated ability — 100% of benchmarks ship at the >= 97 floor (avg code health 100)
 
-| Benchmark | Family | Min score | Ships? | Candidates | Topology chosen |
-|-----------|--------|-----------|--------|------------|-----------------|
-| Transparent mastering compressor | dynamics | 100 | yes | 4 | comp_lookahead_master |
-| Drum smash compressor | dynamics | 100 | yes | 4 | comp_peak_punch |
-| Vintage vocal compressor | dynamics | 100 | yes | 4 | comp_feedback_glue |
-| Live vocal compressor | dynamics | 100 | yes | 4 | comp_feedback_glue |
-| Plate vocal reverb | reverb | 100 | yes | 4 | reverb_fdn_plate |
-| Tight drum room | reverb | 100 | yes | 4 | reverb_room_er |
-| Shimmer reverb | reverb | 100 | yes | 4 | reverb_schroeder |
-| Tape echo | delay | 100 | yes | 4 | delay_tape |
-| Pristine digital delay | delay | 100 | yes | 3 | delay_digital |
-| Tube saturation | saturator | 100 | yes | 2 | — |
-| Hard fuzz | distortion | 100 | yes | 4 | dist_fuzz |
-| Resonant filter sweep | filter | 100 | yes | 2 | — |
-| 3-band EQ | eq | 100 | yes | 3 | — |
-| Chorus | modulation | 100 | yes | 2 | — |
-| Autotune | pitch | 100 | yes | 2 | — |
-| Drum pads | sampler | 100 | yes | 2 | — |
-| Synth pad | synthesizer | 100 | yes | 2 | — |
-| Novel hybrid | hybrid_other | 100 | yes | 1 | — |
+| Benchmark | Family | Min score | Code health | Ships? | Candidates | Topology chosen |
+|-----------|--------|-----------|-------------|--------|------------|-----------------|
+| Transparent mastering compressor | dynamics | 100 | 100 | yes | 4 | comp_lookahead_master |
+| Drum smash compressor | dynamics | 100 | 100 | yes | 4 | comp_peak_punch |
+| Vintage vocal compressor | dynamics | 100 | 97 | yes | 4 | comp_feedback_glue |
+| Live vocal compressor | dynamics | 100 | 97 | yes | 4 | comp_feedback_glue |
+| Plate vocal reverb | reverb | 100 | 100 | yes | 4 | reverb_fdn_plate |
+| Tight drum room | reverb | 100 | 100 | yes | 4 | reverb_room_er |
+| Shimmer reverb | reverb | 100 | 100 | yes | 4 | reverb_schroeder |
+| Tape echo | delay | 100 | 100 | yes | 4 | delay_tape |
+| Pristine digital delay | delay | 100 | 100 | yes | 3 | delay_digital |
+| Tube saturation | saturator | 100 | 100 | yes | 2 | — |
+| Hard fuzz | distortion | 100 | 100 | yes | 4 | dist_fuzz |
+| Resonant filter sweep | filter | 100 | 100 | yes | 2 | — |
+| 3-band EQ | eq | 100 | 100 | yes | 3 | — |
+| Chorus | modulation | 100 | 100 | yes | 2 | — |
+| Autotune | pitch | 100 | 99 | yes | 2 | — |
+| Drum pads | sampler | 100 | 100 | yes | 2 | — |
+| Synth pad | synthesizer | 100 | 100 | yes | 2 | — |
+| Novel hybrid | hybrid_other | 100 | 100 | yes | 1 | — |
 
 ---
 Regenerate with `npm run audit`. Coverage comes from the knowledge graph

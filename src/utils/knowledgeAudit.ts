@@ -187,6 +187,8 @@ export interface BenchmarkResult {
   candidatesTried: number;
   /** Topology the engineering layer chose (when the family has choices). */
   chosenTopology: string | null;
+  /** Static engineering-quality score of the winning build's code (0-100). */
+  codeHealth: number;
 }
 
 export interface KnowledgeAudit {
@@ -249,6 +251,7 @@ export function runBenchmarks(benchmarks: BenchmarkSpec[] = BENCHMARKS): Benchma
     const ranked = rankTopologies(spec.family, requirements);
     const candidates = buildOfflineCandidates(b.prompt, spec);
     let best = -1;
+    let bestCodeHealth = 0;
     for (const c of candidates) {
       const plugin: AudioPlugin = {
         id: "audit", name: c.name, category: c.category, description: c.description,
@@ -258,7 +261,10 @@ export function runBenchmarks(benchmarks: BenchmarkSpec[] = BENCHMARKS): Benchma
       try {
         const gated = runQualityGate(plugin, { family: c.family, prompt: b.prompt });
         const min = Math.min(gated.scores.looks, gated.scores.performance, gated.scores.latency, gated.scores.musicality);
-        if (min > best) best = min;
+        if (min > best) {
+          best = min;
+          bestCodeHealth = gated.report.codeHealth ?? 0;
+        }
       } catch {
         // a throwing candidate scores nothing; others still compete
       }
@@ -271,6 +277,7 @@ export function runBenchmarks(benchmarks: BenchmarkSpec[] = BENCHMARKS): Benchma
       pass: best >= 97,
       candidatesTried: candidates.length,
       chosenTopology: ranked.length > 0 ? ranked[0].id : null,
+      codeHealth: bestCodeHealth,
     };
   });
 }
@@ -353,12 +360,13 @@ export function formatKnowledgeAudit(a: KnowledgeAudit): string {
   }
   lines.push("");
   if (a.benchmarks.length > 0) {
-    lines.push(`## 5. Demonstrated ability — ${a.benchmarkPassRate}% of benchmarks ship at the >= 97 floor`);
+    const avgHealth = Math.round(a.benchmarks.reduce((s, b) => s + b.codeHealth, 0) / a.benchmarks.length);
+    lines.push(`## 5. Demonstrated ability — ${a.benchmarkPassRate}% of benchmarks ship at the >= 97 floor (avg code health ${avgHealth})`);
     lines.push("");
-    lines.push("| Benchmark | Family | Min score | Ships? | Candidates | Topology chosen |");
-    lines.push("|-----------|--------|-----------|--------|------------|-----------------|");
+    lines.push("| Benchmark | Family | Min score | Code health | Ships? | Candidates | Topology chosen |");
+    lines.push("|-----------|--------|-----------|-------------|--------|------------|-----------------|");
     for (const b of a.benchmarks) {
-      lines.push(`| ${b.name} | ${b.family} | ${b.minScore} | ${b.pass ? "yes" : "NO"} | ${b.candidatesTried} | ${b.chosenTopology ?? "—"} |`);
+      lines.push(`| ${b.name} | ${b.family} | ${b.minScore} | ${b.codeHealth} | ${b.pass ? "yes" : "NO"} | ${b.candidatesTried} | ${b.chosenTopology ?? "—"} |`);
     }
     lines.push("");
   }

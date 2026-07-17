@@ -23,6 +23,7 @@ import { AudioPlugin, BuildReport, PluginParameter } from "../types";
 import { sanitizeDspCode } from "./healthcheckRunner";
 import { PluginFamily } from "./pluginSpec";
 import { UiTheme, buildUiSpec, composeTheme, orderParametersBySpec } from "./uiSpec";
+import { auditDspCode, formatCodeAudit } from "./codeAudit";
 
 export interface QualityScores {
   looks: number;
@@ -1348,6 +1349,14 @@ export function runQualityGate(
     );
   }
 
+  // Static engineering audit: grade the CODE (real-time safety, numerical
+  // robustness, smoothing, maintainability), not just the sound. Informational
+  // — never touches the four headline scores, so the >=97 floor stays provable.
+  const codeAudit = m.fatal ? null : auditDspCode(plugin.dspFunction, workingParams);
+  if (codeAudit) {
+    notes.push(formatCodeAudit(codeAudit));
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -1369,6 +1378,8 @@ export function runQualityGate(
     harsh,
     truePeakDb: Number.isFinite(truePeakDb) ? Math.round(truePeakDb * 100) / 100 : undefined,
     stereoOutput: !!m.stereoOutput,
+    codeHealth: codeAudit ? codeAudit.codeHealth : undefined,
+    codeFindings: codeAudit ? codeAudit.findings.map((f) => `[${f.severity}] ${f.message}`) : undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

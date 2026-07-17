@@ -169,6 +169,22 @@ noise, and a clean tone. The gate measures and FIXES:
 A build only ships when all four headline scores (looks, performance, latency,
 musicality) are at or above 97/100.
 
+1.5b THE CODE AUDITOR  (src/utils/codeAudit.ts)
+-----------------------------------------------
+The gate above proves a plugin SOUNDS right. The code auditor proves the CODE
+is right — a static engineering review of the generated DSP, scored 0-100:
+  • REAL-TIME SAFETY — no per-sample allocation, no array growth, no
+    Math.random / console / JSON / timers in the audio path
+  • NUMERICAL ROBUSTNESS — guarded logs and divisions, feedback that can't
+    run away, a soft-limited return
+  • PARAMETER SMOOTHING — coefficient-driving knobs are smoothed, not zippered
+  • MAINTAINABILITY — body length, nesting depth, magic-number density
+Every finding is concrete and actionable; the "code health" score rides in
+each build report and the knowledge audit's per-benchmark column. It's
+informational (never touches the four headline scores). Building it caught a
+real issue in the golden sampler recipe — Math.random() in the audio path —
+now hardened to a seeded PRNG.
+
 
 ================================================================================
 PART 2 — WHAT'S STORED ON YOUR MACHINE (browser localStorage)
@@ -256,5 +272,5 @@ PART 4 — OPTIONAL OUTSIDE CONNECTIONS (all off by default, none required)
 
 ================================================================================
 Updated 2026-07-16 from the current codebase. Everything above is enforced
-by the 21-suite regression test pack (npm test). Audit dashboard: npm run audit.
+by the 23-suite regression test pack (npm test). Audit dashboard: npm run audit.
 ================================================================================

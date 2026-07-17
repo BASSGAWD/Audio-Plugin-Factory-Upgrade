@@ -129,6 +129,12 @@ export interface BuildReport {
   /** True when the DSP produced a measurably distinct right channel
    *  (state.outR) on the program render — genuine stereo, not dual-mono. */
   stereoOutput?: boolean;
+  /** Static engineering-quality score (0-100) from the DSP code auditor:
+   *  real-time safety, numerical robustness, parameter smoothing,
+   *  maintainability. Informational — measures the CODE, not the sound. */
+  codeHealth?: number;
+  /** Concrete, actionable engineering findings from the code auditor. */
+  codeFindings?: string[];
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

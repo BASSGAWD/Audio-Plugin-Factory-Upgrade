@@ -39,6 +39,7 @@ const TEST_FILES = [
   "researchEngineTest.ts",
   "stereoEngineTest.ts",
   "blockProcessingTest.ts",
+  "codeAuditTest.ts",
 ];
 
 let failed = 0;

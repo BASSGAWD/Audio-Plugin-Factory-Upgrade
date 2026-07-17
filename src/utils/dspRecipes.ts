@@ -263,9 +263,14 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
     body: `if (!state.init) {
   state.p1 = 0; state.p2 = 0; state.p4 = 0; state.p5 = 0; state.p7 = 0; state.p8 = 0;
   state.n3 = 0; state.n6 = 0;
+  state.rng = 2463534242;
   state.init = true;
 }
 let mix = params.mix !== undefined ? params.mix : 0.9;
+// Seeded xorshift PRNG: deterministic, reproducible white noise for the
+// snare/hat pads (Math.random would be non-deterministic across runs).
+state.rng ^= state.rng << 13; state.rng ^= state.rng >>> 17; state.rng ^= state.rng << 5;
+let rnd = state.rng / 2147483648;
 let sum = 0;
 if (params.pad_1) {
   state.p1 += 2 * Math.PI * 55 / 44100; if (state.p1 > 2 * Math.PI) state.p1 -= 2 * Math.PI;
@@ -276,7 +281,7 @@ if (params.pad_2) {
   sum += Math.sin(state.p2) * 0.8 * (params.pad_2 / 127);
 }
 if (params.pad_3) {
-  let noise = (Math.random() * 2 - 1);
+  let noise = rnd;
   state.n3 += 0.5 * (noise - state.n3);
   sum += state.n3 * 0.6 * (params.pad_3 / 127);
 }
@@ -289,7 +294,8 @@ if (params.pad_5) {
   sum += Math.sin(state.p5) * 0.55 * (params.pad_5 / 127);
 }
 if (params.pad_6) {
-  let noise2 = (Math.random() * 2 - 1);
+  state.rng ^= state.rng << 13; state.rng ^= state.rng >>> 17; state.rng ^= state.rng << 5;
+  let noise2 = state.rng / 2147483648;
   state.n6 += 0.85 * (noise2 - state.n6);
   sum += state.n6 * 0.35 * (params.pad_6 / 127);
 }

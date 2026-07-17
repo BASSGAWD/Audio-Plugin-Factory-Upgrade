@@ -31,7 +31,24 @@ import { RESEARCH_QUEUE_KEY, knownConcepts } from "./knowledgeGraph";
 import { runQualityGate } from "./qualityGate";
 import { familyToCategory, PluginFamily } from "./pluginSpec";
 import { DspRecipe } from "./dspRecipes";
-import { LLMConfig, callLocalLLM, isLocalProvider } from "./llmGateway";
+import { LLMConfig, callLocalLLM, isLocalProvider, fetchLLMRoute } from "./llmGateway";
+import { webSourcesFor, extractRelevantPassages } from "./researchSources";
+
+/**
+ * Fetches a curated reference URL and returns its raw text, or null on any
+ * failure. Injectable so tests stay deterministic and offline; the app wires
+ * a proxy-backed implementation (createProxyWebFetcher). The gatherer only
+ * ever calls this with URLs from the curated allowlist, never anything
+ * derived from fetched content.
+ */
+export type WebFetcher = (url: string) => Promise<string | null>;
+
+/** Optional enrichment sources for a research run. Both are off by default. */
+export interface ResearchSources {
+  llmConfig?: LLMConfig | null;
+  /** When provided, the OPT-IN live web gatherer runs against the allowlist. */
+  webFetcher?: WebFetcher | null;
+}
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -124,6 +141,7 @@ export function planResearch(concept: string): ResearchPlan {
     sources: [
       "built-in corpus (academic texts, cookbook specs, curated community archives — cited per claim)",
       "local LLM proposal (authority 20; only when a local model is configured and reachable)",
+      "live web (opt-in; a curated allowlist of authoritative references, extracted verbatim and cited — data only, never buildable)",
     ],
     acceptance: [
       "every claim carries a citation with an authority score",
@@ -161,6 +179,53 @@ async function gatherFromModel(concept: string, llmConfig: LLMConfig | null): Pr
   } catch {
     return []; // model enrichment is best-effort by contract
   }
+}
+
+/**
+ * The app's production WebFetcher: fetches a curated URL through this app's
+ * own /api/proxy relay (server-side fetch, so no browser CORS wall), and
+ * returns the page text. Used only by the opt-in Research Lab toggle.
+ */
+export function createProxyWebFetcher(): WebFetcher {
+  return async (url: string): Promise<string | null> => {
+    try {
+      const res = await fetchLLMRoute(url, { method: "GET" });
+      if (!res.ok) return null;
+      const text = await res.text();
+      return text && text.length > 0 ? text.slice(0, 200000) : null;
+    } catch {
+      return null;
+    }
+  };
+}
+
+/**
+ * OPT-IN live web gatherer: fetch the curated authoritative pages for this
+ * concept and extract cited passages. Everything returned is DATA for the
+ * human to review — verbatim sentences from a known source, tagged with that
+ * source's authority tier. It can never build anything or un-block anything;
+ * fetched text is never interpreted as instructions. Best-effort: a failed or
+ * empty fetch just contributes nothing.
+ */
+async function gatherFromWeb(concept: string, fetcher: WebFetcher | null | undefined): Promise<ResearchClaim[]> {
+  if (!fetcher) return [];
+  const sources = webSourcesFor(concept);
+  const claims: ResearchClaim[] = [];
+  for (const src of sources) {
+    try {
+      const raw = await fetcher(src.url);
+      if (!raw) continue;
+      for (const passage of extractRelevantPassages(raw, src.keywords, 2)) {
+        claims.push({
+          text: passage,
+          citation: { title: src.title, source: `${src.source} (live web)`, url: src.url, authority: src.authority },
+        });
+      }
+    } catch {
+      // one bad fetch never fails the run
+    }
+  }
+  return claims;
 }
 
 /* ------------------------------------------------------------------ */
@@ -226,21 +291,33 @@ function verifyModule(family: PluginFamily, title: string, parameters: DspRecipe
 
 /**
  * Research one concept end-to-end and queue the result for human approval.
- * Returns the queued (or already-pending) item. Deterministic without a
- * model; `llmConfig` adds optional low-authority enrichment.
+ * Returns the queued (or already-pending) item. Deterministic without any
+ * sources; `sources.llmConfig` adds optional low-authority model notes and
+ * `sources.webFetcher` runs the opt-in live web gatherer. Backward-compatible:
+ * a bare LLMConfig (or nothing) still works as the second argument.
  */
-export async function runResearch(concept: string, llmConfig: LLMConfig | null = null): Promise<ResearchItem> {
+export async function runResearch(
+  concept: string,
+  sources: ResearchSources | LLMConfig | null = null
+): Promise<ResearchItem> {
+  // Accept a bare LLMConfig for backward compatibility with earlier callers.
+  const resolved: ResearchSources =
+    sources && "provider" in (sources as LLMConfig) ? { llmConfig: sources as LLMConfig } : ((sources as ResearchSources) ?? {});
+
   const existing = readResearchQueue().find((i) => i.concept === concept && i.status === "pending");
   if (existing) return existing;
 
-  const gathered: Gathered = {
-    entries: corpusEntriesFor(concept),
-    modelClaims: await gatherFromModel(concept, llmConfig),
-  };
+  const [modelClaims, webClaims] = await Promise.all([
+    gatherFromModel(concept, resolved.llmConfig ?? null),
+    gatherFromWeb(concept, resolved.webFetcher),
+  ]);
+  const gathered: Gathered = { entries: corpusEntriesFor(concept), modelClaims };
 
-  // Extraction: merge claims, literature first, ranked by authority.
+  // Extraction: merge every source's claims, ranked by citation authority so
+  // literature and authoritative web sources sort above low-tier model notes.
   const claims: ResearchClaim[] = [
     ...gathered.entries.flatMap((e) => e.claims),
+    ...webClaims,
     ...gathered.modelClaims,
   ].sort((a, b) => b.citation.authority - a.citation.authority);
   const topAuthority = claims.length > 0 ? claims[0].citation.authority : 0;

@@ -15,11 +15,12 @@ import {
   ShieldAlert, Ban, Loader2, GraduationCap, ListX, ExternalLink,
 } from "lucide-react";
 import {
-  ResearchItem, runResearch, approveResearch, rejectResearch, readResearchQueue, isApprovable,
+  ResearchItem, runResearch, approveResearch, rejectResearch, readResearchQueue, isApprovable, createProxyWebFetcher,
 } from "../utils/researchEngine";
 import { runKnowledgeAudit, CURRICULUM } from "../utils/knowledgeAudit";
 import { readPromptGaps } from "../utils/knowledgeGraph";
 import { getLLMConfig, isLocalProvider } from "../utils/llmGateway";
+import { Globe } from "lucide-react";
 
 interface ResearchLabProps {
   triggerToast: (message: string) => void;
@@ -43,6 +44,7 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
   const [queue, setQueue] = useState<ResearchItem[]>(() => readResearchQueue());
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [gapsVersion, setGapsVersion] = useState(0);
+  const [useWeb, setUseWeb] = useState(false);
 
   const refresh = useCallback(() => {
     setQueue(readResearchQueue());
@@ -78,13 +80,17 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
     setBusyKey(gap.researchKey);
     try {
       const cfg = getLLMConfig();
-      const item = await runResearch(gap.researchKey, isLocalProvider(cfg) ? cfg : null);
+      const item = await runResearch(gap.researchKey, {
+        llmConfig: isLocalProvider(cfg) ? cfg : null,
+        webFetcher: useWeb ? createProxyWebFetcher() : null,
+      });
       refresh();
       const blocked = item.conflicts.some((c) => c.severity === "blocking");
+      const webCount = item.claims.filter((c) => /live web/i.test(c.citation.source)).length;
       triggerToast(
         blocked
           ? `Research on "${item.concept}": found a structural constraint — see the pending card.`
-          : `Research on "${item.concept}" is ready for your review (${item.claims.length} cited finding${item.claims.length === 1 ? "" : "s"}).`
+          : `Research on "${item.concept}" is ready for your review (${item.claims.length} cited finding${item.claims.length === 1 ? "" : "s"}${webCount ? `, ${webCount} from the web` : ""}).`
       );
     } catch (err: any) {
       console.error("[ResearchLab] research failed:", err);
@@ -127,6 +133,20 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
           <strong className="text-orange-300">nothing becomes factory knowledge until you approve it here</strong>.
           Approved modules become buildable immediately — just describe one in the Studio.
         </p>
+        <label className="flex items-center gap-2 mt-1 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={useWeb}
+            onChange={(e) => setUseWeb(e.target.checked)}
+            className="accent-sky-500 w-3.5 h-3.5"
+            aria-label="Include live web sources"
+          />
+          <Globe className="w-3 h-3 text-sky-400" />
+          <span className="text-[10px] text-neutral-300">
+            Include <strong className="text-sky-300">live web sources</strong>
+            <span className="text-neutral-500"> — fetches a curated allowlist of authoritative references (Wikipedia, CCRMA, W3C) for extra cited evidence. Off by default; web text is data only — it can never build or approve anything on its own.</span>
+          </span>
+        </label>
       </div>
 
       {/* Gaps to research */}

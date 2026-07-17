@@ -111,7 +111,11 @@ The factory researches its own measured gaps: pick a gap in the Research Lab
 (Pro mode > System > Research Lab), and the engine plans the questions,
 gathers findings from its cited corpus (academic texts, the RBJ cookbook,
 curated archives — plus an optional local-model note at the lowest
-authority tier), detects conflicts (structurally impossible concepts are
+authority tier, plus an OPT-IN live web gatherer that fetches a curated
+allowlist of authoritative references (Wikipedia, CCRMA, W3C) through
+/api/proxy and extracts cited passages — web text is data only, it can never
+build or approve anything and never un-blocks a blocked concept), detects
+conflicts (structurally impossible concepts are
 BLOCKED with the constraint explained — e.g. mid-side needs a stereo
 engine), and verifies any proposed DSP module through the quality gate
 BEFORE you ever see it. NOTHING becomes factory knowledge until you click
@@ -278,5 +282,5 @@ PART 4 — OPTIONAL OUTSIDE CONNECTIONS (all off by default, none required)
 
 ================================================================================
 Updated 2026-07-16 from the current codebase. Everything above is enforced
-by the 24-suite regression test pack (npm test). Audit dashboard: npm run audit.
+by the 25-suite regression test pack (npm test). Audit dashboard: npm run audit.
 ================================================================================

@@ -6,7 +6,16 @@
  * Defaults to a local provider so the app works offline out of the box.
  */
 
-export type LLMProvider = "gemini" | "ollama" | "lm_studio";
+export type LLMProvider = "gemini" | "ollama" | "lm_studio" | "fusion";
+
+/** The local backends a fusion can combine. */
+export type FusionMember = "ollama" | "lm_studio";
+export const FUSION_MEMBERS: FusionMember[] = ["ollama", "lm_studio"];
+
+/** A member's standalone config: the same URLs/models, acting as one provider. */
+export function memberConfig(cfg: LLMConfig, member: FusionMember): LLMConfig {
+  return { ...cfg, provider: member };
+}
 
 export interface LLMConfig {
   provider: LLMProvider;
@@ -59,7 +68,7 @@ export function saveLLMConfig(cfg: LLMConfig): void {
 }
 
 export function isLocalProvider(cfg: Pick<LLMConfig, "provider">): boolean {
-  return cfg.provider === "ollama" || cfg.provider === "lm_studio";
+  return cfg.provider === "ollama" || cfg.provider === "lm_studio" || cfg.provider === "fusion";
 }
 
 /**
@@ -177,6 +186,39 @@ export async function testProviderConnection(
   } catch (err: any) {
     return { ok: false, models: [], message: err.message || "Connection failed." };
   }
+}
+
+export interface FusionAvailability {
+  /** True when EVERY member is reachable with at least one model loaded. */
+  available: boolean;
+  members: Array<{ provider: FusionMember; ok: boolean; models: string[]; message: string }>;
+  /** Human-readable reason when not available. */
+  reason: string;
+}
+
+/**
+ * Probe every fusion member in parallel and report whether a fusion is
+ * actually possible right now. Honest by construction: a fusion is only
+ * offered when BOTH backends answer with a loaded model — never on hope.
+ */
+export async function detectFusion(cfg: LLMConfig): Promise<FusionAvailability> {
+  const results = await Promise.all(
+    FUSION_MEMBERS.map(async (provider) => {
+      const r = await testProviderConnection(provider, cfg);
+      return { provider, ok: r.ok && r.models.length > 0, models: r.models, message: r.message };
+    })
+  );
+  const missing = results.filter((r) => !r.ok);
+  return {
+    available: missing.length === 0,
+    members: results,
+    reason:
+      missing.length === 0
+        ? ""
+        : missing
+            .map((m) => `${m.provider === "ollama" ? "Ollama" : "LM Studio"}: ${m.message}`)
+            .join(" · "),
+  };
 }
 
 /**
@@ -305,6 +347,23 @@ export interface LocalLLMCallParams {
  */
 export async function callLocalLLM(params: LocalLLMCallParams): Promise<any> {
   const { config, systemPrompt, userText, history = [], temperature = 0.6, signal } = params;
+
+  // FUSION: fan the same request out to every member in parallel and take the
+  // first valid response. Two real wins over a single backend: latency (the
+  // faster model answers) and resilience (one backend down/unloaded doesn't
+  // fail the call). Quality-contest fusion (both answers judged) happens at
+  // the orchestration layer where a verifier exists — see the refinement
+  // loop's alternating fusion refiner.
+  if (config.provider === "fusion") {
+    try {
+      return await Promise.any(
+        FUSION_MEMBERS.map((m) => callLocalLLM({ ...params, config: memberConfig(config, m) }))
+      );
+    } catch (err: any) {
+      const reasons = (err?.errors ?? []).map((e: any) => e?.message).filter(Boolean).join(" | ");
+      throw new Error(`Fusion: no member responded (${reasons || "all backends failed"})`);
+    }
+  }
   const maxContext = config.maxContextMessages ?? 4;
 
   const messages: Array<{ role: string; content: string }> = [{ role: "system", content: systemPrompt }];

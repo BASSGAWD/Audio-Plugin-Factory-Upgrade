@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Cloud, Cpu, RefreshCw, Server, Settings2, Zap } from "lucide-react";
+import { Check, ChevronDown, Cloud, Cpu, GitMerge, RefreshCw, Server, Settings2, Zap } from "lucide-react";
 import {
   LLMConfig,
   LLMProvider,
@@ -127,11 +127,21 @@ export default function ModelPicker({
 
   /* ----------------------------- status ----------------------------- */
 
+  // A fusion is "recognized" when every member backend answers with a loaded
+  // model — derived live from the same probes that drive the status dots.
+  const fusionReady =
+    probes.ollama.ok && probes.ollama.models.length > 0 && probes.lm_studio.ok && probes.lm_studio.models.length > 0;
+  const fusionChecking = probes.ollama.checking || probes.lm_studio.checking;
+
   const dotFor = (engine: EngineId): { color: string; pulse: boolean } => {
     if (engine === "offline") return { color: "bg-emerald-500", pulse: false };
     if (engine === "gemini") {
       if (hasGeminiKey === null) return { color: "bg-amber-500", pulse: true };
       return hasGeminiKey ? { color: "bg-emerald-500", pulse: false } : { color: "bg-red-500", pulse: false };
+    }
+    if (engine === "fusion") {
+      if (fusionChecking) return { color: "bg-amber-500", pulse: true };
+      return fusionReady ? { color: "bg-emerald-500", pulse: false } : { color: "bg-red-500", pulse: false };
     }
     const probe = probes[engine];
     if (probe.checking) return { color: "bg-amber-500", pulse: true };
@@ -145,6 +155,15 @@ export default function ModelPicker({
       return hasGeminiKey
         ? "Cloud reasoning via the secure server proxy."
         : "No API key — set GEMINI_API_KEY in .env.local. Builds fall back to the offline compiler.";
+    }
+    if (engine === "fusion") {
+      if (fusionChecking) return "Checking both engines…";
+      if (fusionReady)
+        return `Recognized: Ollama (${cfg.ollamaModel}) + LM Studio (${cfg.lmStudioModel}) can work together — every request races both (fastest valid answer wins), and perfecting-loop reworks alternate between the models with the quality gate as judge.`;
+      const missing: string[] = [];
+      if (!(probes.ollama.ok && probes.ollama.models.length > 0)) missing.push("Ollama needs a running server with a model pulled");
+      if (!(probes.lm_studio.ok && probes.lm_studio.models.length > 0)) missing.push("LM Studio needs its server started with a chat model loaded");
+      return `Not available yet — ${missing.join("; ")}.`;
     }
     const probe = probes[engine];
     if (probe.checking) return "Checking connection…";
@@ -165,6 +184,8 @@ export default function ModelPicker({
       ? "Offline Compiler"
       : activeEngine === "gemini"
       ? "Gemini Cloud"
+      : activeEngine === "fusion"
+      ? "Fusion · Ollama + LM Studio"
       : `${activeEngine === "ollama" ? "Ollama" : "LM Studio"} · ${currentModelName}`;
 
   const triggerDot = dotFor(activeEngine);
@@ -177,6 +198,53 @@ export default function ModelPicker({
     { id: "ollama", name: "Ollama (local)", icon: Cpu },
     { id: "lm_studio", name: "LM Studio (local)", icon: Server },
   ];
+
+  // Recognized multi-model combinations. One combo exists today (the two
+  // local backends); the list is data-driven so future members slot in.
+  const FUSIONS: Array<{ id: EngineId; name: string; icon: React.ElementType }> = [
+    { id: "fusion", name: "Ollama + LM Studio", icon: GitMerge },
+  ];
+
+  const renderEngineRow = (opt: { id: EngineId; name: string; icon: React.ElementType }) => {
+    const isActive = activeEngine === opt.id;
+    const dot = dotFor(opt.id);
+    const Icon = opt.icon;
+    return (
+      <div
+        key={opt.id}
+        role="menuitemradio"
+        aria-checked={isActive}
+        tabIndex={0}
+        onClick={() => selectEngine(opt.id)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            selectEngine(opt.id);
+          }
+        }}
+        className={`rounded-lg px-2.5 py-2 cursor-pointer transition-colors outline-none focus-visible:ring-1 focus-visible:ring-orange-700 ${
+          isActive ? "bg-neutral-800/80" : "hover:bg-neutral-850/60"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <Icon className={`shrink-0 w-3.5 h-3.5 ${isActive ? "text-orange-400" : "text-neutral-500"}`} />
+          <span className={`flex-1 text-xs font-semibold ${isActive ? "text-neutral-100" : "text-neutral-300"}`}>
+            {opt.name}
+          </span>
+          <span className={`shrink-0 w-1.5 h-1.5 rounded-full ${dot.color} ${dot.pulse ? "animate-pulse" : ""}`} />
+          {isActive && <Check className="shrink-0 w-3.5 h-3.5 text-orange-400" />}
+        </div>
+        <p className="pl-[22px] mt-0.5 text-[10px] leading-snug text-neutral-500">{statusLineFor(opt.id)}</p>
+        {isActive && (opt.id === "ollama" || opt.id === "lm_studio") && renderModelChooser(opt.id)}
+        {isActive && opt.id === "fusion" && (
+          <div className="space-y-1">
+            {renderModelChooser("ollama")}
+            {renderModelChooser("lm_studio")}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderModelChooser = (provider: "ollama" | "lm_studio") => {
     const probe = probes[provider];
@@ -270,44 +338,23 @@ export default function ModelPicker({
             </button>
           </div>
 
-          <div className="space-y-0.5">
-            {OPTIONS.map((opt) => {
-              const isActive = activeEngine === opt.id;
-              const dot = dotFor(opt.id);
-              const Icon = opt.icon;
-              return (
-                <div
-                  key={opt.id}
-                  role="menuitemradio"
-                  aria-checked={isActive}
-                  tabIndex={0}
-                  onClick={() => selectEngine(opt.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      selectEngine(opt.id);
-                    }
-                  }}
-                  className={`rounded-lg px-2.5 py-2 cursor-pointer transition-colors outline-none focus-visible:ring-1 focus-visible:ring-orange-700 ${
-                    isActive ? "bg-neutral-800/80" : "hover:bg-neutral-850/60"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Icon className={`shrink-0 w-3.5 h-3.5 ${isActive ? "text-orange-400" : "text-neutral-500"}`} />
-                    <span className={`flex-1 text-xs font-semibold ${isActive ? "text-neutral-100" : "text-neutral-300"}`}>
-                      {opt.name}
-                    </span>
-                    <span className={`shrink-0 w-1.5 h-1.5 rounded-full ${dot.color} ${dot.pulse ? "animate-pulse" : ""}`} />
-                    {isActive && <Check className="shrink-0 w-3.5 h-3.5 text-orange-400" />}
-                  </div>
-                  <p className="pl-[22px] mt-0.5 text-[10px] leading-snug text-neutral-500">
-                    {statusLineFor(opt.id)}
-                  </p>
-                  {isActive && (opt.id === "ollama" || opt.id === "lm_studio") && renderModelChooser(opt.id)}
-                </div>
-              );
-            })}
+          <div className="space-y-0.5">{OPTIONS.map(renderEngineRow)}</div>
+
+          <div className="flex items-center gap-1.5 px-2.5 pt-3 pb-1.5">
+            <span className="text-[8px] font-mono font-black uppercase tracking-widest text-neutral-500">
+              Fusions
+            </span>
+            <span
+              className={`text-[8px] font-mono px-1.5 py-px rounded ${
+                fusionReady
+                  ? "text-emerald-300 bg-emerald-950/60"
+                  : "text-neutral-500 bg-neutral-850/80"
+              }`}
+            >
+              {fusionChecking ? "checking…" : fusionReady ? "1 recognized" : "none available"}
+            </span>
           </div>
+          <div className="space-y-0.5">{FUSIONS.map(renderEngineRow)}</div>
 
           {onOpenAdvanced && (
             <button

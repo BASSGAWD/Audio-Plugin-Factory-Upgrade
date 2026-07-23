@@ -8,3 +8,4 @@ coverage/
 !.env.example
 .claude/settings.local.json
 tests/.e2e-screenshots/
+local-model/data/

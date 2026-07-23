@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Cpu, Play, FolderOpen, PackagePlus, CheckCircle2, XCircle, AlertTriangle, Loader2, Info } from "lucide-react";
 import { AudioPlugin } from "../types";
-import { getLLMConfig, isLocalProvider } from "../utils/llmGateway";
+import { getLLMConfig, isLocalProvider, memberConfig, testProviderConnection } from "../utils/llmGateway";
 import JobTimer from "./JobTimer";
 
 interface NativeBuildPanelProps {
@@ -64,6 +64,19 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
     setWarning(null);
 
     try {
+      // The native pipeline drives ONE concrete backend for the C++
+      // translation and compile-repair loop. Fusion resolves to whichever
+      // member is actually reachable right now (Ollama preferred).
+      let buildConfig = llmConfig;
+      if (llmConfig.provider === "fusion") {
+        const [ollama, lmStudio] = await Promise.all([
+          testProviderConnection("ollama", llmConfig),
+          testProviderConnection("lm_studio", llmConfig),
+        ]);
+        const member = ollama.ok && ollama.models.length > 0 ? "ollama" : lmStudio.ok ? "lm_studio" : "ollama";
+        buildConfig = memberConfig(llmConfig, member);
+      }
+
       const scaffoldRes = await fetch("/api/native/scaffold", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -75,7 +88,7 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
             dspFunction: plugin.dspFunction,
             customSkin: plugin.customSkin,
           },
-          llmConfig,
+          llmConfig: buildConfig,
         }),
       });
 
@@ -92,7 +105,7 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
         headers: { "Content-Type": "application/json" },
         // llmConfig enables the compile -> analyze -> fix -> recompile loop:
         // real compiler errors go back to the local model between passes.
-        body: JSON.stringify({ projectDir: scaffoldData.projectDir, llmConfig }),
+        body: JSON.stringify({ projectDir: scaffoldData.projectDir, llmConfig: buildConfig }),
       });
       const buildData = await buildRes.json();
       if (!buildRes.ok) throw new Error(buildData.error || "Failed to start build.");

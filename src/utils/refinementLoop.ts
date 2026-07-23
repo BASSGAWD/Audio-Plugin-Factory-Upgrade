@@ -17,7 +17,7 @@
 
 import { AudioPlugin, BuildReport, PluginParameter } from "../types";
 import { AudioPluginSpec, classifyPluginIntent } from "./pluginSpec";
-import { LLMConfig, callLocalLLM, isLocalProvider } from "./llmGateway";
+import { LLMConfig, callLocalLLM, isLocalProvider, FUSION_MEMBERS, memberConfig } from "./llmGateway";
 import { DSP_CODING_RULES, SOUND_QUALITY_RULES } from "./dspPromptKit";
 import { checkDsp } from "./pluginVerifier";
 import { normalizeModelDspCode } from "./healthcheckRunner";
@@ -170,20 +170,30 @@ export type RefinerWorker = (input: {
 
 function buildLocalRefiner(llmConfig: LLMConfig, signal?: AbortSignal): RefinerWorker | null {
   if (!isLocalProvider(llmConfig)) return null;
+  // FUSION quality technique: rework proposals ALTERNATE between the member
+  // models, iteration by iteration. Different models propose genuinely
+  // different reworks, and the strictly-higher acceptance rule (the gate is
+  // the judge) keeps whichever survives — an ensemble search that a single
+  // model can't perform. The trace labels which member proposed each rework.
+  const isFusion = llmConfig.provider === "fusion";
+  let fusionTurn = 0;
   return async ({ prompt, plugin, evidence }) => {
+    const member = isFusion ? FUSION_MEMBERS[fusionTurn++ % FUSION_MEMBERS.length] : null;
+    const config = member ? memberConfig(llmConfig, member) : llmConfig;
     const paramList = plugin.parameters
       .map((p) => `{ "id": "${p.id}", "min": ${p.min}, "max": ${p.max}, "defaultValue": ${p.defaultValue} }`)
       .join(",\n");
     const payload = await callLocalLLM({
-      config: llmConfig,
+      config,
       systemPrompt: REFINER_SYSTEM_PROMPT,
       userText: `Original request: ${prompt}\n\nMeasured evidence from the quality gate:\n${evidence}\n\nFROZEN parameter schema:\n[${paramList}]\n\nCurrent working dspFunction:\n${plugin.dspFunction}`,
       temperature: 0.4,
       signal,
     });
+    const notes = typeof payload?.notes === "string" ? payload.notes : "";
     return {
       dspFunction: typeof payload?.dspFunction === "string" ? payload.dspFunction : "",
-      notes: typeof payload?.notes === "string" ? payload.notes : "",
+      notes: member ? `[fusion · ${member === "ollama" ? "Ollama" : "LM Studio"}] ${notes}` : notes,
     };
   };
 }

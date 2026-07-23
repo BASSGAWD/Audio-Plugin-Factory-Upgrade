@@ -550,7 +550,7 @@ export default function App() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [apiHealth, setApiHealth] = useState<{ status: string; hasApiKey: boolean } | null>(null);
   const [localLlmStatus, setLocalLlmStatus] = useState<{
-    provider: "ollama" | "lm_studio";
+    provider: "ollama" | "lm_studio" | "fusion";
     model: string;
     connected: boolean;
     checking: boolean;
@@ -917,6 +917,22 @@ export default function App() {
 
     if (!isLocalProvider(cfg)) {
       setLocalLlmStatus(null);
+      return;
+    }
+
+    if (cfg.provider === "fusion") {
+      // Fusion is connected when EITHER member answers (calls race + fail over).
+      setLocalLlmStatus({ provider: "fusion", model: `${cfg.ollamaModel} + ${cfg.lmStudioModel}`, connected: false, checking: true });
+      const [ollama, lmStudio] = await Promise.all([
+        testProviderConnection("ollama", cfg),
+        testProviderConnection("lm_studio", cfg),
+      ]);
+      setLocalLlmStatus({
+        provider: "fusion",
+        model: `${cfg.ollamaModel} + ${cfg.lmStudioModel}`,
+        connected: ollama.ok || lmStudio.ok,
+        checking: false,
+      });
       return;
     }
 
@@ -1793,7 +1809,41 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         return;
       }
 
-      if (llmConfig.provider === "ollama") {
+      if (llmConfig.provider === "fusion") {
+        // FUSION chat: the same request is raced to BOTH local backends in
+        // parallel (callLocalLLM's fusion path); the first valid response
+        // wins. Faster than either model alone, and one backend being down
+        // or unloaded never fails the conversation.
+        const maxContext = llmConfig.maxContextMessages ?? 4;
+        const useCompactPrompt = llmConfig.systemPromptStyle === "compact";
+        const systemPromptContent = buildLocalChatSystemPrompt(
+          currentAgent.name,
+          currentAgent.systemInstruction,
+          useCompactPrompt
+        );
+        let finalPrompt = modifiedUserPrompt + `\n\n[CONTEXT: The active plugin code state is: \`\`\`javascript\n${plugin.dspFunction}\n\`\`\`]`;
+        if (spec) {
+          finalPrompt += `\n\n${formatSpecContext(spec)}`;
+        }
+        const fusionRecipe = buildRecipeContext(promptToSend, spec);
+        if (fusionRecipe) {
+          finalPrompt += `\n\n${fusionRecipe}`;
+        }
+        if (llmConfig.lowVramMode) {
+          finalPrompt += `\n\n[LOW-VRAM Optimization Active: Write highly concise DSP loops. Avoid memory allocations inside sample cycles.]`;
+        }
+        payload = await callLocalLLM({
+          config: llmConfig,
+          systemPrompt: systemPromptContent,
+          userText: finalPrompt,
+          history: newHistory
+            .slice(0, -1)
+            .slice(-maxContext)
+            .map((m) => ({ role: m.role === "user" ? ("user" as const) : ("model" as const), text: m.text })),
+          temperature: currentAgent.temperature || 0.6,
+          signal: controller.signal,
+        });
+      } else if (llmConfig.provider === "ollama") {
         const ollamaBaseUrl = llmConfig.ollamaUrl || "http://localhost:11434";
         const ollamaModelName = llmConfig.ollamaModel || "qwen2.5-coder:7b";
         const maxContext = llmConfig.maxContextMessages ?? 4;
@@ -2202,7 +2252,7 @@ ${SAMPLER_SCHEMA_GUIDANCE}`;
           setArchitectIsDeconstructing(false);
           triggerToast(
             verification.verified
-              ? `Decomposed & verified by local AI (${llmConfig.provider === "ollama" ? llmConfig.ollamaModel : llmConfig.lmStudioModel}) -- code passed simulation!`
+              ? `Decomposed & verified by local AI (${llmConfig.provider === "ollama" ? llmConfig.ollamaModel : llmConfig.provider === "fusion" ? `fusion: ${llmConfig.ollamaModel} + ${llmConfig.lmStudioModel}` : llmConfig.lmStudioModel}) -- code passed simulation!`
               : `Decomposed by local AI, but the code failed simulation checks -- review before use.`
           );
           return;
@@ -3229,7 +3279,7 @@ Return ONLY a JSON object with this exact shape, no other text:
                     <div className="flex items-center gap-1.5 bg-neutral-900/80 px-2 py-0.5 rounded-lg border border-neutral-850 select-none" title="Change the engine with the picker in the top-right header">
                       <span className={`w-1 h-1 rounded-full ${offlineForced || (apiHealth && !apiHealth.hasApiKey && getLLMConfig().provider === "gemini") ? "bg-amber-500 animate-pulse" : "bg-orange-500 animate-pulse"}`} />
                       <span className="text-[8.5px] font-mono font-bold text-neutral-400">
-                        {offlineForced ? "OFFLINE COMPILER" : localLlmStatus ? `${localLlmStatus.provider === "ollama" ? "OLLAMA" : "LM STUDIO"}` : "GEMINI CLOUD"}
+                        {offlineForced ? "OFFLINE COMPILER" : localLlmStatus ? `${localLlmStatus.provider === "ollama" ? "OLLAMA" : localLlmStatus.provider === "fusion" ? "FUSION" : "LM STUDIO"}` : "GEMINI CLOUD"}
                       </span>
                     </div>
 

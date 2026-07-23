@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { 
   Sliders, 
   Trash2, 
@@ -46,6 +46,50 @@ interface UIDesignerProps {
   plugin: AudioPlugin;
   onChange: (updatedPlugin: AudioPlugin) => void;
   triggerToast: (msg: string) => void;
+}
+
+/**
+ * Size-aware fallback layout for params that carry no explicit x/y: a shelf
+ * flow that honors each control's real w/h (a 240x240 cabinet takes a
+ * cabinet-sized slot, not a knob-sized one), wrapping within the board width.
+ * The old fixed 210x150 grid overlapped and overflowed the board the moment a
+ * family-mandatory big component (amp head, cabinet, mic, pad grid) was in
+ * the parameter list. Returns the positions plus the content bounds so the
+ * artboard can grow to CONTAIN the layout instead of clipping it.
+ */
+function computeFallbackLayout(
+  parameters: PluginParameter[],
+  boardWidth: number
+): { positions: Record<string, { x: number; y: number }>; contentW: number; contentH: number } {
+  const MARGIN = 30;
+  const GAP = 20;
+  const positions: Record<string, { x: number; y: number }> = {};
+  let cursorX = MARGIN;
+  let cursorY = MARGIN;
+  let rowH = 0;
+  let contentW = 0;
+  let contentH = 0;
+
+  for (const p of parameters) {
+    const w = p.w ?? 180;
+    const h = p.h ?? 120;
+    if (cursorX > MARGIN && cursorX + w > boardWidth - MARGIN) {
+      cursorX = MARGIN;
+      cursorY += rowH + GAP;
+      rowH = 0;
+    }
+    // Explicitly-placed params keep their spot; they still occupy bounds.
+    const x = p.x ?? cursorX;
+    const y = p.y ?? cursorY;
+    positions[p.id] = { x, y };
+    if (p.x === undefined || p.y === undefined) {
+      cursorX = x + w + GAP;
+      rowH = Math.max(rowH, h);
+    }
+    contentW = Math.max(contentW, x + w);
+    contentH = Math.max(contentH, y + h);
+  }
+  return { positions, contentW: contentW + MARGIN, contentH: contentH + MARGIN };
 }
 
 // 1. --- Custom Immersive Rotary Knob Component ---
@@ -700,6 +744,21 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
   const [gridSize, setGridSize] = useState<number>(10);
   const [artboardWidth, setArtboardWidth] = useState<number>(720);
   const [artboardHeight, setArtboardHeight] = useState<number>(440);
+
+  // Size-aware fallback positions for params without explicit x/y, plus the
+  // real content bounds of the whole layout.
+  const fallbackLayout = useMemo(
+    () => computeFallbackLayout(plugin.parameters, artboardWidth),
+    [plugin.parameters, artboardWidth]
+  );
+
+  // Grow the artboard to CONTAIN the plugin's controls (amp heads, cabinets,
+  // pad grids push past the 720x440 default). Grow-only: never shrink a
+  // board the user has enlarged, and never fight an explicit resize.
+  useEffect(() => {
+    setArtboardHeight((h) => Math.max(h, Math.ceil(fallbackLayout.contentH)));
+    setArtboardWidth((w) => Math.max(w, Math.ceil(fallbackLayout.contentW)));
+  }, [fallbackLayout.contentH, fallbackLayout.contentW]);
 
   // Active theme layout: slate, vintage, cyberpunk, modular, custom-skin
   const [theme, setTheme] = useState<"aero-slate" | "vintage-analog" | "cyberpunk-neon" | "modular-synth" | "classic-ivory" | "custom-skin">(() => {
@@ -1840,9 +1899,11 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                 {plugin.parameters.map((param, idx) => {
                   const isSelected = selectedParamId === param.id;
                   
-                  // Compute absolute fallbacks if x, y is not set
-                  const x = param.x ?? (30 + (idx % 3) * 210);
-                  const y = param.y ?? (30 + Math.floor(idx / 3) * 150);
+                  // Size-aware fallback when x/y is not set: honors each
+                  // control's real w/h so big components never overlap knobs
+                  // or spill off the board (see computeFallbackLayout).
+                  const x = param.x ?? fallbackLayout.positions[param.id]?.x ?? (30 + (idx % 3) * 210);
+                  const y = param.y ?? fallbackLayout.positions[param.id]?.y ?? (30 + Math.floor(idx / 3) * 150);
                   const w = param.w ?? 180;
                   const h = param.h ?? 120;
                   

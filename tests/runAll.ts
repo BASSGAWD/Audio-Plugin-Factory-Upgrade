@@ -44,6 +44,7 @@ const TEST_FILES = [
   "researchWebTest.ts",
   "researchIndexTest.ts",
   "fusionTest.ts",
+  "functionalFitnessTest.ts",
 ];
 
 let failed = 0;

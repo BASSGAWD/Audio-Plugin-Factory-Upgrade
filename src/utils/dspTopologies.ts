@@ -196,7 +196,10 @@ let y0 = state.b0[state.i0]; state.d0 += hf * (y0 - state.d0); y0 = state.d0;
 let y1 = state.b1[state.i1]; state.d1 += hf * (y1 - state.d1); y1 = state.d1;
 let y2 = state.b2[state.i2]; state.d2 += hf * (y2 - state.d2); y2 = state.d2;
 let y3 = state.b3[state.i3]; state.d3 += hf * (y3 - state.d3); y3 = state.d3;
-let fb = decay * 0.62;
+// The Hadamard mixing matrix below is orthonormal, so the loop gain IS fb:
+// with ~600-sample lines, fb must approach 0.9+ for a plate-length tail.
+// (At 0.62 this measured a 0.19 s decay -- an ambience blip, not a plate.)
+let fb = Math.min(0.97, 0.45 + decay * 0.55);
 let m0 = (y0 + y1 + y2 + y3) * 0.5;
 let m1 = (y0 - y1 + y2 - y3) * 0.5;
 let m2 = (y0 + y1 - y2 - y3) * 0.5;

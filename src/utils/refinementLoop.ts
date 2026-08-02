@@ -95,7 +95,17 @@ export function refinementScore(gate: QualityGateResult): number {
   // musicality; the extra term here makes the loop prefer an honest candidate
   // even when the headline scores happen to tie.
   const semanticPenalty = 4 * (gate.report.semanticViolations?.length ?? 0);
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty;
+  // FUNCTIONAL FITNESS — the discriminator among correct builds. The four
+  // headline dimensions saturate (~98% of clean candidates score a perfect
+  // 100, competing designs landing within ~2 points of each other out of
+  // ~800), which left this loop, best-of-N, and the fusion ensemble with no
+  // gradient to climb. Fitness measures whether the build actually does its
+  // family's job — compression in dB, decay time, echo calibration, cutoff
+  // accuracy, harmonic generation — and is weighted (0-50) to discriminate
+  // decisively while the correctness terms (~750) still dominate, so a
+  // more-effective-but-broken build can never beat a correct one.
+  const fitnessBonus = 0.5 * (gate.report.functionalFitness?.score ?? 0);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus;
 }
 
 /* ------------------------------------------------------------------ */

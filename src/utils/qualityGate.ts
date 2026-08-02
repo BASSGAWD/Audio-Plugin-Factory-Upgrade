@@ -890,6 +890,266 @@ export function measureTruePeak(dspFunction: string, parameters: PluginParameter
   return peak <= 1e-9 ? -Infinity : 20 * Math.log10(peak);
 }
 
+/* ------------------------------------------------------------------ */
+/* Functional fitness: does it do its JOB, and how well?               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The four headline scores prove a build is CORRECT (audible, stable, honest
+ * controls). They saturate: ~98% of clean candidates hit a perfect 100, and
+ * competing designs land within ~2 points of each other out of ~800. That
+ * leaves the perfecting loop, best-of-N, and the fusion ensemble with no
+ * gradient to climb — you cannot improve what you cannot measure.
+ *
+ * Functional fitness measures the thing the headline scores can't: whether
+ * the plugin actually performs its family's JOB, on a continuous scale.
+ * A compressor that compresses 8 dB beats one that compresses 0.5 dB; a
+ * delay whose echo lands at the time its knob claims beats one that's 40%
+ * off; a filter whose -3 dB corner sits where "Cutoff" says beats one that
+ * lies by two octaves.
+ *
+ * INFORMATIONAL by design: it feeds the refinement/selection score and the
+ * build report, but never the four headline dimensions — so the >= 97 floor
+ * stays exactly as provable as before.
+ */
+export interface FunctionalFitness {
+  /** 0-100: how well this build performs its family's core job. */
+  score: number;
+  /** Short label of what was measured, e.g. "gain reduction". */
+  metric: string;
+  /** The measured evidence, in plain words with real numbers. */
+  evidence: string;
+}
+
+/** Render the arp scaled to a target peak, returning output/input gain in dB. */
+function gainAtLevel(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>,
+  scale: number
+): number | null {
+  const N = 22050;
+  const sig = (i: number) => arpAt(i) * scale;
+  let inSq = 0;
+  for (let i = 0; i < N; i++) inSq += sig(i) * sig(i);
+  const inRms = Math.sqrt(inSq / N);
+  if (inRms < 1e-6) return null;
+  const out = renderPass(dspFunc, params, N, sig);
+  if (out.failed || out.rms < 1e-7) return null;
+  return 20 * Math.log10(out.rms / inRms);
+}
+
+/** Dynamics: a compressor applies LESS gain to loud material than to quiet.
+ *  That difference IS compression, measured in dB. */
+function fitnessDynamics(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>
+): FunctionalFitness | null {
+  const quiet = gainAtLevel(dspFunc, params, 0.1);
+  const loud = gainAtLevel(dspFunc, params, 1.6);
+  if (quiet === null || loud === null) return null;
+  const grDb = quiet - loud; // positive = louder material held down
+  // 0 dB = not compressing at all; 8 dB of program-dependent reduction is a
+  // definitively working compressor.
+  const score = Math.max(0, Math.min(100, Math.round((grDb / 8) * 100)));
+  return {
+    score,
+    metric: "gain reduction",
+    evidence: `holds loud material ${grDb.toFixed(1)} dB further down than quiet material (measured across a 24 dB input range)`,
+  };
+}
+
+/** Reverb: how long does the tail actually ring? A "reverb" whose energy is
+ *  gone in 40 ms is not a reverb, however clean it measures. */
+function fitnessReverb(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>
+): FunctionalFitness | null {
+  const out = renderPass(dspFunc, params, TAIL_TOTAL, tailSignalAt);
+  if (out.failed) return null;
+  const WIN = 2048;
+  const level = (start: number): number => {
+    let sq = 0;
+    let n = 0;
+    for (let i = start; i < Math.min(start + WIN, out.samples.length); i++) {
+      sq += out.samples[i] * out.samples[i];
+      n++;
+    }
+    return n > 0 ? Math.sqrt(sq / n) : 0;
+  };
+  const l0 = level(TAIL_INPUT_END);
+  if (l0 < 1e-5) return { score: 0, metric: "decay time", evidence: "no audible tail after the input stops — this does not ring like a space" };
+  const target = l0 / 31.62; // -30 dB
+  let decaySamples = out.samples.length - TAIL_INPUT_END;
+  for (let s = TAIL_INPUT_END; s + WIN < out.samples.length; s += WIN) {
+    if (level(s) <= target) {
+      decaySamples = s - TAIL_INPUT_END;
+      break;
+    }
+  }
+  const rt60 = (decaySamples / SAMPLE_RATE) * 2; // -30 dB measured, extrapolated
+  // 0.6 s+ reads as a real space; below ~0.15 s it is an ambience blip.
+  const score = Math.max(0, Math.min(100, Math.round((rt60 / 0.6) * 100)));
+  return {
+    score,
+    metric: "decay time",
+    evidence: `tail decays over ~${rt60.toFixed(2)} s (RT60 extrapolated from the measured -30 dB point)`,
+  };
+}
+
+/** Delay: is the echo where the Time knob CLAIMS it is? A calibration check
+ *  the audibility and semantic tests can't catch. */
+function fitnessDelay(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>,
+  parameters: PluginParameter[]
+): FunctionalFitness | null {
+  const timeParam = parameters.find((p) => /^(time|delay|delaytime)$/i.test(p.id));
+  if (!timeParam) return null;
+  const timeMs = params[timeParam.id];
+  if (!Number.isFinite(timeMs) || timeMs <= 0) return null;
+  const expected = Math.round((timeMs / 1000) * SAMPLE_RATE);
+  const N = Math.min(88200, expected * 3 + 4410);
+  // A single short click, then silence: the echo is whatever comes back.
+  const click = (i: number) => (i < 64 ? Math.sin((2 * Math.PI * 1000 * i) / SAMPLE_RATE) * 0.8 : 0);
+  const out = renderPass(dspFunc, params, N, click);
+  if (out.failed) return null;
+  // Find the loudest peak well after the direct sound.
+  let peakIdx = -1;
+  let peak = 0;
+  for (let i = 512; i < N; i++) {
+    const a = Math.abs(out.samples[i]);
+    if (a > peak) {
+      peak = a;
+      peakIdx = i;
+    }
+  }
+  if (peak < 1e-4 || peakIdx < 0) {
+    return { score: 0, metric: "echo timing", evidence: "no distinct echo returned after the input click" };
+  }
+  const errRatio = Math.abs(peakIdx - expected) / expected;
+  const score = Math.max(0, Math.min(100, Math.round((1 - errRatio / 0.25) * 100)));
+  return {
+    score,
+    metric: "echo timing",
+    evidence: `echo lands at ${((peakIdx / SAMPLE_RATE) * 1000).toFixed(0)} ms with Time set to ${timeMs.toFixed(0)} ms (${(errRatio * 100).toFixed(1)}% off)`,
+  };
+}
+
+/** Filter/EQ: does the -3 dB corner sit where "Cutoff" says it does? */
+function fitnessFilter(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>,
+  parameters: PluginParameter[]
+): FunctionalFitness | null {
+  const cutoffParam = parameters.find((p) => /^(cutoff|freq|frequency)$/i.test(p.id));
+  if (!cutoffParam) return null;
+  const cutoff = params[cutoffParam.id];
+  if (!Number.isFinite(cutoff) || cutoff < 40) return null;
+
+  // Measure the SETTLED response: the filter's startup transient (and any
+  // per-sample coefficient smoothing) otherwise smears the estimate by about
+  // a third-octave, which reads as a miscalibrated knob on an honest filter.
+  const SETTLE = 4096;
+  const N = 12288;
+  // goertzelPower snaps its analysis to the nearest DFT bin, so a probe tone
+  // that is NOT bin-centered leaks energy and reads quieter than it is --
+  // which understates the passband reference and drags the apparent corner a
+  // full grid step high. Generate and measure on exact bin centers.
+  const binHz = SAMPLE_RATE / (N - SETTLE);
+  const snap = (hz: number) => Math.max(binHz, Math.round(hz / binHz) * binHz);
+  const responseAt = (hzRaw: number): number => {
+    const hz = snap(hzRaw);
+    const sig = (i: number) => Math.sin((2 * Math.PI * hz * i) / SAMPLE_RATE) * 0.4;
+    const out = renderPass(dspFunc, params, N, sig);
+    if (out.failed) return 0;
+    return Math.sqrt(goertzelPower(out.samples.slice(SETTLE), hz, SAMPLE_RATE));
+  };
+  // Passband reference well below the corner, then a sweep upward.
+  const ref = responseAt(Math.max(40, cutoff / 8));
+  if (ref < 1e-5) return null;
+  // Third-octave probe grid: a coarse octave grid would report a resonant
+  // filter (whose -3 dB point legitimately sits above nominal) as wildly
+  // miscalibrated. Resolution here is the difference between measuring the
+  // filter and measuring the grid.
+  const probes = [0.5, 0.63, 0.8, 1, 1.26, 1.6, 2, 2.5, 3.2, 4].map((m) => ({ mult: m, hz: cutoff * m }));
+  let cornerMult: number | null = null;
+  for (const p of probes) {
+    if (p.hz > 18000) break;
+    const db = 20 * Math.log10(Math.max(1e-9, responseAt(p.hz) / ref));
+    if (db <= -3) {
+      cornerMult = p.mult;
+      break;
+    }
+  }
+  if (cornerMult === null) {
+    return { score: 0, metric: "cutoff calibration", evidence: `no -3 dB rolloff found within 4x of the ${cutoff.toFixed(0)} Hz Cutoff setting — the knob's label does not match where it filters` };
+  }
+  // 2 octaves of error = 0. Resonance shifts a real filter's corner up by
+  // well under an octave, so an honest design lands comfortably high while a
+  // knob that ignores its own value still falls to the floor.
+  const octavesOff = Math.abs(Math.log2(cornerMult));
+  const score = Math.max(0, Math.min(100, Math.round((1 - octavesOff / 2) * 100)));
+  return {
+    score,
+    metric: "cutoff calibration",
+    evidence: `-3 dB corner measured at ~${(cutoff * cornerMult).toFixed(0)} Hz with Cutoff set to ${cutoff.toFixed(0)} Hz (${octavesOff.toFixed(1)} octaves off)`,
+  };
+}
+
+/** Distortion: how much harmonic content does it actually generate? */
+function fitnessDistortion(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>
+): FunctionalFitness | null {
+  const out = renderPass(dspFunc, params, 8192, cleanToneAt);
+  if (out.failed || out.rms < 1e-5) return null;
+  const share = harmonicShare(out.samples);
+  // 0.08 (2nd+3rd at ~8% of the fundamental) is a solidly driven stage.
+  const score = Math.max(0, Math.min(100, Math.round((share / 0.08) * 100)));
+  return {
+    score,
+    metric: "harmonic generation",
+    evidence: `adds 2nd+3rd harmonics at ${(share * 100).toFixed(1)}% of the fundamental on a clean tone at default settings`,
+  };
+}
+
+/**
+ * Measure how well a build performs its family's core job. Returns null for
+ * families with no meaningful functional test (utility, hybrid, sampler),
+ * so nothing is penalized for a test that doesn't apply.
+ */
+export function measureFunctionalFitness(
+  dspFunction: string,
+  parameters: PluginParameter[],
+  family: PluginFamily | null | undefined
+): FunctionalFitness | null {
+  if (!family) return null;
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return null;
+  const params = defaultParamsMap(parameters);
+  try {
+    switch (family) {
+      case "dynamics":
+        return fitnessDynamics(dspFunc, params);
+      case "reverb":
+        return fitnessReverb(dspFunc, params);
+      case "delay":
+        return fitnessDelay(dspFunc, params, parameters);
+      case "filter":
+      case "eq":
+        return fitnessFilter(dspFunc, params, parameters);
+      case "distortion":
+      case "saturator":
+      case "amp_sim":
+        return fitnessDistortion(dspFunc, params);
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
 export function measureAliasing(dspFunction: string, parameters: PluginParameter[]): number {
   const dspFunc = compileDspBody(dspFunction);
   if (!dspFunc) return 0;
@@ -1357,6 +1617,14 @@ export function runQualityGate(
     notes.push(formatCodeAudit(codeAudit));
   }
 
+  // Functional fitness: does it do its family's JOB, and how well? The four
+  // headline scores saturate at 100 for every correct build; this is what
+  // separates a compressor that compresses from one that merely runs.
+  const fitness = m.fatal ? null : measureFunctionalFitness(plugin.dspFunction, workingParams, opts.family);
+  if (fitness) {
+    notes.push(`Functional fitness ${fitness.score}/100 (${fitness.metric}): ${fitness.evidence}.`);
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -1380,6 +1648,7 @@ export function runQualityGate(
     stereoOutput: !!m.stereoOutput,
     codeHealth: codeAudit ? codeAudit.codeHealth : undefined,
     codeFindings: codeAudit ? codeAudit.findings.map((f) => `[${f.severity}] ${f.message}`) : undefined,
+    functionalFitness: fitness ?? undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

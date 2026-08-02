@@ -1096,6 +1096,255 @@ function fitnessFilter(
   };
 }
 
+/**
+ * Autocorrelation pitch detector with parabolic peak interpolation — the
+ * sub-lag precision is what makes a cents-accurate reading possible (a whole
+ * semitone is only ~6% of the lag at 440 Hz, so integer lags are far too
+ * coarse to judge tuning).
+ */
+function detectPitchHz(samples: Float32Array, minHz = 60, maxHz = 1600): number | null {
+  const minLag = Math.max(2, Math.floor(SAMPLE_RATE / maxHz));
+  const maxLag = Math.min(samples.length - 2, Math.floor(SAMPLE_RATE / minHz));
+  if (maxLag <= minLag) return null;
+  let energy = 0;
+  for (let i = 0; i < samples.length; i++) energy += samples[i] * samples[i];
+  if (energy / samples.length < 1e-8) return null;
+
+  const corr = new Float64Array(maxLag + 2);
+  let bestLag = -1;
+  let best = -Infinity;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let sum = 0;
+    const n = samples.length - lag;
+    for (let i = 0; i < n; i++) sum += samples[i] * samples[i + lag];
+    const c = sum / n;
+    corr[lag] = c;
+    if (c > best) {
+      best = c;
+      bestLag = lag;
+    }
+  }
+  if (bestLag <= minLag || bestLag >= maxLag || best <= 0) return null;
+  const a = corr[bestLag - 1];
+  const b = corr[bestLag];
+  const c2 = corr[bestLag + 1];
+  const denom = a - 2 * b + c2;
+  const delta = Math.abs(denom) > 1e-12 ? (0.5 * (a - c2)) / denom : 0;
+  const refined = bestLag + Math.max(-1, Math.min(1, delta));
+  return SAMPLE_RATE / refined;
+}
+
+/** Short-window RMS envelope — the series a modulation effect moves. */
+function envelopeSeries(samples: Float32Array, win = 256): number[] {
+  const out: number[] = [];
+  for (let s = 0; s + win <= samples.length; s += win) {
+    let sq = 0;
+    for (let i = s; i < s + win; i++) sq += samples[i] * samples[i];
+    out.push(Math.sqrt(sq / win));
+  }
+  return out;
+}
+
+/** Modulation: does it actually MOVE, and at the rate the knob claims?
+ *  A chorus/phaser/tremolo whose LFO is dead measures as a static filter. */
+function fitnessModulation(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>,
+  parameters: PluginParameter[]
+): FunctionalFitness | null {
+  const N = 132300; // 3 s — enough to see even a 0.2 Hz sweep
+  const probe = (i: number) => Math.sin((2 * Math.PI * 900 * i) / SAMPLE_RATE) * 0.4;
+  const out = renderPass(dspFunc, params, N, probe);
+  if (out.failed) return null;
+  const WIN = 256;
+  const env = envelopeSeries(out.samples.slice(8192), WIN);
+  if (env.length < 16) return null;
+  const mean = env.reduce((a, b) => a + b, 0) / env.length;
+  if (mean < 1e-5) return { score: 0, metric: "modulation depth", evidence: "output is effectively silent on a steady tone — nothing is modulating" };
+  const variance = env.reduce((a, v) => a + (v - mean) * (v - mean), 0) / env.length;
+  const depth = Math.sqrt(variance) / mean; // 0 = static, higher = deeper sweep
+  const depthScore = Math.max(0, Math.min(100, Math.round((depth / 0.15) * 100)));
+
+  // Rate calibration: the envelope's own period, versus the Rate knob.
+  const rateParam = parameters.find((p) => /^(rate|speed|lfo|frequency)$/i.test(p.id));
+  const envRate = SAMPLE_RATE / WIN;
+  let measuredHz: number | null = null;
+  if (rateParam && depth > 0.02) {
+    const envArr = new Float32Array(env.map((v) => v - mean));
+    const minLag = Math.max(2, Math.floor(envRate / 12));
+    const maxLag = Math.min(envArr.length - 2, Math.floor(envRate / 0.15));
+    let bestLag = -1;
+    let best = -Infinity;
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let sum = 0;
+      const n = envArr.length - lag;
+      for (let i = 0; i < n; i++) sum += envArr[i] * envArr[i + lag];
+      const c = sum / n;
+      if (c > best) {
+        best = c;
+        bestLag = lag;
+      }
+    }
+    if (bestLag > 0 && best > 0) measuredHz = envRate / bestLag;
+  }
+
+  if (!rateParam || measuredHz === null) {
+    return {
+      score: depthScore,
+      metric: "modulation depth",
+      evidence: `sweeps the signal by ${(depth * 100).toFixed(1)}% on a steady tone (a static filter measures ~0%)`,
+    };
+  }
+  const setHz = params[rateParam.id];
+  // Amplitude peaks can land at 1x or 2x the LFO rate depending on the
+  // effect (a tremolo dips once per cycle, a through-zero comb twice), so
+  // accept either as correct calibration.
+  const err = Math.min(Math.abs(measuredHz - setHz), Math.abs(measuredHz - setHz * 2)) / Math.max(0.05, setHz);
+  const rateScore = Math.max(0, Math.min(100, Math.round((1 - err / 0.5) * 100)));
+  return {
+    score: Math.round(depthScore * 0.6 + rateScore * 0.4),
+    metric: "modulation depth + rate",
+    evidence: `sweeps ${(depth * 100).toFixed(1)}% deep at ~${measuredHz.toFixed(2)} Hz with Rate set to ${setHz.toFixed(2)} Hz`,
+  };
+}
+
+/** Pitch correction: feed a deliberately detuned note and measure how much
+ *  of the tuning error the plugin actually removes. */
+function fitnessPitch(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>
+): FunctionalFitness | null {
+  // A4 = 440 Hz pushed 45 cents sharp: unambiguously out of tune, but still
+  // nearest to A rather than A#.
+  const OFFSET_CENTS = 45;
+  const inHz = 440 * Math.pow(2, OFFSET_CENTS / 1200);
+  const N = 66150; // 1.5 s: the detector needs time to lock and correct
+  const tone = (i: number) => Math.sin((2 * Math.PI * inHz * i) / SAMPLE_RATE) * 0.45;
+  const out = renderPass(dspFunc, params, N, tone);
+  if (out.failed) return null;
+  // Measure the settled second half only.
+  const settled = out.samples.slice(Math.floor(N / 2));
+  const outHz = detectPitchHz(settled, 200, 900);
+  if (outHz === null) return { score: 0, metric: "pitch correction", evidence: "no stable pitch detectable in the output" };
+  const centsFrom = (hz: number) => {
+    const semis = 12 * Math.log2(hz / 440);
+    return (semis - Math.round(semis)) * 100;
+  };
+  const outErr = Math.abs(centsFrom(outHz));
+  const corrected = (OFFSET_CENTS - outErr) / OFFSET_CENTS; // 1 = fully in tune
+  const score = Math.max(0, Math.min(100, Math.round(corrected * 100)));
+  return {
+    score,
+    metric: "pitch correction",
+    evidence: `pulls a ${OFFSET_CENTS}-cent-sharp note to ${outErr.toFixed(0)} cents off (${(corrected * 100).toFixed(0)}% of the error removed)`,
+  };
+}
+
+/** Sampler: every pad must make a sound, and pads must not all be the same
+ *  sound wearing different labels. */
+function fitnessSampler(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>,
+  parameters: PluginParameter[]
+): FunctionalFitness | null {
+  const pads = parameters.filter((p) => /^pad_/i.test(p.id));
+  if (pads.length < 2) return null;
+  const N = 8192;
+  const silence = () => 0;
+  const renders: Float32Array[] = [];
+  let audible = 0;
+  for (const pad of pads) {
+    const solo: Record<string, number> = { ...params };
+    for (const other of pads) solo[other.id] = other.id === pad.id ? pad.max : 0;
+    const out = renderPass(dspFunc, solo, N, silence);
+    if (out.failed) continue;
+    if (out.rms > 1e-4) audible++;
+    renders.push(out.samples);
+  }
+  if (renders.length < 2) return { score: 0, metric: "pad voices", evidence: "no pad produced measurable output" };
+  // Distinctness: mean normalized difference between every pad pair.
+  let pairs = 0;
+  let distinctPairs = 0;
+  for (let a = 0; a < renders.length; a++) {
+    for (let b = a + 1; b < renders.length; b++) {
+      let diff = 0;
+      let energy = 0;
+      for (let i = 0; i < N; i++) {
+        diff += Math.abs(renders[a][i] - renders[b][i]);
+        energy += Math.abs(renders[a][i]) + Math.abs(renders[b][i]);
+      }
+      pairs++;
+      if (energy > 1e-4 && diff / energy > 0.2) distinctPairs++;
+    }
+  }
+  const audibleRatio = audible / pads.length;
+  const distinctRatio = pairs > 0 ? distinctPairs / pairs : 0;
+  const score = Math.max(0, Math.min(100, Math.round((audibleRatio * 0.5 + distinctRatio * 0.5) * 100)));
+  return {
+    score,
+    metric: "pad voices",
+    evidence: `${audible}/${pads.length} pads make a sound and ${distinctPairs}/${pairs} pad pairs are audibly different from each other`,
+  };
+}
+
+/** Synthesizer: a generator must actually generate — at the pitch it claims,
+ *  with harmonic content rather than a bare sine. */
+function fitnessSynth(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>,
+  parameters: PluginParameter[]
+): FunctionalFitness | null {
+  const N = 32768;
+  const out = renderPass(dspFunc, params, N, () => 0); // generators ignore input
+  if (out.failed) return null;
+  if (out.rms < 1e-4) return { score: 0, metric: "tone generation", evidence: "generates no audible tone at default settings" };
+  const settled = out.samples.slice(8192);
+  const detected = detectPitchHz(settled, 40, 1600);
+  const pitchParam = parameters.find((p) => /^(pitch|freq|frequency|tune)$/i.test(p.id) && p.max > 40);
+
+  if (!pitchParam || detected === null) {
+    return { score: 70, metric: "tone generation", evidence: `generates a steady tone (RMS ${out.rms.toFixed(3)}) with no pitch control to verify against` };
+  }
+  const setHz = params[pitchParam.id];
+  // Octave errors are a detector artifact as often as a real one; judge the
+  // pitch class distance in semitones, folded to the nearest octave.
+  const semis = 12 * Math.log2(detected / Math.max(1, setHz));
+  const foldedSemis = Math.abs(semis - 12 * Math.round(semis / 12));
+  const score = Math.max(0, Math.min(100, Math.round((1 - foldedSemis / 3) * 100)));
+  return {
+    score,
+    metric: "pitch accuracy",
+    evidence: `sounds ${detected.toFixed(1)} Hz with Pitch set to ${setHz.toFixed(1)} Hz (${foldedSemis.toFixed(2)} semitones off, octave-folded)`,
+  };
+}
+
+/** Character effects with no single canonical job (novel hybrid chains):
+ *  the job is TRANSFORMATION — a "character" effect that barely alters the
+ *  signal is not doing anything, however cleanly it measures. */
+function fitnessTransformation(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>
+): FunctionalFitness | null {
+  const N = 22050;
+  const out = renderPass(dspFunc, params, N, arpAt);
+  if (out.failed || out.rms < 1e-5) return null;
+  // Gain-match first so raw level change is not mistaken for character.
+  let inSq = 0;
+  for (let i = 0; i < N; i++) inSq += arpAt(i) * arpAt(i);
+  const inRms = Math.sqrt(inSq / N);
+  if (inRms < 1e-6) return null;
+  const g = inRms / out.rms;
+  let diff = 0;
+  for (let i = 0; i < N; i++) diff += Math.abs(out.samples[i] * g - arpAt(i));
+  const normDiff = diff / N / inRms;
+  const score = Math.max(0, Math.min(100, Math.round((normDiff / 0.6) * 100)));
+  return {
+    score,
+    metric: "transformation depth",
+    evidence: `alters the gain-matched signal by ${(normDiff * 100).toFixed(0)}% of its own level (a near-passthrough measures ~0%)`,
+  };
+}
+
 /** Distortion: how much harmonic content does it actually generate? */
 function fitnessDistortion(
   dspFunc: (i: number, p: any, s: any, r?: number) => number,
@@ -1140,9 +1389,23 @@ export function measureFunctionalFitness(
         return fitnessFilter(dspFunc, params, parameters);
       case "distortion":
       case "saturator":
+      case "multiband_saturator":
       case "amp_sim":
         return fitnessDistortion(dspFunc, params);
+      case "modulation":
+        return fitnessModulation(dspFunc, params, parameters);
+      case "pitch":
+        return fitnessPitch(dspFunc, params);
+      case "sampler":
+        return fitnessSampler(dspFunc, params, parameters);
+      case "synthesizer":
+        return fitnessSynth(dspFunc, params, parameters);
+      case "hybrid_other":
+        return fitnessTransformation(dspFunc, params);
       default:
+        // "utility" (gain/pan trims) has no meaningful functional job to
+        // measure — better honestly unmeasured than scored against a test
+        // that does not apply.
         return null;
     }
   } catch {

@@ -142,6 +142,25 @@ const CanvasPluginCard: React.FC<CardProps> = ({
         “{card.prompt}”
       </p>
 
+      {/* Proven: the build measurably does its family's job. The four gate
+          scores say it's correct; this says it WORKS, with real numbers. */}
+      {card.plugin?.buildReport?.functionalFitness && (
+        <div
+          className="flex items-start gap-1.5 rounded-lg border border-emerald-900/40 bg-emerald-950/20 px-2.5 py-1.5"
+          title={`Measured ${card.plugin.buildReport.functionalFitness.metric}: ${card.plugin.buildReport.functionalFitness.evidence}`}
+        >
+          <CheckCircle2 className="w-3 h-3 mt-px shrink-0 text-emerald-400" />
+          <div className="min-w-0">
+            <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-400/90">
+              Proven · {card.plugin.buildReport.functionalFitness.metric}
+            </span>
+            <p className="text-[10px] leading-relaxed text-neutral-300 line-clamp-2">
+              {card.plugin.buildReport.functionalFitness.evidence}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Why this design — the engineering brain made visible */}
       {card.plugin?.buildReport?.engineeringChoice && (
         <div

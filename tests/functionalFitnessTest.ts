@@ -112,10 +112,57 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
   check("distortion: a clean gain stage generates none", !!clean && clean.score < 15, clean ? `${clean.score}/100` : "none");
 }
 
-/* ---- 6. Families with no meaningful test are honestly skipped ---- */
+/* ---- 6. Modulation: a moving LFO must beat a static filter ---- */
 {
-  const synth = DSP_RECIPES.find((r) => r.id === "synth")!;
-  check("no false measurement for families without a functional test", fit(synth.body, synth.parameters as PluginParameter[], "synthesizer") === null);
+  const golden = DSP_RECIPES.find((r) => r.id === "modulation")!;
+  const real = fit(golden.body, golden.parameters as PluginParameter[], "modulation");
+  // Same chorus with the LFO frozen: still audible, still "correct", but dead.
+  const frozen = fit(
+    golden.body.replace("state.ph += 2 * Math.PI * rate / 44100;", "state.ph += 0;"),
+    golden.parameters as PluginParameter[],
+    "modulation"
+  );
+  check("modulation: measures real sweep depth and rate", !!real && real.score > 60, real ? `${real.score}/100 — ${real.evidence}` : "none");
+  check("modulation: a frozen LFO is caught", !!frozen && !!real && frozen.score < real.score - 30, `frozen=${frozen?.score} vs moving=${real?.score}`);
+}
+
+/* ---- 7. Pitch: real correction must beat a passthrough ---- */
+{
+  const golden = DSP_RECIPES.find((r) => r.id === "pitch")!;
+  const real = fit(golden.body, golden.parameters as PluginParameter[], "pitch");
+  const passthrough = fit("return inputSample;", golden.parameters as PluginParameter[], "pitch");
+  check("pitch: measures real correction in cents", !!real && real.score > 40, real ? `${real.score}/100 — ${real.evidence}` : "none");
+  check("pitch: an uncorrected passthrough scores near zero", !!passthrough && passthrough.score < 25, passthrough ? `${passthrough.score}/100 — ${passthrough.evidence}` : "none");
+}
+
+/* ---- 8. Sampler: distinct pad voices must beat one sound on every pad ---- */
+{
+  const golden = DSP_RECIPES.find((r) => r.id === "sampler")!;
+  const real = fit(golden.body, golden.parameters as PluginParameter[], "sampler");
+  // Every pad triggers the SAME 220 Hz tone — audible, but not 8 voices.
+  const clones = `if (!state.init) { state.p = 0; state.init = true; }
+let sum = 0;
+let anyPad = (params.pad_1||0)+(params.pad_2||0)+(params.pad_3||0)+(params.pad_4||0)+(params.pad_5||0)+(params.pad_6||0)+(params.pad_7||0)+(params.pad_8||0);
+if (anyPad > 0) { state.p += 2 * Math.PI * 220 / 44100; if (state.p > 2*Math.PI) state.p -= 2*Math.PI; sum = Math.sin(state.p) * 0.5; }
+return Math.tanh(sum * (params.mix !== undefined ? params.mix : 0.9));`;
+  const cloned = fit(clones, golden.parameters as PluginParameter[], "sampler");
+  check("sampler: measures audible, distinct pad voices", !!real && real.score > 70, real ? `${real.score}/100 — ${real.evidence}` : "none");
+  check("sampler: eight copies of one sound is caught", !!cloned && !!real && cloned.score < real.score - 30, `clones=${cloned?.score} vs real=${real?.score}`);
+}
+
+/* ---- 9. Synth: honest pitch must beat an oscillator that ignores its knob ---- */
+{
+  const golden = DSP_RECIPES.find((r) => r.id === "synth")!;
+  const real = fit(golden.body, golden.parameters as PluginParameter[], "synthesizer");
+  check("synth: measures pitch accuracy against the Pitch knob", !!real && real.score > 70, real ? `${real.score}/100 — ${real.evidence}` : "none");
+}
+
+/* ---- 10. Utility still has no meaningful test, and says so ---- */
+{
+  check(
+    "no false measurement for a family with no functional job",
+    fit("return inputSample * (params.gain !== undefined ? params.gain : 1);", [P("gain", 0, 2, 1)], "utility") === null
+  );
 }
 
 /* ---- 7. Every shipped topology stays functional AND at the floor ---- */

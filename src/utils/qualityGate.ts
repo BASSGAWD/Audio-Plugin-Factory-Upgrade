@@ -1065,34 +1065,64 @@ function fitnessFilter(
     return Math.sqrt(goertzelPower(out.samples.slice(SETTLE), hz, SAMPLE_RATE));
   };
   // Passband reference well below the corner, then a sweep upward.
-  const ref = responseAt(Math.max(40, cutoff / 8));
+  const refFreq = Math.max(40, cutoff / 8);
+  const refMult = refFreq / cutoff;
+  const ref = responseAt(refFreq);
   if (ref < 1e-5) return null;
   // Third-octave probe grid: a coarse octave grid would report a resonant
   // filter (whose -3 dB point legitimately sits above nominal) as wildly
   // miscalibrated. Resolution here is the difference between measuring the
   // filter and measuring the grid.
   const probes = [0.5, 0.63, 0.8, 1, 1.26, 1.6, 2, 2.5, 3.2, 4].map((m) => ({ mult: m, hz: cutoff * m }));
-  let cornerMult: number | null = null;
+  const points: { mult: number; resp: number }[] = [{ mult: refMult, resp: ref }];
   for (const p of probes) {
     if (p.hz > 18000) break;
-    const db = 20 * Math.log10(Math.max(1e-9, responseAt(p.hz) / ref));
-    if (db <= -3) {
-      cornerMult = p.mult;
+    points.push({ mult: p.mult, resp: responseAt(p.hz) });
+  }
+  // A resonant filter's passband gain is its PEAK near the corner, not the
+  // flat low-frequency reference -- measuring -3 dB down from that peak
+  // (the standard definition of a resonant filter's corner) is the
+  // difference between crediting real resonance and mistaking it for a
+  // miscalibrated knob.
+  let peak = ref;
+  for (const pt of points) {
+    if (pt.resp > peak) peak = pt.resp;
+  }
+  const dbAt = (resp: number) => 20 * Math.log10(Math.max(1e-9, resp / peak));
+
+  // Walk the (log-frequency, dB) curve and interpolate the exact -3 dB
+  // crossing -- snapping to the first probe past threshold overstates the
+  // error by up to a full grid step on this third-octave probe spacing.
+  let cornerMult: number | null = null;
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const cur = points[i];
+    const prevDb = dbAt(prev.resp);
+    const curDb = dbAt(cur.resp);
+    if (prevDb > -3 && curDb <= -3) {
+      const lx = Math.log2(prev.mult);
+      const lc = Math.log2(cur.mult);
+      const t = (-3 - prevDb) / (curDb - prevDb);
+      cornerMult = Math.pow(2, lx + t * (lc - lx));
       break;
     }
   }
   if (cornerMult === null) {
     return { score: 0, metric: "cutoff calibration", evidence: `no -3 dB rolloff found within 4x of the ${cutoff.toFixed(0)} Hz Cutoff setting — the knob's label does not match where it filters` };
   }
-  // 2 octaves of error = 0. Resonance shifts a real filter's corner up by
-  // well under an octave, so an honest design lands comfortably high while a
-  // knob that ignores its own value still falls to the floor.
+  // 2 octaves of error = 0. Resonance (credited above via the peak
+  // reference) still legitimately shifts a real filter's half-power point up
+  // by a fraction of an octave, so an honest design -- resonant or not --
+  // lands comfortably high while a knob that ignores its own value still
+  // falls to the floor.
   const octavesOff = Math.abs(Math.log2(cornerMult));
   const score = Math.max(0, Math.min(100, Math.round((1 - octavesOff / 2) * 100)));
+  const peakDb = 20 * Math.log10(peak / ref);
+  const resonanceNote = peakDb > 1 ? ` (resonance lifts the passband ~${peakDb.toFixed(1)} dB near the corner)` : "";
   return {
     score,
     metric: "cutoff calibration",
-    evidence: `-3 dB corner measured at ~${(cutoff * cornerMult).toFixed(0)} Hz with Cutoff set to ${cutoff.toFixed(0)} Hz (${octavesOff.toFixed(1)} octaves off)`,
+    evidence: `-3 dB corner measured at ~${(cutoff * cornerMult).toFixed(0)} Hz with Cutoff set to ${cutoff.toFixed(0)} Hz (${octavesOff.toFixed(1)} octaves off)${resonanceNote}`,
   };
 }
 

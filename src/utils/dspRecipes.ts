@@ -366,21 +366,58 @@ if (state.hop >= 512) {
     energy += s * s;
   }
   if (energy > 1e-3) {
-    let bestLag = 0;
-    let bestCorr = 0;
-    for (let lag = 44; lag <= 551; lag++) {
-      let corr = 0;
+    let corrAtLag = function(lag) {
+      let c = 0;
       for (let n = 0; n < N; n += 2) {
         let a = state.buf[(state.wp - 1 - n + BUF + BUF) % BUF];
         let b = state.buf[(state.wp - 1 - n - lag + BUF + BUF + BUF) % BUF];
-        corr += a * b;
+        c += a * b;
       }
-      corr = corr / (energy + 1e-9);
-      if (corr > bestCorr) { bestCorr = corr; bestLag = lag; }
+      return c / (energy + 1e-9);
+    };
+    // Scan from the SHORTEST lag upward and take the first genuine local
+    // peak above threshold -- NOT the global max over the whole range. A
+    // periodic tone autocorrelates just as strongly at every integer
+    // multiple of its true period (2x, 3x, 4x...), so the global argmax
+    // locks onto an octave-down subharmonic about as often as the true
+    // fundamental; the shortest strong peak is always the true one.
+    let prevPrev = corrAtLag(43);
+    let prev = corrAtLag(44);
+    let foundLag = 0;
+    let foundCorr = 0;
+    let cM = 0;
+    let cP = 0;
+    for (let lag = 45; lag <= 551; lag++) {
+      let corr = corrAtLag(lag);
+      if (prev > prevPrev && prev >= corr && prev > 0.3) {
+        foundLag = lag - 1;
+        foundCorr = prev;
+        cM = prevPrev;
+        cP = corr;
+        break;
+      }
+      prevPrev = prev;
+      prev = corr;
     }
-    if (bestLag > 0 && bestCorr > 0.25) {
-      state.detF = 44100 / bestLag;
-      let midiD = 69 + 12 * Math.log(state.detF / 440) / Math.log(2);
+    if (foundLag > 0) {
+      // Parabolic interpolation across the peak's neighbors -- an integer
+      // lag alone is only ~15 cents of resolution near 440 Hz, which reads
+      // as an autotune that snaps close but never quite lands.
+      let denom = cM - 2 * foundCorr + cP;
+      let delta = Math.abs(denom) > 1e-9 ? 0.5 * (cM - cP) / denom : 0;
+      if (delta > 1) delta = 1;
+      if (delta < -1) delta = -1;
+      state.detF = 44100 / (foundLag + delta);
+      // A slow-tracking companion estimate for the DISCRETE note decision
+      // only -- the raw per-hop detF still carries a few cents of detector
+      // jitter even after interpolation, and right at a semitone's 50-cent
+      // rounding boundary that jitter flips the chosen note (e.g. A vs A#),
+      // which sends the correction the WRONG WAY rather than just being
+      // slightly imprecise. The correction ratio below still tracks the
+      // raw, responsive state.detF; only nearMidi is judged from this one.
+      if (state.noteDetF === undefined) state.noteDetF = state.detF;
+      state.noteDetF += 0.08 * (state.detF - state.noteDetF);
+      let midiD = 69 + 12 * Math.log(state.noteDetF / 440) / Math.log(2);
       let pcls = ((Math.round(midiD) % 12) + 12) % 12;
       for (let k = 0; k < 12; k++) state.pc[k] *= 0.995;
       state.pc[pcls] += 1;
@@ -403,7 +440,7 @@ let mask = 4095;              // chromatic
 if (sc === 1) mask = 2741;   // major     {0,2,4,5,7,9,11}
 else if (sc === 2) mask = 1453; // minor  {0,2,3,5,7,8,10}
 else if (sc >= 3) mask = 661;   // penta  {0,2,4,7,9}
-let midiIn = 69 + 12 * Math.log(state.detF / 440) / Math.log(2);
+let midiIn = 69 + 12 * Math.log((state.noteDetF !== undefined ? state.noteDetF : state.detF) / 440) / Math.log(2);
 let nearMidi = Math.round(midiIn);
 let rel = ((nearMidi - tonic) % 12 + 12) % 12;
 let snapRel = rel;
@@ -473,6 +510,8 @@ let wetFC = wLo * gLo + wMid * gMid + wHi * gHi;
 return Math.tanh(dry * (1 - mix) + wetFC * mix);`,
     pitfalls: [
       "Detect the fundamental with normalized autocorrelation over a running state buffer (peak lag in the ~80-1000 Hz vocal range), then SNAP it to the selected key/scale and resynth at the corrected pitch -- this is a real tuner, not a fixed pitch shift. Guard detection against silence: when the analysis window energy is near zero, HOLD the previous F0 instead of dividing by it, or the burst/gap material NaNs.",
+      "Scan lags from SHORTEST to longest and take the first local peak above threshold, never the global argmax over the whole range -- a periodic tone autocorrelates just as strongly at 2x/3x/4x its true period, so an argmax search locks onto an octave-down subharmonic about as often as the true fundamental, and averages out to a badly out-of-tune correction even though each individual detection looks confident.",
+      "Refine that peak lag with parabolic interpolation across its two neighbors before converting to Hz -- an integer lag alone is only ~15 cents of resolution near 440 Hz (a semitone is ~6% of the lag), so skipping this quantizes the target note and the correction visibly undershoots even with Retune Speed at 0.",
       "Snap to a note SET, not a fixed offset: represent the scale as a 12-bit mask (chromatic/major/minor/pentatonic) and search outward from the detected pitch class for the nearest allowed degree. Key 0 = Auto: pick the tonic from an accumulated, decaying pitch-class histogram so the plugin follows the performance's key.",
       "Glide the correction ratio toward the target with a Retune Speed coefficient (0 ms = instant/robotic snap, larger = human-like slide); jumping the ratio per detection clicks. Clamp the ratio to +/-1 octave.",
       "Use TWO Hann-windowed read heads a half grain apart (windows sum to 1.0), advanced by the dynamic correction ratio, wrapped independently with modulo; linearly interpolate every fractional read.",

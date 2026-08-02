@@ -1,6 +1,6 @@
 # OrangeJuce Knowledge Audit
 
-Generated 2026-08-02T10:19:48.225Z — every number below is measured, not claimed.
+Generated 2026-08-02T18:22:11.129Z — every number below is measured, not claimed.
 
 ## 1. Inventory
 
@@ -67,7 +67,7 @@ Generated 2026-08-02T10:19:48.225Z — every number below is measured, not claim
 | Resonant filter sweep | filter | 100 | 100 | yes | 2 | — |
 | 3-band EQ | eq | 100 | 100 | yes | 3 | — |
 | Chorus | modulation | 100 | 100 | yes | 2 | — |
-| Autotune | pitch | 100 | 99 | yes | 2 | — |
+| Autotune | pitch | 100 | 97 | yes | 2 | — |
 | Drum pads | sampler | 100 | 100 | yes | 2 | — |
 | Synth pad | synthesizer | 100 | 100 | yes | 2 | — |
 | Novel hybrid | hybrid_other | 100 | 100 | yes | 1 | — |

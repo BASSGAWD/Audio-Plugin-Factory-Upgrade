@@ -95,8 +95,19 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
     golden.parameters as PluginParameter[],
     "filter"
   );
-  check("filter: honest Cutoff calibration scores high", !!honest && honest.score > 50, honest ? `${honest.score}/100 — ${honest.evidence}` : "none");
+  check("filter: honest Cutoff calibration scores high", !!honest && honest.score > 75, honest ? `${honest.score}/100 — ${honest.evidence}` : "none");
   check("filter: a Cutoff that lies by octaves is caught", !!lying && !!honest && lying.score < honest.score - 25, `lying=${lying?.score} vs honest=${honest?.score}`);
+
+  // Resonance shifts a real filter's -3 dB point above nominal cutoff by
+  // design -- that must be CREDITED (measured relative to the resonant
+  // peak), not scored as if the knob were lying, or every resonant filter
+  // in the corpus reads as miscalibrated regardless of how well-tuned it is.
+  const resonant = fit(
+    golden.body,
+    (golden.parameters as PluginParameter[]).map((p) => (p.id === "resonance" ? { ...p, defaultValue: 0.8, value: 0.8 } : p)),
+    "filter"
+  );
+  check("filter: strong resonance is credited, not penalized", !!resonant && resonant.score > 75, resonant ? `${resonant.score}/100 — ${resonant.evidence}` : "none");
 }
 
 /* ---- 5. Distortion: real drive must beat a clean gain stage ---- */
@@ -131,7 +142,11 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
   const golden = DSP_RECIPES.find((r) => r.id === "pitch")!;
   const real = fit(golden.body, golden.parameters as PluginParameter[], "pitch");
   const passthrough = fit("return inputSample;", golden.parameters as PluginParameter[], "pitch");
-  check("pitch: measures real correction in cents", !!real && real.score > 40, real ? `${real.score}/100 — ${real.evidence}` : "none");
+  // The detector's autocorrelation locks onto octave-down subharmonics
+  // about as often as the true fundamental unless it specifically guards
+  // against them (a periodic tone autocorrelates equally at 2x/3x/4x its
+  // true period) -- pinned high so that guard can't silently regress.
+  check("pitch: measures real correction in cents", !!real && real.score > 80, real ? `${real.score}/100 — ${real.evidence}` : "none");
   check("pitch: an uncorrected passthrough scores near zero", !!passthrough && passthrough.score < 25, passthrough ? `${passthrough.score}/100 — ${passthrough.evidence}` : "none");
 }
 

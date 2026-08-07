@@ -110,6 +110,36 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
   check("filter: strong resonance is credited, not penalized", !!resonant && resonant.score > 75, resonant ? `${resonant.score}/100 — ${resonant.evidence}` : "none");
 }
 
+/* ---- 4b. EQ: each band's dB knob must move ITS OWN region -- "eq" used to
+   route to fitnessFilter, which requires a cutoff/freq param the EQ recipe
+   doesn't have, so it silently scored every EQ build as unmeasured (null)
+   forever. ---- */
+{
+  const golden = DSP_RECIPES.find((r) => r.id === "eq")!;
+  const real = fit(golden.body, golden.parameters as PluginParameter[], "eq");
+  // Gain knobs wired in but multiplied to no effect -- every band is inert.
+  const inert = fit(
+    golden.body
+      .replace("Math.pow(10, low / 20)", "1")
+      .replace("Math.pow(10, mid / 20)", "1")
+      .replace("Math.pow(10, high / 20)", "1"),
+    golden.parameters as PluginParameter[],
+    "eq"
+  );
+  // Low and high knobs crossed -- the "Low" knob boosts the HIGH band.
+  const swapped = fit(
+    golden.body.replace(
+      "let out = lowB * Math.pow(10, low / 20) + midB * Math.pow(10, mid / 20) + highB * Math.pow(10, high / 20);",
+      "let out = lowB * Math.pow(10, high / 20) + midB * Math.pow(10, mid / 20) + highB * Math.pow(10, low / 20);"
+    ),
+    golden.parameters as PluginParameter[],
+    "eq"
+  );
+  check("eq: measures real per-band gain accuracy (was a dead-routed null)", !!real && real.score > 50, real ? `${real.score}/100 — ${real.evidence}` : "none");
+  check("eq: gain knobs wired to nothing score at the floor", !!inert && inert.score < 10, inert ? `${inert.score}/100` : "none");
+  check("eq: crossed Low/High knobs are caught", !!swapped && !!real && swapped.score < real.score - 25, `swapped=${swapped?.score} vs real=${real?.score}`);
+}
+
 /* ---- 5. Distortion: real drive must beat a clean gain stage ---- */
 {
   const golden = DSP_RECIPES.find((r) => r.id === "distortion")!;

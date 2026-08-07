@@ -1,6 +1,6 @@
 # OrangeJuce Knowledge Audit
 
-Generated 2026-08-02T18:22:11.129Z — every number below is measured, not claimed.
+Generated 2026-08-07T11:18:48.423Z — every number below is measured, not claimed.
 
 ## 1. Inventory
 

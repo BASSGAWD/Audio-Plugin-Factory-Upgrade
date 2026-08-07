@@ -1126,6 +1126,67 @@ function fitnessFilter(
   };
 }
 
+/** Multi-band EQ: does each band's dB knob actually move ITS OWN region by
+ *  roughly the labeled amount? A gain knob wired to nothing (or to the
+ *  wrong band) still passes every correctness check -- this is the only
+ *  place that measures the knob does its job. */
+function fitnessEq(
+  dspFunc: (i: number, p: any, s: any, r?: number) => number,
+  params: Record<string, number>,
+  parameters: PluginParameter[]
+): FunctionalFitness | null {
+  const midFreqParam = parameters.find((p) => /^mid.?freq$/i.test(p.id));
+  const midFreq = midFreqParam ? params[midFreqParam.id] : 1200;
+  const bandProbes: { id: string; hz: number }[] = [];
+  if (parameters.some((p) => p.id === "low")) bandProbes.push({ id: "low", hz: 150 });
+  if (parameters.some((p) => p.id === "mid")) bandProbes.push({ id: "mid", hz: Math.max(200, midFreq) });
+  if (parameters.some((p) => p.id === "high")) bandProbes.push({ id: "high", hz: Math.min(12000, Math.max(3000, midFreq * 4)) });
+  if (bandProbes.length === 0) return null;
+
+  const N = 8192;
+  const SETTLE = 2048;
+  const respAt = (testParams: Record<string, number>, hz: number): number => {
+    const sig = (i: number) => Math.sin((2 * Math.PI * hz * i) / SAMPLE_RATE) * 0.4;
+    const out = renderPass(dspFunc, testParams, N, sig);
+    if (out.failed) return NaN;
+    return Math.sqrt(goertzelPower(out.samples.slice(SETTLE), hz, SAMPLE_RATE));
+  };
+
+  // Flatten every band to 0 dB as the shared reference, then move ONE band
+  // at a time -- isolates each knob's real effect from the others' defaults.
+  const flat: Record<string, number> = { ...params };
+  for (const b of bandProbes) flat[b.id] = 0;
+
+  const TEST_DB = 6;
+  let totalErr = 0;
+  let n = 0;
+  const parts: string[] = [];
+  for (const band of bandProbes) {
+    const ref = respAt(flat, band.hz);
+    if (!Number.isFinite(ref) || ref < 1e-6) continue;
+    const boostResp = respAt({ ...flat, [band.id]: TEST_DB }, band.hz);
+    const cutResp = respAt({ ...flat, [band.id]: -TEST_DB }, band.hz);
+    if (!Number.isFinite(boostResp) || !Number.isFinite(cutResp)) continue;
+    const boostDb = 20 * Math.log10(Math.max(1e-6, boostResp / ref));
+    const cutDb = 20 * Math.log10(Math.max(1e-6, cutResp / ref));
+    totalErr += Math.abs(boostDb - TEST_DB) + Math.abs(cutDb + TEST_DB);
+    n += 2;
+    parts.push(`${band.id} @${band.hz.toFixed(0)}Hz: +${TEST_DB}dB measured ${boostDb.toFixed(1)}dB, -${TEST_DB}dB measured ${cutDb.toFixed(1)}dB`);
+  }
+  if (n === 0) return { score: 0, metric: "band gain accuracy", evidence: "every band is silent -- the EQ has no measurable passband to move" };
+  const avgErr = totalErr / n;
+  // 6 dB of average error = 0: a band that measures roughly HALF its
+  // labeled move (common with gentle crossovers and a safety soft-clip)
+  // still scores in the honest-but-imperfect range; a band wired to
+  // nothing measures the full 6 dB of error and falls to the floor.
+  const score = Math.max(0, Math.min(100, Math.round((1 - avgErr / TEST_DB) * 100)));
+  return {
+    score,
+    metric: "band gain accuracy",
+    evidence: parts.join("; "),
+  };
+}
+
 /**
  * Autocorrelation pitch detector with parabolic peak interpolation — the
  * sub-lag precision is what makes a cents-accurate reading possible (a whole
@@ -1415,8 +1476,9 @@ export function measureFunctionalFitness(
       case "delay":
         return fitnessDelay(dspFunc, params, parameters);
       case "filter":
-      case "eq":
         return fitnessFilter(dspFunc, params, parameters);
+      case "eq":
+        return fitnessEq(dspFunc, params, parameters);
       case "distortion":
       case "saturator":
       case "multiband_saturator":

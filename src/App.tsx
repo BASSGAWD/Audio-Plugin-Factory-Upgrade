@@ -24,7 +24,9 @@ import {
   Bookmark,
   Github,
   Cpu,
-  BookOpen
+  BookOpen,
+  PanelLeftClose,
+  PanelLeftOpen
 } from "lucide-react";
 import { AudioPlugin, ChatMessage, DSPAnalysisResult, DspCritiqueItem, Agent, PluginParameter } from "./types";
 import { DEFAULT_AGENTS } from "./defaultAgents";
@@ -45,6 +47,7 @@ import {
   PARAMETER_DESIGN_RULES,
   AMP_CAB_SCHEMA_GUIDANCE,
   SAMPLER_SCHEMA_GUIDANCE,
+  GUI_DESIGN_PHILOSOPHY,
   buildLocalChatSystemPrompt,
   TRANSLATE_PORTABLE_PROMPT,
 } from "./utils/dspPromptKit";
@@ -637,6 +640,29 @@ export default function App() {
 
   // Active Workspace tabs toggle selection (companion tabs)
   const [companionTab, setCompanionTab] = useState<CompanionTabId>("playground");
+
+  // Workspace navigation is a vertical sidebar rather than a horizontal bar:
+  // 14 destinations in one wrapping row re-flowed into a different number of
+  // rows on every resize, which is most of why this screen read as unstable.
+  // A column never wraps. Collapsed = icon-only rail for maximum canvas width.
+  const [navCollapsed, setNavCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("workspace_nav_collapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleNav = () => {
+    setNavCollapsed((c) => {
+      const next = !c;
+      try {
+        localStorage.setItem("workspace_nav_collapsed", next ? "1" : "0");
+      } catch {
+        /* private mode / storage disabled -- collapse still works this session */
+      }
+      return next;
+    });
+  };
 
   // Spec Architect States
   const [architectPrompt, setArchitectPrompt] = useState("");
@@ -2210,7 +2236,9 @@ ${PARAMETER_DESIGN_RULES}
 
 ${AMP_CAB_SCHEMA_GUIDANCE}
 
-${SAMPLER_SCHEMA_GUIDANCE}`;
+${SAMPLER_SCHEMA_GUIDANCE}
+
+${GUI_DESIGN_PHILOSOPHY}`;
 
   const handleDeconstructPrompt = async () => {
     if (!architectPrompt.trim()) return;
@@ -3215,41 +3243,65 @@ Return ONLY a JSON object with this exact shape, no other text:
       <main className="flex-1 overflow-hidden flex flex-col bg-neutral-950">
         
         {/* ==================== SINGLE CONTAINER CORE ==================== */}
-        <section className="flex-grow flex flex-col h-full bg-neutral-950 overflow-hidden">
-          
-          {/* Grouped workspace navigation: all tabs visible (wraps, never scrolls) */}
-          <div className="border-b border-neutral-900 bg-neutral-950 px-3 py-2 shrink-0 select-none">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 font-mono">
-              {WORKSPACE_TAB_GROUPS.map((group) => (
-                <div key={group.label} className="flex items-center gap-1">
-                  <span className="text-[7.5px] font-black uppercase tracking-widest text-neutral-600 pr-1 border-r border-neutral-900 mr-1">
+        {/* Row, not column: navigation is a fixed-width column on the left and
+            the workspace fills the rest. */}
+        <section className="flex-grow flex flex-row h-full bg-neutral-950 overflow-hidden">
+
+          {/* Workspace navigation -- one column, grouped, never wraps. */}
+          <nav
+            className={`shrink-0 border-r border-neutral-900 bg-neutral-950 flex flex-col overflow-y-auto scrollbar-thin select-none transition-[width] duration-200 ${
+              navCollapsed ? "w-[52px]" : "w-[184px]"
+            }`}
+            aria-label="Workspace sections"
+          >
+            <button
+              type="button"
+              onClick={toggleNav}
+              title={navCollapsed ? "Expand navigation" : "Collapse navigation"}
+              aria-label={navCollapsed ? "Expand navigation" : "Collapse navigation"}
+              className="flex items-center gap-2 px-3 py-2.5 text-neutral-500 hover:text-neutral-200 transition-colors shrink-0"
+            >
+              {navCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+              {!navCollapsed && <span className="text-[10px] font-mono font-bold uppercase tracking-wider">Workspace</span>}
+            </button>
+
+            {WORKSPACE_TAB_GROUPS.map((group) => (
+              <div key={group.label} className="pb-1">
+                {!navCollapsed && (
+                  <div className="px-3 pt-2 pb-1 text-[8.5px] font-mono font-black uppercase tracking-widest text-neutral-600">
                     {group.label}
-                  </span>
-                  {group.tabs.map((tab) => {
-                    const Icon = tab.icon;
-                    const isActive = companionTab === tab.id;
-                    return (
-                      <button
-                        key={tab.id}
-                        onClick={() => setCompanionTab(tab.id)}
-                        className={`px-2.5 py-1.5 rounded-lg text-[9.5px] font-bold transition-all cursor-pointer flex items-center gap-1 whitespace-nowrap ${
-                          isActive
-                            ? `${tab.accent === "orange" ? "bg-orange-600 shadow-orange-950/40" : "bg-indigo-600 shadow-indigo-950/40"} text-white shadow-md`
-                            : "text-neutral-450 hover:text-neutral-200 hover:bg-neutral-900/50"
-                        }`}
-                      >
-                        <Icon className={`w-3 h-3 ${isActive ? "text-white" : tab.iconColor}`} />
-                        <span>{tab.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          </div>
+                  </div>
+                )}
+                {navCollapsed && <div className="mx-3 my-1.5 border-t border-neutral-900" />}
+                {group.tabs.map((tab) => {
+                  const Icon = tab.icon;
+                  const isActive = companionTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setCompanionTab(tab.id)}
+                      title={navCollapsed ? tab.label : undefined}
+                      aria-current={isActive ? "page" : undefined}
+                      className={`w-full flex items-center gap-2.5 pr-2 py-2 text-[11px] font-mono font-bold transition-colors border-l-2 ${
+                        navCollapsed ? "justify-center pl-2" : "pl-[10px]"
+                      } ${
+                        isActive
+                          ? `${tab.accent === "orange" ? "border-orange-500 bg-orange-950/25 text-orange-200" : "border-indigo-500 bg-indigo-950/25 text-indigo-200"}`
+                          : "border-transparent text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900/50"
+                      }`}
+                    >
+                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? "" : tab.iconColor}`} />
+                      {!navCollapsed && <span className="truncate">{tab.label}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </nav>
 
           {/* D. Scrolling Active Workspace Content Area */}
-          <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-4 bg-neutral-950/40 scrollbar-thin">
+          <div className="flex-1 min-w-0 overflow-y-auto p-4 md:p-5 space-y-4 bg-neutral-950/40 scrollbar-thin">
             
             {/* Companion TAB Content: Unified Chat with OrangeJuce Specialists */}
             {companionTab === "chat" && (

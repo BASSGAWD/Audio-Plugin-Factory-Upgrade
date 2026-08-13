@@ -34,13 +34,12 @@ import {
   AlignRight,
   Type,
   Copy,
-  Lock,
-  Unlock,
   Layers,
-  Wand2
+  X
 } from "lucide-react";
 import { AudioPlugin, PluginParameter } from "../types";
-import { computeFilterCurve, xPixelToHz, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
+import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
+import { ArchetypeId, ARCHETYPE_LABELS, BUILTIN_ARCHETYPES, applyArchetype } from "../utils/guiArchetypes";
 
 interface UIDesignerProps {
   plugin: AudioPlugin;
@@ -735,6 +734,17 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
     };
   }, [activeContextMenu]);
 
+  // One selection, not two. If the selection moves to a different control
+  // while the Workshop is open, the Workshop would still be editing the old
+  // one -- the Inspector and the Workshop pointing at different parameters
+  // is exactly the bug that made edits land on the control you were not
+  // looking at. Close it rather than let them drift apart.
+  useEffect(() => {
+    if (activeContextMenu && selectedParamId !== activeContextMenu.paramId) {
+      setActiveContextMenu(null);
+    }
+  }, [selectedParamId, activeContextMenu]);
+
   // Left sidebar active tab: palette (toolbox) vs layers (tree)
   const [leftTab, setLeftTab] = useState<"palette" | "layers">("palette");
 
@@ -769,17 +779,20 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
   const [selectedGlossaryKey, setSelectedGlossaryKey] = useState<string>("hz");
 
   // Floating drawer hover/vis states
-  const [isTopOpen, setIsTopOpen] = useState<boolean>(false);
-  const [isLeftOpen, setIsLeftOpen] = useState<boolean>(false);
-  const [isRightOpen, setIsRightOpen] = useState<boolean>(false);
-  const [isBottomOpen, setIsBottomOpen] = useState<boolean>(false);
+  // Panels open on CLICK and stay open. They used to open on hover from all
+  // four screen edges, which meant a panel flew out any time the cursor
+  // crossed an edge -- the single biggest reason this screen felt unstable.
+  // The three tool panels are mutually exclusive (only one can cover the
+  // canvas at a time); the Inspector is independent because it is the
+  // primary work surface and is meant to stay visible alongside them.
+  type PanelId = "tools" | "palette" | "templates";
+  const [activePanel, setActivePanel] = useState<PanelId | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState<boolean>(true);
+  const togglePanel = (id: PanelId) => setActivePanel((cur) => (cur === id ? null : id));
 
-  // Pinning states to lock drawer open
-  const [isTopPinned, setIsTopPinned] = useState<boolean>(false);
-  const [isLeftPinned, setIsLeftPinned] = useState<boolean>(false);
-  const [isRightPinned, setIsRightPinned] = useState<boolean>(false);
-  const [isBottomPinned, setIsBottomPinned] = useState<boolean>(false);
-  const [bottomSubTab, setBottomSubTab] = useState<"templates" | "wizard" | "injectors">("templates");
+  // (Pinning is gone: panels no longer close themselves, so there is nothing
+  // to pin them against.)
+  const [bottomSubTab, setBottomSubTab] = useState<"templates" | "injectors">("templates");
 
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -787,6 +800,88 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
     setTheme(newTheme);
     localStorage.setItem(`plugin_theme_${plugin.id}`, newTheme);
     triggerToast(`Skin applied: ${newTheme.replace("-", " ").toUpperCase()}`);
+  };
+
+  // --- GUI archetype: the layout composition axis, fully independent of
+  //     theme (color). Picking one re-lays-out the CURRENT parameters with
+  //     that archetype's algorithm (guiArchetypes.ts) -- the same pure
+  //     function the build-time gate runs, so what you see here is exactly
+  //     what a fresh generation with that archetype would produce. ---
+  const CUSTOM_ARCHETYPES_KEY = "custom_gui_archetypes";
+  interface CustomArchetypeEntry {
+    name: string;
+    positions: { controlType: string; ordinal: number; x: number; y: number; w: number; h: number }[];
+  }
+  const loadCustomArchetypes = (): CustomArchetypeEntry[] => {
+    try {
+      const raw = localStorage.getItem(CUSTOM_ARCHETYPES_KEY);
+      return raw ? (JSON.parse(raw) as CustomArchetypeEntry[]) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const [archetype, setArchetype] = useState<string>(() => {
+    const saved = localStorage.getItem(`plugin_archetype_${plugin.id}`);
+    return saved || plugin.uiArchetype || "grid";
+  });
+  const [customArchetypes, setCustomArchetypes] = useState<CustomArchetypeEntry[]>(() => loadCustomArchetypes());
+  const [savingArchetypeName, setSavingArchetypeName] = useState<string | null>(null);
+
+  const applyCustomArchetype = (entry: CustomArchetypeEntry, params: PluginParameter[]): PluginParameter[] => {
+    const seenByType: Record<string, number> = {};
+    const positioned = params.map((p) => {
+      const type = p.controlType || "knob";
+      const ordinal = seenByType[type] ?? 0;
+      seenByType[type] = ordinal + 1;
+      const match = entry.positions.find((pos) => pos.controlType === type && pos.ordinal === ordinal);
+      if (!match) return p;
+      return { ...p, x: match.x, y: match.y, w: match.w, h: match.h };
+    });
+    // Anything this plugin has that the saved archetype didn't (extra
+    // controls of a type it had fewer of) falls back to the grid, filling
+    // gaps only -- so nothing ends up unpositioned.
+    return applyArchetype("grid", positioned, false).parameters;
+  };
+
+  const changeArchetype = (newArchetype: string) => {
+    const custom = customArchetypes.find((c) => c.name === newArchetype);
+    const layout = custom
+      ? { parameters: applyCustomArchetype(custom, plugin.parameters), contentW: artboardWidth, contentH: artboardHeight, laidOutCount: 0 }
+      : applyArchetype(newArchetype as ArchetypeId, plugin.parameters, true);
+    setArchetype(newArchetype);
+    localStorage.setItem(`plugin_archetype_${plugin.id}`, newArchetype);
+    onChange({ ...plugin, parameters: layout.parameters, uiArchetype: newArchetype });
+    setArtboardWidth((w) => Math.max(w, Math.ceil(layout.contentW)));
+    setArtboardHeight((h) => Math.max(h, Math.ceil(layout.contentH)));
+    triggerToast(`Layout applied: ${custom ? custom.name : ARCHETYPE_LABELS[newArchetype as ArchetypeId]}`);
+  };
+
+  const confirmSaveCustomArchetype = () => {
+    const name = (savingArchetypeName || "").trim();
+    if (!name) return;
+    const seenByType: Record<string, number> = {};
+    const positions = plugin.parameters
+      .filter((p) => p.x !== undefined && p.y !== undefined)
+      .map((p) => {
+        const type = p.controlType || "knob";
+        const ordinal = seenByType[type] ?? 0;
+        seenByType[type] = ordinal + 1;
+        return { controlType: type, ordinal, x: p.x!, y: p.y!, w: p.w ?? 120, h: p.h ?? 100 };
+      });
+    const next = [...customArchetypes.filter((c) => c.name !== name), { name, positions }];
+    setCustomArchetypes(next);
+    localStorage.setItem(CUSTOM_ARCHETYPES_KEY, JSON.stringify(next));
+    setSavingArchetypeName(null);
+    // The plugin's CURRENT parameters already ARE the layout just captured
+    // above -- no re-layout needed, just label it. (Re-calling
+    // changeArchetype here would read customArchetypes before React
+    // commits the setCustomArchetypes update above and stomp this exact
+    // layout with a generic grid.)
+    setArchetype(name);
+    localStorage.setItem(`plugin_archetype_${plugin.id}`, name);
+    onChange({ ...plugin, uiArchetype: name });
+    triggerToast(`Saved current layout as custom archetype "${name}"`);
   };
 
   const handleParamValueChange = (id: string, newVal: number) => {
@@ -858,109 +953,9 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
     triggerToast(`Aligned ${target.name} to artboard`);
   };
 
-  // Auto layout arranging algorithms
-  const autoArrangeLayout = (layoutStyle: "grid" | "rack" | "pedal" | "strip") => {
-    if (plugin.parameters.length === 0) {
-      triggerToast("No controls to arrange! Add some controls first.");
-      return;
-    }
-
-    let updatedParams = [...plugin.parameters];
-    const count = updatedParams.length;
-
-    if (layoutStyle === "grid") {
-      const cols = Math.ceil(Math.sqrt(count));
-      const rows = Math.ceil(count / cols);
-      const cellW = Math.floor((artboardWidth - 40) / cols);
-      const cellH = Math.floor((artboardHeight - 40) / rows);
-
-      updatedParams = updatedParams.map((p, idx) => {
-        const col = idx % cols;
-        const row = Math.floor(idx / cols);
-        const w = Math.min(cellW - 15, p.w ?? 150);
-        const h = Math.min(cellH - 15, p.h ?? 110);
-        return {
-          ...p,
-          w,
-          h,
-          x: Math.round((20 + col * cellW + (cellW - w) / 2) / gridSize) * gridSize,
-          y: Math.round((20 + row * cellH + (cellH - h) / 2) / gridSize) * gridSize,
-        };
-      });
-      triggerToast(`Re-arranged ${count} controls into a ${cols}x${rows} Grid!`);
-    } else if (layoutStyle === "strip") {
-      const cellW = Math.floor((artboardWidth - 40) / count);
-      updatedParams = updatedParams.map((p, idx) => {
-        const isVerticalElement = p.controlType === "slider" || p.controlType === "meter";
-        const w = Math.min(cellW - 10, isVerticalElement ? 80 : 120);
-        const h = isVerticalElement ? artboardHeight - 60 : 100;
-        return {
-          ...p,
-          w,
-          h,
-          x: Math.round((20 + idx * cellW + (cellW - w) / 2) / gridSize) * gridSize,
-          y: Math.round((isVerticalElement ? 20 : (artboardHeight - h) / 2) / gridSize) * gridSize,
-        };
-      });
-      triggerToast(`Arranged ${count} controls into a Horizontal Channel Strip!`);
-    } else if (layoutStyle === "pedal") {
-      const knobs = updatedParams.filter(p => p.controlType === "knob" || p.controlType === "slider");
-      const controls = updatedParams.filter(p => p.controlType !== "knob" && p.controlType !== "slider");
-      
-      let knobIdx = 0;
-      let controlIdx = 0;
-      
-      updatedParams = updatedParams.map((p) => {
-        if (p.controlType === "knob" || p.controlType === "slider") {
-          const colCount = Math.min(3, knobs.length) || 1;
-          const cellW = Math.floor((artboardWidth - 40) / colCount);
-          const col = knobIdx % colCount;
-          const row = Math.floor(knobIdx / colCount);
-          knobIdx++;
-          const w = 120;
-          const h = 100;
-          return {
-            ...p,
-            w,
-            h,
-            x: Math.round((20 + col * cellW + (cellW - w) / 2) / gridSize) * gridSize,
-            y: Math.round((20 + row * 110) / gridSize) * gridSize,
-          };
-        } else {
-          const colCount = Math.max(1, controls.length);
-          const cellW = Math.floor((artboardWidth - 40) / colCount);
-          const col = controlIdx;
-          controlIdx++;
-          const w = p.controlType === "pad" || p.controlType === "button" ? 100 : 140;
-          const h = 80;
-          return {
-            ...p,
-            w,
-            h,
-            x: Math.round((20 + col * cellW + (cellW - w) / 2) / gridSize) * gridSize,
-            y: Math.round((artboardHeight - h - 30) / gridSize) * gridSize,
-          };
-        }
-      });
-      triggerToast(`Re-arranged stompbox layout: parameters aligned!`);
-    } else if (layoutStyle === "rack") {
-      const cellW = Math.floor((artboardWidth - 60) / count);
-      updatedParams = updatedParams.map((p, idx) => {
-        const w = Math.min(cellW - 10, p.w ?? 140);
-        const h = Math.min(artboardHeight - 60, p.h ?? 110);
-        return {
-          ...p,
-          w,
-          h,
-          x: Math.round((30 + idx * cellW + (cellW - w) / 2) / gridSize) * gridSize,
-          y: Math.round(((artboardHeight - h) / 2) / gridSize) * gridSize,
-        };
-      });
-      triggerToast(`Re-arranged controls into a Studio Rackmount Strip!`);
-    }
-
-    onChange({ ...plugin, parameters: updatedParams });
-  };
+  // (autoArrangeLayout removed -- it was a second layout engine whose four
+  // styles duplicated Layout archetypes in guiArchetypes.ts. Layout now has
+  // exactly one implementation, shared with the build pipeline.)
 
   // Load complete pre-designed faceplate and matching dynamic DSP
   const applyProStudioTemplate = (idx: number) => {
@@ -1377,68 +1372,48 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
       <div className="relative w-full h-[780px] bg-neutral-950 border border-neutral-800 rounded-3xl overflow-hidden select-none flex flex-col">
         
         {/* EDGE HOVER TRIGGERS (When panels are closed and unpinned) */}
-        {(!isTopOpen && !isTopPinned) && (
-          <div 
-            onMouseEnter={() => setIsTopOpen(true)}
-            className="absolute top-0 left-1/2 -translate-x-1/2 z-30 px-5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-b-xl border-x border-b border-indigo-400 font-mono text-[9px] font-extrabold uppercase tracking-widest cursor-pointer shadow-lg shadow-indigo-950/50 flex items-center gap-1.5 animate-bounce hover:animate-none transition-all duration-200"
+        {/* Panel rail -- one fixed place to open every panel, on CLICK.
+            Replaces four separate hover-triggered tabs that used to live on
+            all four screen edges. */}
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 z-30 flex flex-col gap-1 p-1 bg-neutral-950/90 border-y border-r border-neutral-800 rounded-r-xl shadow-xl">
+          {([
+            { id: "palette" as const, icon: Grid, label: "Add controls" },
+            { id: "tools" as const, icon: Wrench, label: "Appearance & mode" },
+            { id: "templates" as const, icon: Sparkles, label: "Templates & glossary" },
+          ]).map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => togglePanel(id)}
+              title={label}
+              aria-label={label}
+              aria-pressed={activePanel === id}
+              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
+                activePanel === id ? "bg-indigo-600 text-white" : "text-neutral-400 hover:text-white hover:bg-neutral-800"
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+            </button>
+          ))}
+          <div className="mx-1 border-t border-neutral-800" />
+          <button
+            type="button"
+            onClick={() => setInspectorOpen((v) => !v)}
+            title="Inspector"
+            aria-label="Inspector"
+            aria-pressed={inspectorOpen}
+            className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
+              inspectorOpen ? "bg-indigo-600 text-white" : "text-neutral-400 hover:text-white hover:bg-neutral-800"
+            }`}
           >
-            <Wrench className="w-3 h-3" />
-            <span>▲ Hover for Tools & Skin Settings</span>
-          </div>
-        )}
+            <Sliders className="w-4 h-4" />
+          </button>
+        </div>
 
-        {(!isLeftOpen && !isLeftPinned) && (
-          <div 
-            onMouseEnter={() => setIsLeftOpen(true)}
-            className="absolute left-0 top-1/2 -translate-y-1/2 z-30 px-1.5 py-6 bg-neutral-900 hover:bg-indigo-600 border-y border-r border-neutral-800 hover:border-indigo-500 rounded-r-xl text-neutral-300 hover:text-white cursor-pointer shadow-xl flex flex-col items-center justify-center gap-2 transition-all duration-200"
-          >
-            <Grid className="w-3.5 h-3.5 text-indigo-400" />
-            <div className="flex flex-col items-center gap-0.5 text-[8px] font-mono font-bold leading-none uppercase tracking-wider">
-              <span>P</span>
-              <span>A</span>
-              <span>L</span>
-              <span>E</span>
-              <span>T</span>
-              <span>T</span>
-              <span>E</span>
-            </div>
-          </div>
-        )}
-
-        {(!isRightOpen && !isRightPinned) && (
-          <div 
-            onMouseEnter={() => setIsRightOpen(true)}
-            className="absolute right-0 top-1/2 -translate-y-1/2 z-30 px-1.5 py-6 bg-neutral-900 hover:bg-indigo-600 border-y border-l border-neutral-800 hover:border-indigo-500 rounded-l-xl text-neutral-300 hover:text-white cursor-pointer shadow-xl flex flex-col items-center justify-center gap-2 transition-all duration-200"
-          >
-            <Sliders className="w-3.5 h-3.5 text-indigo-400" />
-            <div className="flex flex-col items-center gap-0.5 text-[8px] font-mono font-bold leading-none uppercase tracking-wider">
-              <span>I</span>
-              <span>N</span>
-              <span>S</span>
-              <span>P</span>
-              <span>E</span>
-              <span>C</span>
-              <span>T</span>
-            </div>
-          </div>
-        )}
-
-        {(!isBottomOpen && !isBottomPinned) && (
-          <div 
-            onMouseEnter={() => setIsBottomOpen(true)}
-            className="absolute bottom-0 left-1/2 -translate-x-1/2 z-30 px-5 py-1.5 bg-neutral-900 hover:bg-indigo-600 border-x border-t border-neutral-800 hover:border-indigo-500 rounded-t-xl text-neutral-300 hover:text-white cursor-pointer shadow-xl flex items-center gap-1.5 transition-all duration-200"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-            <span className="text-[9px] font-mono font-bold uppercase tracking-widest">▼ Templates & Glossary</span>
-          </div>
-        )}
-
-        {/* SLIDE-OUT TOP BAR */}
-        <div 
-          onMouseEnter={() => setIsTopOpen(true)}
-          onMouseLeave={() => setIsTopOpen(false)}
+        {/* APPEARANCE & MODE PANEL (rail: "tools") */}
+        <div
           className={`absolute top-0 left-0 right-0 z-40 bg-neutral-900/95 backdrop-blur-md p-4 border-b border-neutral-800 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 transition-all duration-300 ${
-            (isTopOpen || isTopPinned) ? "translate-y-0 opacity-100 shadow-2xl pointer-events-auto" : "-translate-y-full opacity-0 pointer-events-none"
+            activePanel === "tools" ? "translate-y-0 opacity-100 shadow-2xl pointer-events-auto" : "-translate-y-full opacity-0 pointer-events-none"
           }`}
         >
         <div className="space-y-1">
@@ -1464,24 +1439,78 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
 
         {/* Console Workspace Master Switcher */}
         <div className="flex flex-wrap items-center gap-2 select-none shrink-0 self-start lg:self-auto">
-          {/* Theme Skin selector */}
-          <div className="flex items-center gap-1 bg-neutral-950 px-2 py-1 rounded-xl border border-neutral-800">
+          {/* Skin and Layout are two independent axes -- skin changes COLOR,
+              layout changes WHERE controls sit. Both were flat banks of 6
+              and 7+ buttons permanently occupying the toolbar for choices
+              you touch rarely; as dropdowns they cost two controls instead
+              of thirteen and still expose every option. */}
+          <div className="flex items-center gap-1.5 bg-neutral-950 px-2 py-1 rounded-xl border border-neutral-800">
             <Palette className="w-3.5 h-3.5 text-neutral-400" />
-            <span className="text-[9px] font-mono text-neutral-500 uppercase mr-1">Skin:</span>
-            {(["aero-slate", "vintage-analog", "cyberpunk-neon", "modular-synth", "classic-ivory", "custom-skin"] as const).map((t) => (
+            <select
+              value={theme}
+              onChange={(e) => changeTheme(e.target.value as typeof theme)}
+              title="Faceplate skin (colors and materials)"
+              aria-label="Faceplate skin"
+              className="bg-neutral-900 border border-neutral-800 rounded px-1.5 py-0.5 text-[9px] font-mono font-bold text-neutral-200 outline-none focus:border-indigo-500 cursor-pointer capitalize"
+            >
+              {(["aero-slate", "vintage-analog", "cyberpunk-neon", "modular-synth", "classic-ivory", "custom-skin"] as const).map((t) => (
+                <option key={t} value={t}>{t.replace("-", " ")}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-neutral-950 px-2 py-1 rounded-xl border border-neutral-800">
+            <Layers className="w-3.5 h-3.5 text-neutral-400" />
+            <select
+              value={archetype}
+              onChange={(e) => changeArchetype(e.target.value)}
+              title="Layout archetype (where controls sit)"
+              aria-label="Layout archetype"
+              className="bg-neutral-900 border border-neutral-800 rounded px-1.5 py-0.5 text-[9px] font-mono font-bold text-neutral-200 outline-none focus:border-indigo-500 cursor-pointer"
+            >
+              {BUILTIN_ARCHETYPES.map((a) => (
+                <option key={a} value={a}>{ARCHETYPE_LABELS[a]}</option>
+              ))}
+              {customArchetypes.length > 0 && (
+                <optgroup label="Saved layouts">
+                  {customArchetypes.map((c) => (
+                    <option key={c.name} value={c.name}>★ {c.name}</option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            {savingArchetypeName === null ? (
               <button
-                key={t}
                 type="button"
-                onClick={() => changeTheme(t)}
-                className={`px-2 py-0.5 rounded-md text-[9px] font-mono font-bold capitalize transition-all ${
-                  theme === t
-                    ? "bg-indigo-600 text-white shadow"
-                    : "text-neutral-400 hover:text-white"
-                }`}
+                onClick={() => setSavingArchetypeName("")}
+                title="Save the current layout as a reusable archetype"
+                aria-label="Save current layout as a reusable archetype"
+                className="p-0.5 rounded text-neutral-500 hover:text-white transition-all"
               >
-                {t.split("-")[0]}
+                <Plus className="w-3 h-3" />
               </button>
-            ))}
+            ) : (
+              <div className="flex items-center gap-1">
+                <input
+                  autoFocus
+                  value={savingArchetypeName}
+                  onChange={(e) => setSavingArchetypeName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") confirmSaveCustomArchetype();
+                    if (e.key === "Escape") setSavingArchetypeName(null);
+                  }}
+                  placeholder="layout name"
+                  aria-label="Name for the saved layout"
+                  className="w-24 px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-[9px] font-mono text-white outline-none focus:border-indigo-500"
+                />
+                <button type="button" onClick={confirmSaveCustomArchetype} title="Save" className="text-emerald-400 hover:text-emerald-300">
+                  <Check className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={() => setSavingArchetypeName(null)} title="Cancel" className="text-neutral-500 hover:text-white">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-1 bg-neutral-950 p-1 rounded-xl border border-neutral-800">
@@ -1516,47 +1545,38 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
               <span>🛠️ FIGMA CANVAS</span>
             </button>
 
-            {/* PIN/LOCK CONTROL */}
             <button
               type="button"
-              onClick={() => setIsTopPinned(!isTopPinned)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold border transition ${
-                isTopPinned 
-                  ? "bg-indigo-600/30 border-indigo-500 text-indigo-400 shadow-md" 
-                  : "bg-neutral-950 border-neutral-850 text-neutral-400 hover:text-white"
-              }`}
-              title={isTopPinned ? "Unpin Top Bar" : "Pin Top Bar Open"}
+              onClick={() => setActivePanel(null)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold border bg-neutral-950 border-neutral-850 text-neutral-400 hover:text-white transition"
+              title="Close panel"
             >
-              {isTopPinned ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-              <span>{isTopPinned ? "LOCKED" : "PIN"}</span>
+              <span>CLOSE</span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* MAIN VIEWPORT BODY (Underlying Canvas + Absolute Slide-out Drawers) */}
-      <div className="relative w-full h-full overflow-hidden flex flex-col">
+      {/* MAIN VIEWPORT BODY -- a row so the Inspector can DOCK beside the
+          canvas rather than float over it. The three tool panels stay
+          overlaid (they are transient); the Inspector is not transient. */}
+      <div className="relative w-full h-full overflow-hidden flex flex-row">
         
-        {/* COLUMN 1: LEFT SIDEBAR (Slide-out Absolute Drawer) */}
-        <div 
-          onMouseEnter={() => setIsLeftOpen(true)}
-          onMouseLeave={() => setIsLeftOpen(false)}
+        {/* ADD-CONTROLS PANEL (rail: "palette") */}
+        <div
           className={`absolute top-0 bottom-0 left-0 w-[300px] z-40 bg-neutral-900/95 backdrop-blur-md border-r border-neutral-850 flex flex-col transition-all duration-300 ease-in-out ${
-            (isLeftOpen || isLeftPinned) ? "translate-x-0 opacity-100 shadow-2xl pointer-events-auto" : "-translate-x-full opacity-0 pointer-events-none"
+            activePanel === "palette" ? "translate-x-0 opacity-100 shadow-2xl pointer-events-auto" : "-translate-x-full opacity-0 pointer-events-none"
           }`}
         >
-          {/* Drawer Pin Control */}
           <div className="flex items-center justify-between p-2.5 bg-neutral-950 border-b border-neutral-800 shrink-0">
             <span className="text-[10px] font-mono font-bold text-neutral-450">🎛️ LIBRARY & LAYERS</span>
             <button
               type="button"
-              onClick={() => setIsLeftPinned(!isLeftPinned)}
-              className={`p-1 rounded transition ${
-                isLeftPinned ? "text-indigo-400 font-bold" : "text-neutral-500 hover:text-white"
-              }`}
-              title={isLeftPinned ? "Unpin Sidebar" : "Pin Sidebar Open"}
+              onClick={() => setActivePanel(null)}
+              className="p-1 rounded transition text-neutral-500 hover:text-white"
+              title="Close panel"
             >
-              {isLeftPinned ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
           
@@ -1762,17 +1782,37 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
           </div>
         </div>
 
-        {/* COLUMN 2: CENTER FIGMA CANVAS WINDOW (Underlying Base Layer) */}
-        <div className="w-full h-full flex flex-col overflow-hidden relative bg-neutral-950">
+        {/* CANVAS -- takes whatever width the docked Inspector leaves. */}
+        <div className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative bg-neutral-950">
           
           {/* Canvas Sub-Header with Zoom & Grid Controls */}
           <div className="bg-neutral-900 border-b border-neutral-850 p-2 flex items-center justify-between text-xs text-neutral-300 select-none">
             
-            {/* View indicators */}
+            {/* Viewport controls -- board size, grid and zoom all live here,
+                next to the thing they act on. Board size used to be an
+                inputs-only panel inside the Inspector, which meant resizing
+                the canvas required deselecting whatever you were editing. */}
             <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-mono font-bold text-neutral-400">
-                BOARD: {artboardWidth}x{artboardHeight}
-              </span>
+              <span className="text-[9px] font-mono font-bold text-neutral-500 uppercase">Board</span>
+              <input
+                type="number"
+                min={400}
+                value={artboardWidth}
+                onChange={(e) => setArtboardWidth(Math.max(400, parseInt(e.target.value) || 400))}
+                title="Faceplate width (px)"
+                aria-label="Faceplate width in pixels"
+                className="w-14 bg-neutral-950 border border-neutral-800 rounded px-1 py-0.5 text-[9px] font-mono text-neutral-300 focus:border-indigo-500 outline-none"
+              />
+              <span className="text-[9px] text-neutral-600">×</span>
+              <input
+                type="number"
+                min={250}
+                value={artboardHeight}
+                onChange={(e) => setArtboardHeight(Math.max(250, parseInt(e.target.value) || 250))}
+                title="Faceplate height (px)"
+                aria-label="Faceplate height in pixels"
+                className="w-14 bg-neutral-950 border border-neutral-800 rounded px-1 py-0.5 text-[9px] font-mono text-neutral-300 focus:border-indigo-500 outline-none"
+              />
               <div className="h-3 w-[1px] bg-neutral-800" />
               <button
                 onClick={() => setSnapToGrid(!snapToGrid)}
@@ -1781,8 +1821,19 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                 }`}
                 title="Align items automatically to incremental points"
               >
-                GRID SNAP: {snapToGrid ? "ON" : "OFF"}
+                SNAP {snapToGrid ? "ON" : "OFF"}
               </button>
+              <select
+                value={gridSize}
+                onChange={(e) => setGridSize(parseInt(e.target.value))}
+                title="Grid spacing"
+                aria-label="Grid spacing in pixels"
+                className="bg-neutral-950 border border-neutral-800 rounded px-1 py-0.5 text-[9px] font-mono text-neutral-400 focus:border-indigo-500 outline-none"
+              >
+                <option value={5}>5px</option>
+                <option value={10}>10px</option>
+                <option value={20}>20px</option>
+              </select>
             </div>
 
             {/* Zoom tool buttons */}
@@ -1948,6 +1999,14 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                           const canvasX = bounds ? e.clientX - bounds.left : e.clientX;
                           const canvasY = bounds ? e.clientY - bounds.top : e.clientY;
                           setContextMenuTab("visuals");
+                          // Keep the two "what am I editing" concepts in
+                          // sync. The Workshop tracked its own paramId
+                          // independently of selectedParamId, so the
+                          // Inspector and the Workshop could point at
+                          // DIFFERENT controls at the same time -- edits
+                          // then landed on whichever one you weren't
+                          // looking at.
+                          setSelectedParamId(param.id);
                           setActiveContextMenu({
                             x: canvasX,
                             y: canvasY,
@@ -2150,11 +2209,83 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                         )}
 
                         {type === "eq" && (() => {
-                          // Real frequency-response curve driven by the plugin's actual
-                          // cutoff/resonance parameters -- shared with Simple Mode so both
-                          // views render the identical, functionally-real shape.
-                          const curve = computeFilterCurve(plugin.parameters, param, w, h);
+                          // Multi-band EQ (2+ gain params, e.g. low/mid/high) gets a real
+                          // multi-node curve -- one draggable point per band, frequency AND
+                          // gain. A single-cutoff filter falls back to the original one-marker
+                          // shape. Both are shared with Simple Mode so every view renders the
+                          // identical, functionally-real curve.
+                          const eqBands = findEqBands(plugin.parameters, param.id);
+                          const dragNode = (
+                            bound: DOMRect,
+                            freqParamId: string | undefined,
+                            freqMin: number | undefined,
+                            freqMax: number | undefined,
+                            gainParamId: string,
+                            gainMin: number,
+                            gainMax: number
+                          ) => (clientX: number, clientY: number) => {
+                            if (freqParamId) {
+                              const hz = xPixelToHz(clientX - bound.left, bound.width);
+                              handleParamValueChange(freqParamId, Math.round(Math.max(freqMin!, Math.min(freqMax!, hz))));
+                            }
+                            const db = yPixelToDb(clientY - bound.top, bound.height);
+                            handleParamValueChange(gainParamId, Math.max(gainMin, Math.min(gainMax, Math.round(db * 10) / 10)));
+                          };
 
+                          if (eqBands.length >= 2) {
+                            const curve = computeEqCurve(plugin.parameters, param, w, h);
+                            return (
+                              <div className="w-full h-full relative bg-neutral-950 rounded border border-neutral-850 overflow-hidden">
+                                <div className="absolute inset-0 flex flex-col justify-between p-1 opacity-20 pointer-events-none">
+                                  <div className="border-b border-white border-dashed w-full" />
+                                  <div className="border-b border-white border-solid w-full" />
+                                  <div className="border-b border-white border-dashed w-full" />
+                                </div>
+                                <div className="absolute inset-0 flex justify-between p-1 opacity-10 pointer-events-none">
+                                  {[0, 1, 2, 3, 4].map((i) => (
+                                    <div key={i} className="border-r border-white h-full" />
+                                  ))}
+                                </div>
+                                <svg className="w-full h-full absolute inset-0 pointer-events-none">
+                                  <path d={`${curve.pathD} L ${w},${h / 2} L 0,${h / 2} Z`} fill={param.accentColor || "#10b981"} fillOpacity="0.12" stroke="none" />
+                                  <path d={curve.pathD} fill="none" stroke={param.accentColor || "#10b981"} strokeWidth="2" className="drop-shadow-[0_0_4px_rgba(16,185,129,0.5)]" />
+                                  {curve.nodes.map((node) => (
+                                    <circle
+                                      key={node.gainParamId}
+                                      cx={node.x}
+                                      cy={node.y}
+                                      r="5"
+                                      fill={param.accentColor || "#10b981"}
+                                      stroke="#fff"
+                                      strokeWidth="1"
+                                      className={isEditMode ? "" : node.freqParamId ? "cursor-move" : "cursor-ns-resize"}
+                                      onMouseDown={(e) => {
+                                        if (isEditMode) return;
+                                        e.stopPropagation();
+                                        const bound = (e.currentTarget.closest("svg") as SVGSVGElement)?.getBoundingClientRect();
+                                        if (!bound) return;
+                                        const update = dragNode(bound, node.freqParamId, node.freqParamMin, node.freqParamMax, node.gainParamId, node.gainParamMin, node.gainParamMax);
+                                        const onMove = (ev: MouseEvent) => update(ev.clientX, ev.clientY);
+                                        const onUp = () => {
+                                          window.removeEventListener("mousemove", onMove);
+                                          window.removeEventListener("mouseup", onUp);
+                                        };
+                                        window.addEventListener("mousemove", onMove);
+                                        window.addEventListener("mouseup", onUp);
+                                        update(e.clientX, e.clientY);
+                                      }}
+                                    />
+                                  ))}
+                                </svg>
+                                <div className="absolute bottom-1 right-1 px-1 py-[1px] bg-black/60 rounded text-[7px] font-mono text-neutral-500">
+                                  {curve.nodes.length}-Band EQ
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          // Fallback: single cutoff/resonance marker (unchanged).
+                          const curve = computeFilterCurve(plugin.parameters, param, w, h);
                           return (
                             <div className="w-full h-full relative bg-neutral-950 rounded border border-neutral-850 overflow-hidden">
                               {/* GRID BACKGROUND lines */}
@@ -3489,32 +3620,28 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
           </div>
         </div>
 
-        {/* COLUMN 3: RIGHT SIDEBAR (Slide-out Absolute Drawer) */}
-        <div 
-          onMouseEnter={() => setIsRightOpen(true)}
-          onMouseLeave={() => setIsRightOpen(false)}
-          className={`absolute top-0 bottom-0 right-0 w-[320px] z-40 bg-neutral-900/95 backdrop-blur-md border-l border-neutral-850 flex flex-col transition-all duration-300 ease-in-out ${
-            (isRightOpen || isRightPinned) ? "translate-x-0 opacity-100 shadow-2xl pointer-events-auto" : "translate-x-full opacity-0 pointer-events-none"
+        {/* INSPECTOR -- DOCKED, not floating. It is where the actual work
+            happens, so it holds a real column of the layout and the canvas
+            reflows around it; closing it gives the width back to the canvas
+            instead of just uncovering it. */}
+        <div
+          className={`shrink-0 h-full bg-neutral-900/95 border-l border-neutral-850 flex flex-col overflow-hidden transition-[width] duration-300 ease-in-out ${
+            inspectorOpen ? "w-[320px]" : "w-0 border-l-0"
           }`}
         >
-          
+
           <div className="p-3 border-b border-neutral-800 bg-neutral-950/40 flex items-center justify-between shrink-0">
             <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-indigo-400">
               {selectedParam ? "📐 ELEMENT INSPECTOR" : "⚙️ ARTBOARD SETTINGS"}
             </span>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setIsRightPinned(!isRightPinned)}
-                className={`p-1 rounded transition ${
-                  isRightPinned ? "text-indigo-400" : "text-neutral-500 hover:text-white"
-                }`}
-                title={isRightPinned ? "Unpin Inspector" : "Pin Inspector Open"}
-              >
-                {isRightPinned ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-              </button>
-              <span className="text-[8px] font-mono text-neutral-500">PROPERTIES</span>
-            </div>
+            <button
+              type="button"
+              onClick={() => setInspectorOpen(false)}
+              className="p-1 rounded transition text-neutral-500 hover:text-white"
+              title="Close inspector"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
 
           <div className="flex-1 overflow-y-auto p-3.5 space-y-4">
@@ -3756,6 +3883,30 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                   </div>
                 )}
 
+                {/* Amp/cab hardware editing lives in a dedicated Workshop
+                    panel. Its ONLY entry point used to be right-clicking the
+                    widget on the canvas -- undiscoverable, with nothing
+                    anywhere indicating it existed. Surface it here, where
+                    you already are when editing that control. */}
+                {(selectedParam.controlType === "amp" || selectedParam.controlType === "cab") && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setContextMenuTab("visuals");
+                      setActiveContextMenu({
+                        x: 80,
+                        y: 80,
+                        paramId: selectedParam.id,
+                        type: selectedParam.controlType as "amp" | "cab",
+                      });
+                    }}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-600/50 rounded-xl font-mono text-[10px] font-bold text-indigo-300 hover:text-white transition"
+                  >
+                    <Wrench className="w-3.5 h-3.5" />
+                    <span>OPEN {selectedParam.controlType === "amp" ? "AMP HEAD" : "CABINET"} WORKSHOP</span>
+                  </button>
+                )}
+
                 {/* 5. Custom Visual Customization & Colors */}
                 <div className="space-y-2.5 bg-neutral-950 p-2.5 rounded-xl border border-neutral-850/60">
                   <span className="text-[8.5px] font-mono text-neutral-500 uppercase block font-bold">Custom Visual Styling</span>
@@ -3894,42 +4045,11 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
             ) : (
               <div className="space-y-4 text-xs">
                 
-                {/* Artboard Frame properties */}
-                <div className="space-y-2.5 bg-neutral-950 p-2.5 rounded-xl border border-neutral-850/60 font-mono">
-                  <span className="text-[8.5px] text-neutral-500 uppercase block font-bold">Faceplate Dimensions</span>
-                  
-                  <div className="space-y-1">
-                    <span className="text-[8px] block">CANVAS WIDTH (PX)</span>
-                    <input
-                      type="number"
-                      value={artboardWidth}
-                      onChange={(e) => setArtboardWidth(Math.max(400, parseInt(e.target.value) || 720))}
-                      className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-indigo-400 text-[10px] outline-none"
-                    />
-                  </div>
-
-                  <div className="space-y-1">
-                    <span className="text-[8px] block">CANVAS HEIGHT (PX)</span>
-                    <input
-                      type="number"
-                      value={artboardHeight}
-                      onChange={(e) => setArtboardHeight(Math.max(250, parseInt(e.target.value) || 380))}
-                      className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-indigo-400 text-[10px] outline-none"
-                    />
-                  </div>
-
-                  <div className="space-y-1 pt-1.5">
-                    <span className="text-[8px] block text-neutral-500">GRID SNAP SPACING</span>
-                    <select
-                      value={gridSize}
-                      onChange={(e) => setGridSize(parseInt(e.target.value))}
-                      className="w-full bg-neutral-900 border border-neutral-800 rounded px-1.5 py-1 text-neutral-300 text-[9px] outline-none cursor-pointer"
-                    >
-                      <option value="5">Fine grid (5px)</option>
-                      <option value="10">Standard grid (10px)</option>
-                      <option value="20">Large grid (20px)</option>
-                    </select>
-                  </div>
+                {/* Board size and grid spacing now live on the canvas
+                    toolbar, beside the canvas they resize -- they are not
+                    repeated here. */}
+                <div className="text-[9px] font-mono text-neutral-500 bg-neutral-950 p-2.5 rounded-xl border border-neutral-850/60">
+                  Select a control to edit it. Board size, grid and zoom are on the canvas toolbar above.
                 </div>
 
                 {/* Custom Skin properties */}
@@ -4225,15 +4345,12 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
 
         </div>
 
-        {/* FOOTER SECTION: ACOUSTIC GLOSSARY DECODER (Slide-up Absolute Drawer) */}
-        <div 
-          onMouseEnter={() => setIsBottomOpen(true)}
-          onMouseLeave={() => setIsBottomOpen(false)}
+        {/* TEMPLATES & GLOSSARY PANEL (rail: "templates") */}
+        <div
           className={`absolute bottom-0 left-0 right-0 z-40 bg-neutral-900/95 backdrop-blur-md p-4 border-t border-neutral-850 transition-all duration-300 ease-in-out flex flex-col gap-3.5 max-h-[320px] overflow-y-auto ${
-            (isBottomOpen || isBottomPinned) ? "translate-y-0 opacity-100 shadow-2xl pointer-events-auto" : "translate-y-full opacity-0 pointer-events-none"
+            activePanel === "templates" ? "translate-y-0 opacity-100 shadow-2xl pointer-events-auto" : "translate-y-full opacity-0 pointer-events-none"
           }`}
         >
-          {/* Bottom Drawer Pin Control Header */}
           <div className="flex items-center justify-between border-b border-neutral-800 pb-2 shrink-0">
             <span className="text-[10px] font-mono font-bold text-neutral-450 uppercase tracking-widest flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
@@ -4241,13 +4358,11 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
             </span>
             <button
               type="button"
-              onClick={() => setIsBottomPinned(!isBottomPinned)}
-              className={`p-1 rounded transition ${
-                isBottomPinned ? "text-indigo-400 font-bold" : "text-neutral-500 hover:text-white"
-              }`}
-              title={isBottomPinned ? "Unpin Bottom Panel" : "Pin Bottom Panel Open"}
+              onClick={() => setActivePanel(null)}
+              className="p-1 rounded transition text-neutral-500 hover:text-white"
+              title="Close panel"
             >
-              {isBottomPinned ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
 
@@ -4269,18 +4384,10 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                 <Sparkles className="w-3 h-3" />
                 <span>⚡ PRO FACEPLATES</span>
               </button>
-              <button
-                type="button"
-                onClick={() => setBottomSubTab("wizard")}
-                className={`px-2.5 py-1 rounded text-[10px] font-mono uppercase font-bold transition flex items-center gap-1.5 cursor-pointer ${
-                  bottomSubTab === "wizard"
-                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-950/40"
-                    : "text-neutral-400 hover:text-neutral-200"
-                }`}
-              >
-                <Wand2 className="w-3 h-3" />
-                <span>🪄 AUTO-LAYOUT WIZARD</span>
-              </button>
+              {/* The "Auto-Layout Wizard" lived here with grid/rack/strip/
+                  pedal buttons -- a second, parallel layout engine that
+                  duplicated four of the seven Layout archetypes in the
+                  toolbar above. One layout system, not two. */}
               <button
                 type="button"
                 onClick={() => setBottomSubTab("injectors")}
@@ -4319,47 +4426,6 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
             </div>
           )}
 
-          {bottomSubTab === "wizard" && (
-            <div className="space-y-1.5 pt-0.5">
-              <p className="text-[10px] text-neutral-450 leading-normal">
-                Instantly arrange your current parameters into a professional aligned rack, channel strip, or console interface. Select any layout geometry below:
-              </p>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <button
-                  type="button"
-                  onClick={() => autoArrangeLayout("grid")}
-                  className="p-2.5 bg-neutral-950 hover:bg-neutral-900 border border-neutral-850 hover:border-indigo-500 rounded-xl flex flex-col items-center justify-center text-center transition cursor-pointer"
-                >
-                  <span className="text-[11px] font-bold text-neutral-200">⊞ Modular Grid</span>
-                  <span className="text-[7px] text-neutral-500 mt-1">Multi-column layout</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => autoArrangeLayout("rack")}
-                  className="p-2.5 bg-neutral-950 hover:bg-neutral-900 border border-neutral-850 hover:border-indigo-500 rounded-xl flex flex-col items-center justify-center text-center transition cursor-pointer"
-                >
-                  <span className="text-[11px] font-bold text-neutral-200">▭ 19" Studio Rack</span>
-                  <span className="text-[7px] text-neutral-500 mt-1">Horizontal flow strip</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => autoArrangeLayout("strip")}
-                  className="p-2.5 bg-neutral-950 hover:bg-neutral-900 border border-neutral-850 hover:border-indigo-500 rounded-xl flex flex-col items-center justify-center text-center transition cursor-pointer"
-                >
-                  <span className="text-[11px] font-bold text-neutral-200">▥ Channel Strip</span>
-                  <span className="text-[7px] text-neutral-500 mt-1">Console faders alignment</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => autoArrangeLayout("pedal")}
-                  className="p-2.5 bg-neutral-950 hover:bg-neutral-900 border border-neutral-850 hover:border-indigo-500 rounded-xl flex flex-col items-center justify-center text-center transition cursor-pointer"
-                >
-                  <span className="text-[11px] font-bold text-neutral-200">⬚ Guitar Pedal</span>
-                  <span className="text-[7px] text-neutral-500 mt-1">Knobs top, switches bottom</span>
-                </button>
-              </div>
-            </div>
-          )}
 
           {bottomSubTab === "injectors" && (
             <div className="space-y-1.5 pt-0.5">

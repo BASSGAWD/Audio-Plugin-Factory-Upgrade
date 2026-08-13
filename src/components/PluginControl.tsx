@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AudioPlugin, PluginParameter } from "../types";
-import { computeFilterCurve, xPixelToHz, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
+import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
 
 /**
  * Playback-time control rendering shared by Simple Mode. Mirrors the visual
@@ -384,6 +384,69 @@ function MicPositionControl({ param, onChange }: ControlProps) {
 function EqCurveControl({ param, allParams, onChange }: ControlProps) {
   const width = 260;
   const height = 90;
+  const eqBands = findEqBands(allParams, param.id);
+
+  if (eqBands.length >= 2) {
+    const curve = computeEqCurve(allParams, param, width, height);
+    const handleNodeDrag = (
+      e: React.MouseEvent<SVGCircleElement>,
+      freqParamId: string | undefined,
+      freqMin: number | undefined,
+      freqMax: number | undefined,
+      gainParamId: string,
+      gainMin: number,
+      gainMax: number
+    ) => {
+      e.stopPropagation();
+      const svg = (e.currentTarget.closest("svg") as SVGSVGElement) || null;
+      const bound = svg?.getBoundingClientRect();
+      if (!bound) return;
+      const update = (clientX: number, clientY: number) => {
+        if (freqParamId) {
+          const hz = xPixelToHz(((clientX - bound.left) / bound.width) * width, width);
+          onChange(freqParamId, Math.round(Math.max(freqMin!, Math.min(freqMax!, hz))));
+        }
+        const db = yPixelToDb(((clientY - bound.top) / bound.height) * height, height);
+        onChange(gainParamId, Math.max(gainMin, Math.min(gainMax, Math.round(db * 10) / 10)));
+      };
+      update(e.clientX, e.clientY);
+      const onMove = (ev: MouseEvent) => update(ev.clientX, ev.clientY);
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    };
+
+    return (
+      <div className="w-full rounded-xl border border-neutral-850 bg-neutral-950 p-1.5 select-none">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto" style={{ aspectRatio: `${width}/${height}` }}>
+          <path d={`${curve.pathD} L ${width},${height / 2} L 0,${height / 2} Z`} fill={param.accentColor || "#10b981"} fillOpacity="0.12" stroke="none" />
+          <path d={curve.pathD} fill="none" stroke={param.accentColor || "#10b981"} strokeWidth="2" />
+          {curve.nodes.map((node) => (
+            <circle
+              key={node.gainParamId}
+              cx={node.x}
+              cy={node.y}
+              r="6"
+              fill={param.accentColor || "#10b981"}
+              stroke="#fff"
+              strokeWidth="1.5"
+              className={node.freqParamId ? "cursor-move" : "cursor-ns-resize"}
+              onMouseDown={(e) => handleNodeDrag(e, node.freqParamId, node.freqParamMin, node.freqParamMax, node.gainParamId, node.gainParamMin, node.gainParamMax)}
+            />
+          ))}
+        </svg>
+        <div className="flex justify-between px-1 pt-0.5">
+          <span className="text-[9px] font-mono text-neutral-500">{param.name}</span>
+          <span className="text-[9px] font-mono text-neutral-500">{curve.nodes.length}-Band</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Fallback: single cutoff/resonance marker (unchanged).
   const curve = computeFilterCurve(allParams, param, width, height);
 
   const handleDrag = (e: React.MouseEvent<SVGCircleElement>) => {

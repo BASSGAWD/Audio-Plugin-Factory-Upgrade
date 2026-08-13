@@ -114,6 +114,26 @@ For non-amp plugins you may still vary "controlType" per parameter for a richer 
 export const SAMPLER_SCHEMA_GUIDANCE = `SAMPLERS / DRUM PADS / MPC-STYLE BEAT MAKERS -- MANDATORY, not optional: whenever the request is for a sampler, drum pad, beat pad, MPC, or finger-drumming instrument, the UI MUST be an 8-pad trigger grid, never plain sliders. Include exactly 8 parameters named pad_1 through pad_8, each with "controlType": "pad", "min": 0, "max": 127, "unit": "vel" -- give at least pad_1 a nonzero defaultValue so the plugin is audible immediately without the user pressing anything. This app has NO file/sample loading: "sampler" here means an 8-voice SYNTHESIZED drum instrument -- each pad_N parameter, when nonzero, should continuously gate a distinct synthesized voice (a sine-based kick/tom, a smoothed-noise snare/hat/clap, etc.) for as long as it's held, all mixed together and soft-limited. Never claim to load real audio files. Set "category" to "synthesizer".`;
 
 /**
+ * GUI design philosophy. The model never sets pixel coordinates -- layout is
+ * always computed deterministically afterward by polishPluginVisuals() /
+ * guiArchetypes.ts, keyed off the request's classified uiMetaphor (see
+ * pluginSpec.ts). What the model DOES control, and what this guidance is
+ * actually about, is which controlType each parameter gets and how many
+ * parameters exist -- the raw material the archetype layout composes. Get
+ * this part wrong (e.g. 12 generic knobs for a 4-knob stompbox) and no
+ * downstream layout can fix it.
+ */
+export const GUI_DESIGN_PHILOSOPHY = `GUI DESIGN PHILOSOPHY -- every plugin has a GUI ARCHETYPE (what it looks and behaves like as an instrument), separate from its DSP family (what it does to audio). Match the parameter set to the archetype implied by the request, so the deterministic layout that runs after you has the right material to work with:
+- PARAMETRIC EQ (multi-band tone shaping): expose per-band GAIN parameters named "low", "mid", "high" (dB, can go negative) plus a sweepable "midFreq" (Hz) for the movable band, and give exactly one parameter "controlType": "eq" -- this becomes a real multi-node curve with one draggable point per band, not a single generic cutoff marker. Do not also add a separate "cutoff" parameter for a multi-band EQ; that pulls in the single-band curve instead.
+- CHANNEL STRIP / VOCAL PROCESSOR (a chain of processing stages in one box): name and ORDER parameters in real signal-flow order -- input trim first, then dynamics (threshold/ratio), then tone, then output level last. The layout reads top-to-bottom in the order you return them, so a strip whose knobs are shuffled reads as broken even if the DSP is correct.
+- STOMPBOX / PEDAL (a single-effect footswitch unit): keep the control COUNT small and opinionated -- 3 to 5 knobs, matching a real pedal's faceplate, not a rack of options. Always include one "controlType": "toggle" parameter (bypass/on-off) even if the DSP itself has no bypass logic; it's a physical expectation of this archetype.
+- RACK UNIT / TAPE MACHINE (studio outboard gear, wide and short): fine for more parameters (6-10), laid out left to right in signal-flow order; favor "knob" over "slider" except for level/mix, which reads as a fader in this format.
+- SYNTH PANEL / VINTAGE UNIT (a dense multi-section instrument face): the one archetype where MORE controls (8+) reads as authentic rather than cluttered -- group related parameters adjacently in the array (all oscillator params together, then all filter params, then envelope) since adjacency in the returned list becomes visual adjacency in the panel.
+- AMP HEAD+CAB / SAMPLER PAD GRID: these are ENFORCED separately (see the mandatory schema guidance below) -- don't try to hand-roll them with plain knobs.
+- SIMPLE KNOBS (anything that doesn't match a specific archetype): a plain grid is the honest default -- don't force an archetype that doesn't fit just to seem more designed.
+One dominant accentColor per plugin, not one per knob -- pick a single hex color matching the request's mood and apply it consistently; a rainbow of per-knob colors reads as unfinished, not customized.`;
+
+/**
  * One shared description of the updatedPlugin JSON payload, used by both
  * Ollama and LM Studio chat branches (previously two divergent copies).
  */
@@ -147,7 +167,8 @@ ${DSP_CODING_RULES}
 ${SOUND_QUALITY_RULES}
 ${RESPONSE_STYLE_RULES}
 ${AMP_CAB_SCHEMA_GUIDANCE}
-${SAMPLER_SCHEMA_GUIDANCE}`;
+${SAMPLER_SCHEMA_GUIDANCE}
+${GUI_DESIGN_PHILOSOPHY}`;
   }
   return `You are ${agentName}, an elite audio DSP engineer and conversational plugin creator.
 Agent profile: ${agentInstruction}
@@ -164,7 +185,9 @@ ${PARAMETER_DESIGN_RULES}
 
 ${AMP_CAB_SCHEMA_GUIDANCE}
 
-${SAMPLER_SCHEMA_GUIDANCE}`;
+${SAMPLER_SCHEMA_GUIDANCE}
+
+${GUI_DESIGN_PHILOSOPHY}`;
 }
 
 /**

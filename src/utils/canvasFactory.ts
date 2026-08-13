@@ -102,7 +102,7 @@ export async function buildCanvasPlugin(prompt: string, opts: CanvasBuildOptions
       cppJuceCode: "",
       createdAt: new Date().toLocaleDateString(),
     };
-    const gate = runQualityGate(candidatePlugin, { family: cand.family, prompt, intent: spec.interpretedGoal });
+    const gate = runQualityGate(candidatePlugin, { family: cand.family, prompt, intent: spec.interpretedGoal, uiMetaphor: spec.uiMetaphor });
     versionsTried++;
     const score = refinementScore(gate);
     if (score > bestScore + NEAR_TIE_MARGIN) {
@@ -123,7 +123,7 @@ export async function buildCanvasPlugin(prompt: string, opts: CanvasBuildOptions
     report({ stage: "perfect", detail: `v${n}/${loops}`, bestMinScore: minOf(best.gate), versionsTried });
     const variant = voicingVariant(best.plugin, n);
     const deltas = paramDeltas(best.plugin, variant);
-    const gate = runQualityGate(variant, { family: spec.family, prompt, intent: spec.interpretedGoal });
+    const gate = runQualityGate(variant, { family: spec.family, prompt, intent: spec.interpretedGoal, uiMetaphor: spec.uiMetaphor });
     versionsTried++;
     const score = refinementScore(gate);
     const accepted = score > bestScore;

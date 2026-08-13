@@ -451,7 +451,7 @@ export async function runPlannedBuild(prompt: string, opts: PlannerOptions = {})
     cppJuceCode: "",
     createdAt: new Date().toLocaleDateString(),
   };
-  let gate = runQualityGate(candidatePlugin, { generationMs: now() - t0, family: spec.family, prompt, intent: spec.interpretedGoal });
+  let gate = runQualityGate(candidatePlugin, { generationMs: now() - t0, family: spec.family, prompt, intent: spec.interpretedGoal, uiMetaphor: spec.uiMetaphor });
   let qaStatus: JobStatus = "passed";
   let qaEvidence = "";
   const minScore = (g: QualityGateResult) => Math.min(g.scores.looks, g.scores.performance, g.scores.latency, g.scores.musicality);
@@ -467,7 +467,7 @@ export async function runPlannedBuild(prompt: string, opts: PlannerOptions = {})
       parameters: fallbackBuild.parameters,
       dspFunction: fallbackBuild.dspFunction,
     };
-    gate = runQualityGate(rebuilt, { generationMs: now() - t0, family: spec.family, prompt, intent: spec.interpretedGoal });
+    gate = runQualityGate(rebuilt, { generationMs: now() - t0, family: spec.family, prompt, intent: spec.interpretedGoal, uiMetaphor: spec.uiMetaphor });
     qaStatus = "repaired";
     usedFallback = true;
   }

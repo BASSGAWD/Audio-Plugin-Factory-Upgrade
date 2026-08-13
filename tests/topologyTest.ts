@@ -125,10 +125,16 @@ for (const prompt of [
     }
     return pick.parameters.map((p) => p.name);
   };
+  // Discriminate by SIGNATURE knob, not by "has an Attack control". Attack
+  // used to appear only on the peak/punch topology, so its presence was a
+  // usable proxy for "the drum design got picked" -- but every compressor
+  // now carries attack/release as core vocabulary (see featureManifest.ts),
+  // which is a deliberate improvement, not a regression. "Warmth" is unique
+  // to the feedback/glue design and is the honest discriminator now.
   const vintage = select("a warm vintage compressor for vocals");
-  check("near-tie selection: vintage vocals keeps the Warmth (feedback) topology", vintage.some((n) => /warmth/i.test(n)) && !vintage.some((n) => /attack/i.test(n)), vintage.join(", "));
+  check("near-tie selection: vintage vocals keeps the Warmth (feedback) topology", vintage.some((n) => /warmth/i.test(n)), vintage.join(", "));
   const drums = select("an aggressive punchy drum compressor");
-  check("near-tie selection: punchy drums keeps the Attack (peak) topology", drums.some((n) => /attack/i.test(n)), drums.join(", "));
+  check("near-tie selection: punchy drums does NOT get the vintage glue design", !drums.some((n) => /warmth/i.test(n)) && drums.some((n) => /attack/i.test(n)), drums.join(", "));
 }
 
 /* ---- 5. Gap logging (localStorage stub) ---- */

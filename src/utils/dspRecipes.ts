@@ -16,6 +16,7 @@
 import { PluginParameter } from "../types";
 import { AudioPluginSpec, PluginFamily } from "./pluginSpec";
 import { findCandidateRecipe } from "./recipeMemory";
+import { formatManifestForPrompt } from "./featureManifest";
 
 export interface DspRecipe {
   id: string;
@@ -79,19 +80,42 @@ return Math.tanh(inputSample * (1 - mix) + s * mix * 1.6);`,
     parameters: [
       { id: "time", name: "Time", min: 20, max: 1500, defaultValue: 350, unit: "ms" },
       { id: "feedback", name: "Feedback", min: 0, max: 0.95, defaultValue: 0.45, unit: "ratio" },
+      { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4000, unit: "Hz" },
+      { id: "wow", name: "Wow", min: 0, max: 1, defaultValue: 0, unit: "ratio" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.buf = new Float32Array(96000); state.ptr = 0; state.damp = 0; state.init = true; }
+    body: `if (!state.init) { state.buf = new Float32Array(96000); state.ptr = 0; state.damp = 0; state.lfo = 0; state.init = true; }
 let time = params.time !== undefined ? params.time : 350;
 let fb = Math.min(0.95, params.feedback !== undefined ? params.feedback : 0.45);
+let tone = params.tone !== undefined ? params.tone : 4000;
+let wow = params.wow !== undefined ? params.wow : 0;
 let mix = params.mix !== undefined ? params.mix : 0.35;
-let d = Math.max(1, Math.min(95999, Math.floor(time * 44.1)));
-let read = (state.ptr - d + 96000) % 96000;
-let wet = state.buf[read];
-state.damp += 0.4 * (wet - state.damp);
-state.buf[state.ptr] = inputSample + state.damp * fb;
+// Tape wow: waver the read position slowly so long repeats drift in pitch
+// the way tape does, instead of repeating identically forever.
+state.lfo += 2 * Math.PI * 0.6 / 44100;
+if (state.lfo > 2 * Math.PI) state.lfo -= 2 * Math.PI;
+let d = Math.max(2, Math.min(95998, time * 44.1 + Math.sin(state.lfo) * wow * 40));
+let readPos = state.ptr - d;
+while (readPos < 0) readPos += 96000;
+// Fractional read with interpolation -- required once the position moves,
+// or the wow modulation crackles instead of gliding.
+let i0 = Math.floor(readPos) % 96000;
+let i1 = (i0 + 1) % 96000;
+let frac = readPos - Math.floor(readPos);
+let wet = state.buf[i0] * (1 - frac) + state.buf[i1] * frac;
+// Damping driven by the Tone knob, applied to the repeat BEFORE it is both
+// heard and fed back. Filtering only the feedback path would make Tone
+// inaudible on the first repeat and leave it barely measurable at long
+// delay times (it would take several loop passes to accumulate) -- on a
+// real delay the tone control shapes the echoes you actually hear, and
+// recirculating the same filtered signal is what makes each successive
+// repeat darker than the last.
+let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+state.damp += a * (wet - state.damp);
+let echo = state.damp;
+state.buf[state.ptr] = inputSample + echo * fb;
 state.ptr = (state.ptr + 1) % 96000;
-return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+return Math.tanh(inputSample * (1 - mix) + echo * mix);`,
     pitfalls: [
       "Wrap ring-buffer indices with modulo and clamp the delay length inside the buffer size.",
       "Clamp feedback below ~0.95 and put a gentle lowpass in the loop so repeats decay warmly instead of building harshness.",
@@ -136,20 +160,44 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
     parameters: [
       { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -24, unit: "dB" },
       { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 4, unit: ":1" },
+      { id: "attack", name: "Attack", min: 0.1, max: 100, defaultValue: 10, unit: "ms" },
+      { id: "release", name: "Release", min: 10, max: 1000, defaultValue: 150, unit: "ms" },
+      { id: "knee", name: "Knee", min: 0, max: 24, defaultValue: 6, unit: "dB" },
       { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 3, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
     body: `if (!state.init) { state.env = 0; state.init = true; }
 let thresh = params.threshold !== undefined ? params.threshold : -24;
 let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 4);
+let attack = params.attack !== undefined ? params.attack : 10;
+let release = params.release !== undefined ? params.release : 150;
+let knee = params.knee !== undefined ? params.knee : 6;
 let makeup = params.makeup !== undefined ? params.makeup : 3;
+let mix = params.mix !== undefined ? params.mix : 1;
 let x = Math.abs(inputSample);
-let coeff = x > state.env ? 0.003 : 0.0004;
-state.env += coeff * (x - state.env);
+// Real attack/release time constants from the ms knobs: a one-pole whose
+// coefficient is derived per side, so fast attack catches transients while
+// a slow release avoids pumping. A single shared coefficient cannot do both.
+let aCoeff = 1 - Math.exp(-1 / (Math.max(0.1, attack) * 0.001 * 44100));
+let rCoeff = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aCoeff : rCoeff) * (x - state.env);
 let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
 let overDb = envDb - thresh;
-let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+// Soft knee: ease the ratio in across a window centred on the threshold
+// instead of switching it on abruptly.
+let halfKnee = knee / 2;
+let gainDb = 0;
+if (overDb >= halfKnee) {
+  gainDb = -overDb * (1 - 1 / ratio);
+} else if (overDb > -halfKnee) {
+  let kt = overDb + halfKnee;
+  gainDb = -(1 - 1 / ratio) * kt * kt / (2 * Math.max(0.01, knee));
+}
 let g = Math.pow(10, (gainDb + makeup) / 20);
-return Math.tanh(inputSample * g);`,
+// Parallel (New York) compression: blend the compressed path against dry so
+// density can be added without flattening the original dynamics.
+let comp = inputSample * g;
+return Math.tanh(comp * mix + inputSample * (1 - mix));`,
     pitfalls: [
       "Track the envelope with SEPARATE attack and release coefficients; a single coefficient pumps.",
       "Compute gain reduction in the dB domain, then convert back with Math.pow(10, dB/20).",
@@ -196,17 +244,28 @@ return Math.tanh(out);`,
     parameters: [
       { id: "cutoff", name: "Cutoff", min: 60, max: 12000, defaultValue: 1400, unit: "Hz" },
       { id: "resonance", name: "Resonance", min: 0, max: 0.9, defaultValue: 0.4, unit: "ratio" },
+      { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 0, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
     body: `if (!state.init) { state.low = 0; state.band = 0; state.smF = 1400; state.init = true; }
 let cutoff = params.cutoff !== undefined ? params.cutoff : 1400;
 let res = params.resonance !== undefined ? params.resonance : 0.4;
+let drive = params.drive !== undefined ? params.drive : 0;
+let mix = params.mix !== undefined ? params.mix : 1;
 state.smF += 0.002 * (cutoff - state.smF);
 let f = 2 * Math.sin(Math.PI * Math.min(0.22, state.smF / 44100));
 let q = 1.2 - res;
+// Drive saturates the filter INPUT, so pushing resonance thickens into
+// analog-style growl instead of the thin whistle a clean SVF produces.
+// The gain-compensating divisor keeps the knob a character control rather
+// than a disguised volume control.
+let dg = Math.pow(10, drive / 20);
+let xin = drive > 0.01 ? Math.tanh(inputSample * dg) / Math.pow(dg, 0.6) : inputSample;
 state.low += f * state.band;
-let high = inputSample - state.low - q * state.band;
+let high = xin - state.low - q * state.band;
 state.band += f * high;
-return Math.tanh(state.low);`,
+let wet = Math.tanh(state.low);
+return wet * mix + inputSample * (1 - mix);`,
     pitfalls: [
       "Clamp the frequency coefficient (f < ~0.25 for a Chamberlin SVF) or the filter explodes above ~10 kHz.",
       "Smooth the cutoff per sample (state.smF += 0.002 * (target - state.smF)) -- jumping coefficients zipper audibly.",
@@ -722,6 +781,14 @@ export function buildRecipeContext(userPrompt: string, spec?: AudioPluginSpec | 
   scoredList.forEach((s, idx) => {
     blocks.push(formatRecipeBlock(s.recipe, scoredList.length > 1 ? `stage ${idx + 1}, confidence ${s.confidence.toFixed(2)}` : `confidence ${s.confidence.toFixed(2)}`));
   });
+
+  // Control vocabulary for the family: what a REAL unit of this type has.
+  // Without this the model reliably returns 3-4 knobs -- technically correct
+  // and audibly thin -- because nothing in the prompt ever told it what
+  // "complete" looks like for, say, a compressor (attack and release are
+  // not optional extras; they're most of the character).
+  const vocabulary = formatManifestForPrompt(spec?.family);
+  if (vocabulary) blocks.push(vocabulary);
 
   // Self-improving memory: a past build of this same family that verified at
   // >= 97 is the most project-specific reference available.

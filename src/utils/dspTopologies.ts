@@ -77,22 +77,39 @@ export const DSP_TOPOLOGIES: DspTopology[] = [
       { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -20, unit: "dB" },
       { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 6, unit: ":1" },
       { id: "attack", name: "Attack", min: 0.05, max: 30, defaultValue: 1, unit: "ms" },
+      { id: "release", name: "Release", min: 10, max: 400, defaultValue: 60, unit: "ms" },
+      { id: "knee", name: "Knee", min: 0, max: 18, defaultValue: 3, unit: "dB" },
       { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
     body: `if (!state.init) { state.env = 0; state.init = true; }
 let thresh = params.threshold !== undefined ? params.threshold : -20;
 let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 6);
 let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 1);
+let release = params.release !== undefined ? params.release : 60;
+let knee = params.knee !== undefined ? params.knee : 3;
 let makeup = params.makeup !== undefined ? params.makeup : 4;
+let mix = params.mix !== undefined ? params.mix : 1;
 let x = Math.abs(inputSample);
+// Peak detector with a genuinely fast attack range: on drums, slowing the
+// attack lets the stick crack through before the body is clamped. Release
+// is short here by range -- this design is meant to recover between hits.
 let aC = 1 - Math.exp(-1 / (attack * 44.1));
-let rC = 0.0015;
+let rC = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
 state.env += (x > state.env ? aC : rC) * (x - state.env);
 let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
 let overDb = envDb - thresh;
-let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+let halfKnee = knee / 2;
+let gainDb = 0;
+if (overDb >= halfKnee) {
+  gainDb = -overDb * (1 - 1 / ratio);
+} else if (overDb > -halfKnee) {
+  let kt = overDb + halfKnee;
+  gainDb = -(1 - 1 / ratio) * kt * kt / (2 * Math.max(0.01, knee));
+}
 let g = Math.pow(10, (gainDb + makeup) / 20);
-return Math.tanh(inputSample * g);`,
+let comp = Math.tanh(inputSample * g);
+return comp * mix + inputSample * (1 - mix);`,
     tags: { topology: "feed-forward-peak", character: ["aggressive"], sources: ["drums"], latency: "zero", cpu: "light" },
   },
   {
@@ -103,17 +120,28 @@ return Math.tanh(inputSample * g);`,
     parameters: [
       { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -26, unit: "dB" },
       { id: "ratio", name: "Ratio", min: 1, max: 12, defaultValue: 3, unit: ":1" },
+      { id: "attack", name: "Attack", min: 1, max: 120, defaultValue: 25, unit: "ms" },
+      { id: "release", name: "Release", min: 50, max: 1200, defaultValue: 300, unit: "ms" },
       { id: "warmth", name: "Warmth", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
       { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
     body: `if (!state.init) { state.env = 0; state.prevOut = 0; state.prevIn = 0; state.init = true; }
 let thresh = params.threshold !== undefined ? params.threshold : -26;
 let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 3);
+let attack = params.attack !== undefined ? params.attack : 25;
+let release = params.release !== undefined ? params.release : 300;
 let warmth = params.warmth !== undefined ? params.warmth : 0.35;
 let makeup = params.makeup !== undefined ? params.makeup : 4;
+let mix = params.mix !== undefined ? params.mix : 1;
+// Feedback detection: the envelope follows the ALREADY-COMPRESSED output,
+// which self-smooths the gain curve -- the vintage glue character. Attack
+// and release stay slower here than a peak design by range, so the knobs
+// shape that character rather than turning this into a punch compressor.
 let x = Math.abs(state.prevOut);
-let coeff = x > state.env ? 0.0015 : 0.0003;
-state.env += coeff * (x - state.env);
+let aCoeff = 1 - Math.exp(-1 / (Math.max(1, attack) * 0.001 * 44100));
+let rCoeff = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aCoeff : rCoeff) * (x - state.env);
 let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
 let overDb = envDb - thresh;
 let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
@@ -125,7 +153,7 @@ let mid = 0.5 * (state.prevIn + inputSample) * g;
 let out = 0.5 * (Math.tanh(mid * hot) + Math.tanh(lin * hot)) / norm;
 state.prevIn = inputSample;
 state.prevOut = out;
-return out;`,
+return out * mix + inputSample * (1 - mix);`,
     tags: { topology: "feedback-colored", character: ["colored"], sources: ["vocals", "mix_bus", "guitar", "bass"], latency: "zero", cpu: "light" },
   },
   {
@@ -136,17 +164,29 @@ return out;`,
     parameters: [
       { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -18, unit: "dB" },
       { id: "ratio", name: "Ratio", min: 1, max: 8, defaultValue: 2.5, unit: ":1" },
+      { id: "attack", name: "Attack", min: 1, max: 60, defaultValue: 8, unit: "ms" },
+      { id: "release", name: "Release", min: 50, max: 1000, defaultValue: 250, unit: "ms" },
+      { id: "knee", name: "Knee", min: 0, max: 24, defaultValue: 6, unit: "dB" },
       { id: "makeup", name: "Makeup", min: 0, max: 12, defaultValue: 2, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
     body: `if (!state.init) { state.buf = new Float32Array(64); state.p = 0; state.env = 0; state.init = true; }
 let thresh = params.threshold !== undefined ? params.threshold : -18;
 let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 2.5);
+let attack = params.attack !== undefined ? params.attack : 8;
+let release = params.release !== undefined ? params.release : 250;
+let knee = Math.max(0.01, params.knee !== undefined ? params.knee : 6);
 let makeup = params.makeup !== undefined ? params.makeup : 2;
+let mix = params.mix !== undefined ? params.mix : 1;
 let x = Math.abs(inputSample);
-state.env += (x > state.env ? 0.004 : 0.0004) * (x - state.env);
+// Gentle mastering time constants, now exposed rather than fixed: the
+// detector still reads 64 samples AHEAD of the audio path (below), so
+// transients are caught without needing a hard knee's distortion.
+let aC = 1 - Math.exp(-1 / (Math.max(1, attack) * 0.001 * 44100));
+let rC = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aC : rC) * (x - state.env);
 let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
 let overDb = envDb - thresh;
-let knee = 6;
 let red = 0;
 if (overDb >= knee / 2) red = overDb * (1 - 1 / ratio);
 else if (overDb > -knee / 2) red = ((overDb + knee / 2) * (overDb + knee / 2)) / (2 * knee) * (1 - 1 / ratio);
@@ -154,7 +194,7 @@ let g = Math.pow(10, (-red + makeup) / 20);
 let delayed = state.buf[state.p];
 state.buf[state.p] = inputSample;
 state.p = (state.p + 1) % 64;
-return Math.tanh(delayed * g);`,
+return Math.tanh(delayed * g) * mix + delayed * (1 - mix);`,
     tags: { topology: "lookahead-soft-knee", character: ["transparent"], sources: ["master", "mix_bus"], latency: "lookahead", cpu: "light" },
   },
 

@@ -76,6 +76,13 @@ export interface AudioPlugin {
    *  confidence) — the antidote to claiming success without evidence. */
   buildReport?: BuildReport;
 
+  /** GUI archetype id ("grid" | "eq_focus" | "strip" | "pedal" | "rack" |
+   *  "panel" | "showpiece" | "custom", or a saved custom archetype's name)
+   *  -- the layout composition this plugin's board is built from. Set by
+   *  the quality gate at build time (see guiArchetypes.ts), and overridable
+   *  by the user via the archetype picker in the Pro UI Designer. */
+  uiArchetype?: string;
+
   // Overall faceplate skin configuration properties
   customSkin?: {
     bgImage?: string; // Base64 dataURL or background image URL
@@ -142,6 +149,12 @@ export interface BuildReport {
    *  measured evidence — the discriminator among CORRECT builds. Absent for
    *  families with no meaningful functional test. */
   functionalFitness?: { score: number; metric: string; evidence: string };
+  /** 0-100 coverage of the control vocabulary a REAL unit of this family
+   *  has (see featureManifest.ts). Functional fitness asks whether the
+   *  plugin does its job; this asks whether it's a complete instrument or a
+   *  minimal one. Informational — ranks candidates, never gates shipping.
+   *  `missing` names the required/expected controls this build lacks. */
+  featureDepth?: { score: number; evidence: string; missing: string[] };
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

@@ -45,6 +45,9 @@ const TEST_FILES = [
   "researchIndexTest.ts",
   "fusionTest.ts",
   "functionalFitnessTest.ts",
+  "guiArchetypeTest.ts",
+  "eqCurveTest.ts",
+  "featureDepthTest.ts",
 ];
 
 let failed = 0;

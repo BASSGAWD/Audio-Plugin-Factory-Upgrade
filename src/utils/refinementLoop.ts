@@ -105,7 +105,17 @@ export function refinementScore(gate: QualityGateResult): number {
   // decisively while the correctness terms (~750) still dominate, so a
   // more-effective-but-broken build can never beat a correct one.
   const fitnessBonus = 0.5 * (gate.report.functionalFitness?.score ?? 0);
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus;
+  // FEATURE DEPTH — the second discriminator, orthogonal to fitness. Fitness
+  // asks "does it do its family's job?", which a 3-knob compressor passes
+  // while still feeling like a toy; depth asks "does it have the controls a
+  // REAL unit has?" (see featureManifest.ts). Weighted below fitness (0-30
+  // vs 0-50) deliberately: an effective plugin should still beat a merely
+  // feature-rich one, so this breaks ties toward completeness without ever
+  // letting a padded build outrank a better-sounding one. Knob-spam can't
+  // win here either -- every parameter it counts had to pass the
+  // deadParams audibility check first.
+  const depthBonus = 0.3 * (gate.report.featureDepth?.score ?? 0);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus;
 }
 
 /* ------------------------------------------------------------------ */
@@ -272,8 +282,11 @@ export async function runRefinementLoop(
   // requirements-matched topology (candidate[0], e.g. the vintage compressor
   // for "warm vintage vocals"); a marginal, ear-indistinguishable score win
   // must not silently override that deliberate choice. A genuinely better
-  // alternate (> NEAR_TIE_MARGIN) still ships, and every seed stays in the
-  // ranked pool for the user to A/B regardless.
+  // alternate (> NEAR_TIE_MARGIN) still ships, and every seed is scored and
+  // recorded in the refinement trace regardless of whether it wins. (It
+  // competes for the returned candidates list on score like anything else;
+  // that list is a top-3 leaderboard, so a seed that ranks below three
+  // other builds will not appear there.)
   const seedTrace: RefinementIteration[] = [];
   for (let s = 0; s < (opts.seedCandidates?.length ?? 0); s++) {
     const seed = opts.seedCandidates![s];

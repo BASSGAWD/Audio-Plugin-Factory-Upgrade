@@ -24,6 +24,8 @@ import { sanitizeDspCode } from "./healthcheckRunner";
 import { PluginFamily } from "./pluginSpec";
 import { UiTheme, buildUiSpec, composeTheme, orderParametersBySpec } from "./uiSpec";
 import { auditDspCode, formatCodeAudit } from "./codeAudit";
+import { ArchetypeId, applyArchetype, inferControlType, pickArchetype } from "./guiArchetypes";
+import { measureFeatureDepth } from "./featureManifest";
 
 export interface QualityScores {
   looks: number;
@@ -1589,13 +1591,9 @@ const CATEGORY_THEMES: Record<
   reverb: { bg: "#0b0e14", border: "#334155", accent: "#94a3b8", text: "#e2e8f0", font: "serif" },
 };
 
-function inferControlType(p: PluginParameter): NonNullable<PluginParameter["controlType"]> {
-  if (p.controlType) return p.controlType;
-  if (/bypass|enable|power|on_off|switch/i.test(p.id) || (p.min === 0 && p.max === 1 && p.unit === "state")) return "toggle";
-  if (/meter|vu|reduction/i.test(p.id) || /meter|vu/i.test(p.name)) return "meter";
-  if (/mix|level|volume|output|makeup|blend|dry_wet|drywet/i.test(p.id)) return "slider";
-  return "knob";
-}
+// inferControlType lives in guiArchetypes.ts now (re-exported below) so both
+// the build-time gate and the browser's archetype switcher share one
+// heuristic.
 
 const SAMPLER_PAD_COUNT = 8;
 
@@ -1629,6 +1627,19 @@ function buildPadParam(index: number): PluginParameter {
   return {
     id: `pad_auto_${index}`, name: `Pad ${index}`, min: 0, max: 127, defaultValue: 0, value: 0, unit: "vel",
     controlType: "pad", w: 100, h: 100,
+  };
+}
+
+/** Decorative marker param: its own value/min/max are never read -- it
+ *  exists only to claim a "controlType": "eq" slot so the multi-node EQ
+ *  curve (computeEqCurve, controlVisuals.ts) has somewhere to render. The
+ *  widget itself discovers and drives the REAL low/mid/high/midFreq params
+ *  elsewhere on the plugin; dragging a node writes back to those, never to
+ *  this marker. Sized for the eq_focus archetype's hero slot. */
+function buildEqCurveParam(): PluginParameter {
+  return {
+    id: "eq_curve_auto", name: "EQ Curve", min: 0, max: 1, defaultValue: 0, value: 0, unit: "",
+    controlType: "eq", w: 560, h: 180,
   };
 }
 
@@ -1671,95 +1682,65 @@ function enforceFamilyRequirements(plugin: AudioPlugin, family: PluginFamily | n
     }
   }
 
+  if (family === "eq") {
+    // Only when there's an actual multi-band shape to show -- a "filter"
+    // build that got misclassified as "eq" with just one cutoff knob has
+    // nothing for a curve widget to add.
+    const bandCount = params.filter((p) => /^(low|mid|high)$/i.test(p.id)).length;
+    if (bandCount >= 2 && !params.some((p) => p.controlType === "eq")) {
+      params.push(buildEqCurveParam());
+      changes.push("added the multi-band EQ curve display (every parametric EQ gets one)");
+    }
+  }
+
   if (changes.length === 0) return { plugin, changes: [] };
   return { plugin: { ...plugin, parameters: params }, changes };
 }
 
 /**
- * Guarantee a polished faceplate: every parameter gets a controlType, grid
- * layout coordinates, and theme colors; the plugin gets a coherent skin.
- * Model-provided styling is always preserved -- this only fills gaps.
+ * Guarantee a polished faceplate: every parameter gets a controlType, an
+ * archetype-appropriate layout, and theme colors; the plugin gets a coherent
+ * skin. Model-provided styling is always preserved -- this only fills gaps.
+ *
+ * Three independent passes, in order: (1) control-type inference -- some
+ * archetypes route by type (pedal separates toggles), so every param needs
+ * a real controlType before layout runs; (2) archetype layout -- positions
+ * whatever doesn't already have x/y, defaulting to "grid" (the original,
+ * unchanged algorithm) when no archetype is specified; (3) theme -- accent
+ * color and font, kept as a fully separate axis from layout so switching
+ * one never disturbs the other.
  */
-export function polishPluginVisuals(plugin: AudioPlugin, themeOverride?: UiTheme): { plugin: AudioPlugin; changes: string[] } {
+export function polishPluginVisuals(
+  plugin: AudioPlugin,
+  themeOverride?: UiTheme,
+  archetype?: ArchetypeId
+): { plugin: AudioPlugin; changes: string[] } {
   const theme = themeOverride ?? (CATEGORY_THEMES[plugin.category] || CATEGORY_THEMES.filter);
   const changes: string[] = [];
 
   let styledCount = 0;
-  let laidOutCount = 0;
-
-  // Amp/cab/mic faceplates are large; keep them on their own row. Pads form
-  // their own dedicated trigger grid below everything else.
-  const regular = plugin.parameters.filter(
-    (p) => p.controlType !== "amp" && p.controlType !== "cab" && p.controlType !== "mic" && p.controlType !== "pad"
-  );
-  const showpiece = plugin.parameters.filter((p) => p.controlType === "amp" || p.controlType === "cab" || p.controlType === "mic");
-  const pads = plugin.parameters.filter((p) => p.controlType === "pad");
-
-  const COLS = 4;
-  const CELL_W = 140;
-  const CELL_H = 125;
-  const ORIGIN_X = 40;
-  const ORIGIN_Y = 70;
-
-  const polishedRegular = regular.map((p, idx) => {
-    const next: PluginParameter = { ...p };
-
-    if (!next.controlType) {
-      next.controlType = inferControlType(p);
-      styledCount++;
-    }
-    if (!next.accentColor) next.accentColor = theme.accent;
-    if (!next.fontStyle) next.fontStyle = theme.font;
-
-    if (next.x === undefined || next.y === undefined) {
-      const col = idx % COLS;
-      const row = Math.floor(idx / COLS);
-      next.x = ORIGIN_X + col * CELL_W;
-      next.y = ORIGIN_Y + row * CELL_H;
-      next.w = next.w ?? 120;
-      next.h = next.h ?? (next.controlType === "toggle" ? 80 : 100);
-      laidOutCount++;
-    }
-    return next;
+  const typed = plugin.parameters.map((p) => {
+    if (p.controlType) return p;
+    styledCount++;
+    return { ...p, controlType: inferControlType(p) };
   });
 
-  const regularRows = Math.ceil(polishedRegular.length / COLS);
-  const polishedShowpiece = showpiece.map((p, idx) => {
-    const next: PluginParameter = { ...p };
-    if (next.x === undefined || next.y === undefined) {
-      next.x = ORIGIN_X + idx * 340;
-      next.y = ORIGIN_Y + regularRows * CELL_H + 20;
-      next.w = next.w ?? 320;
-      next.h = next.h ?? 220;
-      laidOutCount++;
-    }
-    if (!next.accentColor) next.accentColor = theme.accent;
-    return next;
-  });
+  const layout = applyArchetype(archetype ?? "grid", typed);
 
-  const showpieceRows = showpiece.length > 0 ? 1 : 0;
-  const PAD_COLS = 4;
-  const PAD_SIZE = 100;
-  const PAD_GAP = 12;
-  const padOriginY = ORIGIN_Y + regularRows * CELL_H + (showpieceRows > 0 ? 280 : 0);
-  const polishedPads = pads.map((p, idx) => {
-    const next: PluginParameter = { ...p };
-    if (next.x === undefined || next.y === undefined) {
-      const col = idx % PAD_COLS;
-      const row = Math.floor(idx / PAD_COLS);
-      next.x = ORIGIN_X + col * (PAD_SIZE + PAD_GAP);
-      next.y = padOriginY + row * (PAD_SIZE + PAD_GAP);
-      next.w = next.w ?? PAD_SIZE;
-      next.h = next.h ?? PAD_SIZE;
-      laidOutCount++;
-    }
-    if (!next.accentColor) next.accentColor = theme.accent;
-    return next;
+  // Amp/cab/mic/pad showpiece widgets never get a font override (matches
+  // the pre-archetype behavior exactly); every control gets an accent.
+  const themedParams = layout.parameters.map((p) => {
+    const isShowpieceOrPad = p.controlType === "amp" || p.controlType === "cab" || p.controlType === "mic" || p.controlType === "pad";
+    return {
+      ...p,
+      accentColor: p.accentColor ?? theme.accent,
+      fontStyle: isShowpieceOrPad ? p.fontStyle : p.fontStyle ?? theme.font,
+    };
   });
 
   const polished: AudioPlugin = {
     ...plugin,
-    parameters: [...polishedRegular, ...polishedShowpiece, ...polishedPads],
+    parameters: themedParams,
     customSkin: plugin.customSkin ?? {
       bgColor: theme.bg,
       borderColor: theme.border,
@@ -1773,7 +1754,7 @@ export function polishPluginVisuals(plugin: AudioPlugin, themeOverride?: UiTheme
 
   if (!plugin.customSkin) changes.push(`applied a ${plugin.category}-themed faceplate skin`);
   if (styledCount > 0) changes.push(`assigned control types to ${styledCount} parameter(s)`);
-  if (laidOutCount > 0) changes.push(`auto-laid-out ${laidOutCount} control(s) on the designer grid`);
+  if (layout.laidOutCount > 0) changes.push(`auto-laid-out ${layout.laidOutCount} control(s) on the designer grid`);
 
   return { plugin: polished, changes };
 }
@@ -1832,7 +1813,7 @@ function scoreMusicality(m: MusicalityMeasurement, trimmed: boolean, dcBlocked: 
  */
 export function runQualityGate(
   plugin: AudioPlugin,
-  opts: { generationMs?: number; family?: PluginFamily | null; prompt?: string; intent?: string } = {}
+  opts: { generationMs?: number; family?: PluginFamily | null; prompt?: string; intent?: string; uiMetaphor?: string | null } = {}
 ): QualityGateResult {
   const notes: string[] = [];
 
@@ -1913,8 +1894,14 @@ export function runQualityGate(
   }
 
   // --- Looks: deterministic polish ---
-  const { plugin: polished, changes } = polishPluginVisuals({ ...orderedPlugin, outputTrim, dcBlock }, theme);
+  // The GUI archetype is picked from the request's classified uiMetaphor
+  // (richest signal, when the caller has it) or the bare family as a
+  // fallback -- see guiArchetypes.ts's pickArchetype for the full mapping.
+  const archetype = pickArchetype(opts.uiMetaphor, opts.family ?? null);
+  const { plugin: polishedRaw, changes } = polishPluginVisuals({ ...orderedPlugin, outputTrim, dcBlock }, theme, archetype);
+  const polished: AudioPlugin = { ...polishedRaw, uiArchetype: polishedRaw.uiArchetype ?? archetype };
   changes.forEach((c) => notes.push(`Visual polish: ${c}.`));
+  if (archetype !== "grid") notes.push(`GUI archetype: ${archetype} (matched to how this plugin should look and behave).`);
 
   // --- Performance: static real-time safety ---
   const perf = analyzeRealtimeSafety(plugin.dspFunction);
@@ -1980,6 +1967,18 @@ export function runQualityGate(
     notes.push(`Functional fitness ${fitness.score}/100 (${fitness.metric}): ${fitness.evidence}.`);
   }
 
+  // --- Feature depth: does this build carry the control vocabulary a REAL
+  //     unit of its family has? Fitness asks "does it do its job"; a 3-knob
+  //     compressor passes that while still feeling like a toy. This is the
+  //     measurement that separates minimal from complete. Informational —
+  //     it ranks candidates in refinementScore(), never gates shipping.
+  //     It cannot reward knob-spam: every parameter counted here still has
+  //     to survive the deadParams audibility check above. ---
+  const depth = measureFeatureDepth(polished.parameters, opts.family);
+  if (depth) {
+    notes.push(`Feature depth ${depth.score}/100: ${depth.evidence}.`);
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -2004,6 +2003,7 @@ export function runQualityGate(
     codeHealth: codeAudit ? codeAudit.codeHealth : undefined,
     codeFindings: codeAudit ? codeAudit.findings.map((f) => `[${f.severity}] ${f.message}`) : undefined,
     functionalFitness: fitness ?? undefined,
+    featureDepth: depth ? { score: depth.score, evidence: depth.evidence, missing: [...depth.missing.required, ...depth.missing.expected] } : undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

@@ -29,6 +29,37 @@ let threw = false;
 try { parseModelJson("no json here at all"); } catch { threw = true; }
 check("json: garbage throws", threw);
 
+// A small local model occasionally stops one token early and never emits
+// the object's final closing brace, even though everything up to that
+// point is well-formed (observed in the wild against real pluginsmith-ft
+// output: 7 opens vs 6 closes). Repair is deliberately narrow -- ONLY a
+// deficit of exactly 1 -- anything larger means genuine mid-structure
+// truncation, where inventing that much closing syntax would fabricate
+// content rather than recover a near-miss, so it must still fail. Four
+// nesting levels, each closed by one trailing "}" in order, so slicing off
+// N characters removes exactly N unclosed braces.
+const deepJson = '{"a":{"b":{"c":{"d":1}}}}';
+check("json: missing exactly 1 closing brace is repaired", parseModelJson(deepJson.slice(0, -1)).a.b.c.d === 1);
+let deficit2Threw = false;
+try { parseModelJson(deepJson.slice(0, -2)); } catch { deficit2Threw = true; }
+check("json: a 2-brace deficit is NOT fabricated -- still throws", deficit2Threw);
+let deficit4Threw = false;
+try { parseModelJson(deepJson.slice(0, -4)); } catch { deficit4Threw = true; }
+check("json: a 4-brace deficit is NOT fabricated -- still throws", deficit4Threw);
+
+// Local models sometimes emit a RAW literal newline/tab inside a JSON
+// string value (e.g. a dspFunction body) instead of the escaped \n \t
+// forms -- structurally that's invalid JSON even though the content is
+// otherwise exactly right. The escaper repairs it in place.
+const rawNewlineInString = '{"dspFunction":"line one\nline two"}';
+const parsedRaw = parseModelJson(rawNewlineInString);
+check("json: a raw literal newline inside a string value is escaped and parses", parsedRaw.dspFunction === "line one\nline two", JSON.stringify(parsedRaw));
+// Combined failure: raw control char AND a missing final brace together --
+// the real-world case the fix's comment describes local models doing at once.
+const rawNewlineAndMissingBrace = '{"dspFunction":"line one\nline two"';
+const parsedCombined = parseModelJson(rawNewlineAndMissingBrace);
+check("json: raw newline + missing brace together still recovers", parsedCombined.dspFunction === "line one\nline two", JSON.stringify(parsedCombined));
+
 // --- extremes instability detection ---
 const params: PluginParameter[] = [
   { id: "feedback", name: "Feedback", min: 0, max: 1.0, defaultValue: 0.4, value: 0.4, unit: "ratio" },

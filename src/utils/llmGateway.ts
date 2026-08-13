@@ -250,10 +250,16 @@ export async function autoDetectProvider(cfg: LLMConfig): Promise<LLMConfig> {
  */
 /** Scan for the first COMPLETE balanced JSON object, respecting strings and
  *  escapes — survives leading chatter AND trailing text/objects, which the
- *  naive first-{...last-} slice does not. */
+ *  naive first-{...last-} slice does not. Returns the deficit (open braces
+ *  minus close braces at end of string) too, so a caller can attempt a
+ *  same-content repair before giving up on an object that never closed. */
 function extractFirstJsonObject(text: string): string | null {
+  return scanBalancedJsonObject(text).object;
+}
+
+function scanBalancedJsonObject(text: string): { object: string | null; deficit: number; start: number } {
   const start = text.indexOf("{");
-  if (start === -1) return null;
+  if (start === -1) return { object: null, deficit: 0, start: -1 };
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -269,10 +275,35 @@ function extractFirstJsonObject(text: string): string | null {
     else if (ch === "{") depth++;
     else if (ch === "}") {
       depth--;
-      if (depth === 0) return text.slice(start, i + 1);
+      if (depth === 0) return { object: text.slice(start, i + 1), deficit: 0, start };
     }
   }
-  return null;
+  return { object: null, deficit: depth, start };
+}
+
+/** Local models often emit RAW control characters (real newlines, tabs)
+ *  inside JSON string values instead of the escaped \n \t forms — escape
+ *  them in place so JSON.parse can handle the rest of the object normally.
+ *  Braces and other structural characters are untouched. */
+function escapeRawControlCharsInStrings(text: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) { escaped = false; out += ch; continue; }
+      if (ch === "\\") { escaped = true; out += ch; continue; }
+      if (ch === '"') { inString = false; out += ch; continue; }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  return out;
 }
 
 export function parseModelJson(raw: string): any {
@@ -285,32 +316,35 @@ export function parseModelJson(raw: string): any {
     try {
       return JSON.parse(unfenced);
     } catch {
+      // Small local models occasionally stop generating one token early and
+      // never emit the final closing brace of the outer object — the JSON is
+      // otherwise well-formed. Escape any raw control characters first (a
+      // model can do both at once: stray literal newlines AND a missing
+      // closer), then if there's an unclosed object with a deficit of
+      // exactly 1, repair by appending that one "}". Deliberately narrow: a
+      // deficit of 1 is the specific failure observed in the wild (verified
+      // against real pluginsmith-ft output — 7 opens vs 6 closes, the model
+      // stopped one token early). Anything larger means genuine mid-structure
+      // truncation, where inventing that much closing syntax would silently
+      // fabricate content rather than recover a near-miss, so it falls
+      // through to the "genuinely malformed" path instead.
+      const controlEscaped = escapeRawControlCharsInStrings(unfenced.trimEnd());
+      const scanned = scanBalancedJsonObject(controlEscaped);
+      if (!scanned.object && scanned.start >= 0 && scanned.deficit === 1) {
+        try {
+          return JSON.parse(controlEscaped + "}");
+        } catch {
+          // fall through to the normal balanced-extraction path
+        }
+      }
+
       const balanced = extractFirstJsonObject(unfenced) ?? extractFirstJsonObject(text);
       if (balanced) {
         try {
           return JSON.parse(balanced);
         } catch {
-          // Local models often emit RAW control characters (real newlines,
-          // tabs) inside JSON string values — escape them and retry.
           try {
-            let out = "";
-            let inString = false;
-            let escaped = false;
-            for (const ch of balanced) {
-              if (inString) {
-                if (escaped) { escaped = false; out += ch; continue; }
-                if (ch === "\\") { escaped = true; out += ch; continue; }
-                if (ch === '"') { inString = false; out += ch; continue; }
-                if (ch === "\n") { out += "\\n"; continue; }
-                if (ch === "\r") { out += "\\r"; continue; }
-                if (ch === "\t") { out += "\\t"; continue; }
-                out += ch;
-                continue;
-              }
-              if (ch === '"') inString = true;
-              out += ch;
-            }
-            return JSON.parse(out);
+            return JSON.parse(escapeRawControlCharsInStrings(balanced));
           } catch {
             // fall through to the legacy widest-slice attempt
           }

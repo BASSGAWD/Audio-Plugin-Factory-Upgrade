@@ -13,8 +13,8 @@ Every request goes through the same spec-first pipeline, online or offline:
 1. **Intent spec** (`src/utils/pluginSpec.ts`) — a deterministic classifier
    separates what the plugin should *look* like from what it must *do* to the
    audio, so hybrid ideas never collapse into the closest common category.
-2. **Recipe references** (`src/utils/dspRecipes.ts`) — 9 golden, gate-verified
-   DSP implementations (reverb, delay, modulation, dynamics, filter,
+2. **Recipe references** (`src/utils/dspRecipes.ts`) — 10 golden, gate-verified
+   DSP implementations (reverb, delay, modulation, dynamics, eq, filter,
    distortion, sampler, pitch, synth) guide code generation; hybrids compose
    two.
 3. **Quality gate** (`src/utils/qualityGate.ts`) — every generated plugin is
@@ -33,9 +33,15 @@ loaded plugin conversationally: "make it brighter", "more feedback", "drier".
 ## Honest capability limits
 
 The engine runs per-sample JavaScript in an AudioWorklet. It has **no audio
-file playback** (a "sampler" is 8 synthesized pad voices) and **no real-time
-pitch detection** ("autotune" is a manual pitch shifter). Generated plugins
-say so instead of pretending otherwise.
+file playback** — a "sampler" is 8 synthesized pad voices, never a loader for
+your own samples. Generated plugins say so instead of pretending otherwise.
+
+Pitch correction *is* real: autocorrelation F0 detection (with parabolic
+sub-lag interpolation) → key/scale snapping → formant-preserving
+resynthesis. It is **monophonic** — it tracks one fundamental in roughly the
+80 Hz – 1 kHz vocal range and cannot follow chords — and it corrects to a few
+cents rather than perfectly. Measured on the golden recipe: a note pushed 45
+cents sharp lands 5 cents off (89% of the error removed).
 
 ## Run locally
 
@@ -61,7 +67,7 @@ npm run dev      # dev server (tsx server.ts + Vite)
 npm run build    # production build (vite build + esbuild server bundle)
 npm start        # run the production bundle
 npm run lint     # TypeScript type check
-npm test         # regression suite (13 suites, pure functions + SSR markup)
+npm test         # regression suite (30 suites, pure functions + SSR markup)
 npm run test:e2e # real-browser smoke test (needs `npm run dev` already running)
 ```
 
@@ -72,8 +78,14 @@ build path, and the job-graph planner is pushed through the quality gate and
 must score ≥97 on all four dimensions; intent classification (including
 hybrid splitting), family coverage, model-output normalization, and control
 math are asserted too. Any new recipe or generation path must pass the gate
-**before** it ships. These 13 suites run pure functions and SSR markup only —
+**before** it ships. These 30 suites run pure functions and SSR markup only —
 no browser, no server.
+
+Measurement suites carry a stricter bar than "a number came out". Each one
+also scores a **deliberately broken** counterpart — a knob wired to nothing,
+a 2x-miscalibrated delay time, a frozen LFO, an EQ with its Low and High
+bands crossed — and asserts a decisive gap. A measurement that scores the
+honest and broken builds the same is not measuring anything.
 
 `npm run test:e2e` is the one suite that drives the actual running app in a
 real (headless) browser via Playwright: builds a plugin through the chat UI,

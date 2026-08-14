@@ -24,7 +24,7 @@ import {
   familyToCategory,
 } from "./pluginSpec";
 import { DSP_RECIPES, DspRecipe, PITCH_SHIFT_RECIPE, scoreRecipes } from "./dspRecipes";
-import { buildPrimitiveGraph, DSP_PRIMITIVES } from "./dspPrimitives";
+import { buildPrimitiveGraph, composePrimitiveGraph, inferStages, reverseChain, swapSiblingInChain, DSP_PRIMITIVES } from "./dspPrimitives";
 import { inferRequirements, hasRequirements, BuildRequirements } from "./requirements";
 import { rankTopologies, logPromptGap } from "./knowledgeGraph";
 import { DspTopology } from "./dspTopologies";
@@ -715,10 +715,35 @@ export function buildOfflineCandidates(prompt: string, specIn?: AudioPluginSpec 
     push(scored[0].recipe.body, toLiveParams(scored[0].recipe.parameters), scored[0].recipe.title);
   }
 
-  // A different signal path entirely: the composed primitive chain.
+  // A different signal path entirely: the composed primitive chain. When
+  // `main` is ITSELF that chain (the no-recipe / novel-request path, e.g.
+  // "granular texture mangler"), this push is a guaranteed duplicate that
+  // gets silently dropped by `seen` -- leaving that whole family of prompts
+  // with exactly ONE candidate, the narrowest possible search space. In that
+  // case, widen the pool with genuine STRUCTURAL variants of the SAME chain
+  // instead: the stages run in reverse order (a different signal path -- the
+  // tone stage sees different harmonic content before vs. after a drive
+  // stage), and each stage substituted for a same-role sibling (same job,
+  // different character primitive) -- both real structural changes a
+  // duplicate check can't manufacture on its own.
   try {
     const graph = buildPrimitiveGraph(prompt);
     push(graph.body, toLiveParams(graph.parameters), `composed chain (${graph.title})`);
+    if (graph.body === main.dspFunction) {
+      const stages = inferStages(prompt);
+      const reordered = reverseChain(stages);
+      if (reordered !== stages) {
+        const rComposed = composePrimitiveGraph(reordered);
+        push(rComposed.body, toLiveParams(rComposed.parameters), `reordered chain (${rComposed.title})`);
+      }
+      for (let i = 0; i < stages.length && out.length < 4; i++) {
+        const swapped = swapSiblingInChain(stages, i, 0);
+        if (swapped !== stages) {
+          const sComposed = composePrimitiveGraph(swapped);
+          push(sComposed.body, toLiveParams(sComposed.parameters), `stage swap (${sComposed.title})`);
+        }
+      }
+    }
   } catch {
     // chain composition is best-effort; the main build always exists
   }

@@ -98,7 +98,18 @@ function gatedBuild(prompt: string, dspOverride?: string): { plugin: AudioPlugin
   check("candidates: every version has a change summary", ranked.candidates.every((c) => !!c.changeSummary && c.changeSummary.length > 0));
   check("candidates: ranked by score descending", ranked.candidates.every((c, i) => i === 0 || ranked.candidates[i - 1].score >= c.score));
   check("candidates: rank field matches order", ranked.candidates.every((c, i) => c.rank === i + 1));
-  check("candidates: initial v1 is included", ranked.candidates.some((c) => c.label === "v1"));
+  // v1 (the unmutated baseline) no longer has a blanket "always in the top-3"
+  // guarantee now that structural search can genuinely out-perform it more
+  // than twice over -- that is the search widening as intended, not a leak.
+  // What must still hold: v1 is EITHER present, OR every candidate that
+  // displaced it out of the top-3 is a build that actually beats it (never
+  // bumped by something merely different, or tied, or worse).
+  const v1Entry = ranked.candidates.find((c) => c.label === "v1");
+  check(
+    "candidates: v1 present, or every candidate that displaced it strictly outscores it",
+    !!v1Entry || ranked.candidates.every((c) => c.score > s0),
+    v1Entry ? "v1 present" : `v1(${s0.toFixed(1)}) displaced by [${ranked.candidates.map((c) => `${c.label}:${c.score.toFixed(1)}`).join(", ")}]`
+  );
   const sigs = ranked.candidates.map((c) => c.plugin.dspFunction + "|" + c.plugin.parameters.map((p) => Math.round(p.defaultValue * 1000)).join(","));
   check("candidates: no duplicate versions", new Set(sigs).size === sigs.length);
   check("candidates: top-ranked is the loaded best", ranked.candidates[0].score === ranked.bestScore, `top=${ranked.candidates[0].score} best=${ranked.bestScore}`);

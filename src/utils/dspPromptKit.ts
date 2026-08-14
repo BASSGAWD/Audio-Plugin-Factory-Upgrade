@@ -9,6 +9,8 @@
  * speaks the same language.
  */
 
+import { DSP_PRIMITIVES } from "./dspPrimitives";
+
 /**
  * The exact runtime contract for dspFunction. This is the part models get
  * wrong most often: wrong signature assumptions, allocations per-sample,
@@ -45,6 +47,32 @@ let fbk = res * (state.lp1 - state.lp2);
 state.lp1 = state.lp1 + g * (inputSample - state.lp1 + fbk);
 state.lp2 = state.lp2 + g * (state.lp1 - state.lp2);
 return Math.tanh(state.lp2);`;
+
+/**
+ * A compact, always-in-sync menu of this factory's verified primitive
+ * stages, generated from DSP_PRIMITIVES itself (dspPrimitives.ts) so the
+ * prompt can never drift from what the offline composer actually ships.
+ */
+const PRIMITIVE_CATALOG = DSP_PRIMITIVES.slice()
+  .sort((a, b) => a.order - b.order)
+  .map((p) => `- "${p.id}" (${p.role}): ${p.title} -- reads ${p.parameters.map((q) => q.name.toLowerCase()).join("/")}`)
+  .join("\n");
+
+/**
+ * Composition strategy -- steers generation toward SELECTING and adapting
+ * this factory's verified building blocks instead of inventing new DSP
+ * algorithms from nothing. Free-form generation is where models most often
+ * produce code that compiles but fails the gate on first try (dead
+ * parameters, silent output, unstable feedback); reusing a stage whose math
+ * is already gate-verified removes that whole failure class for the part of
+ * the signal path it covers.
+ */
+export const PRIMITIVE_COMPOSITION_GUIDANCE = `DSP COMPOSITION STRATEGY -- prefer SELECTING and adapting a verified building block over inventing new DSP math from scratch. This factory maintains a library of gate-verified 1-2 knob primitive stages (also available to the deterministic composer, so a request built this way is consistent with how the rest of the factory builds it):
+${PRIMITIVE_CATALOG}
+1. Match the request's character words to the closest primitive(s) above, then base your dspFunction on that primitive's ALGORITHM SHAPE (same state machine: smoothed coefficients, wrapped ring-buffer indices, tanh soft-limiting) -- rename parameters and retune ranges/defaults so the schema speaks to THIS request instead of copying the primitive's own id/name verbatim.
+2. When the request implies a signal PATH ("gritty texture that echoes into a wobble"), chain 2-3 stages: block-scope each one (\`{ ... }\`) with its own namespaced state (\`state.s1_x\`, \`state.s2_x\`) so declarations never collide, run stage i's output as stage i+1's input, and finish with ONE dry/wet \`mix\` blending the fully-processed chain against the raw input via \`Math.tanh\`.
+3. This menu is for CHARACTER and TEXTURE requests (granular, metallic, glitchy, wobbly, warm, spacey, ...) where no single well-known effect name applies. A request naming a well-known WHOLE-EFFECT family -- compressor, parametric EQ, reverb, autotune, amp sim -- needs that family's own proper topology (biquads, envelope followers, multi-tap delay networks per the WORKED EXAMPLE above), not an approximation stitched from these stages.
+4. Composing from this menu does not relax the PARAMETER DESIGN budget -- a 3-stage chain still exposes 3 to 7 total controls, so give each primitive's own knob a clear, request-specific name rather than exposing every stage's raw parameter unlabeled.`;
 
 /**
  * Sound-quality guidance -- the difference between "compiles" and "sounds
@@ -164,6 +192,7 @@ export function buildLocalChatSystemPrompt(agentName: string, agentInstruction: 
     return `You are ${agentName}, an elite audio DSP engineer.
 ${UPDATED_PLUGIN_JSON_CONTRACT}
 ${DSP_CODING_RULES}
+${PRIMITIVE_COMPOSITION_GUIDANCE}
 ${SOUND_QUALITY_RULES}
 ${RESPONSE_STYLE_RULES}
 ${AMP_CAB_SCHEMA_GUIDANCE}
@@ -176,6 +205,8 @@ Agent profile: ${agentInstruction}
 ${UPDATED_PLUGIN_JSON_CONTRACT}
 
 ${DSP_CODING_RULES}
+
+${PRIMITIVE_COMPOSITION_GUIDANCE}
 
 ${SOUND_QUALITY_RULES}
 

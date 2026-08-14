@@ -2,11 +2,17 @@
  * Opt-in perfecting loop: after a build clears the gate, rework it up to N
  * user-chosen times and keep only iterations that MEASURABLY score higher.
  *
- * Two rework strategies, best-effort per iteration:
+ * Three rework strategies, best-effort per iteration:
  *  - Refiner worker (local LLM): rewrites the dspFunction for richer
  *    character against the gate's real evidence, parameter schema frozen.
  *    Every candidate must pass the full acceptance check before it is even
  *    scored — a regression can never replace a working build.
+ *  - Deterministic structural variant: appends or prepends a verified DSP
+ *    primitive stage (dspPrimitives.ts) to the current build, cycling
+ *    through prompt-relevant primitives across iterations. This changes the
+ *    SIGNAL PATH, not just a knob position — the search dimension voicing
+ *    variants can't reach. Falls back to voicing when the base body can't be
+ *    safely wrapped (e.g. an early-return recipe like autotune).
  *  - Deterministic voicing variant: seeded nudges of the intensity
  *    parameters' defaults (mix/drive/feedback/...), re-gated. Safe on ANY
  *    plugin, including cloud-generated ones, because it never touches code.
@@ -23,6 +29,7 @@ import { checkDsp } from "./pluginVerifier";
 import { normalizeModelDspCode } from "./healthcheckRunner";
 import { QualityGateResult, runQualityGate } from "./qualityGate";
 import { learnedPitfallsFor } from "./learnedPitfalls";
+import { DspPrimitive, appendPrimitiveStage, prependPrimitiveStage, promptRelevantPrimitives } from "./dspPrimitives";
 
 export const MAX_REFINE_LOOPS = 25;
 
@@ -115,7 +122,21 @@ export function refinementScore(gate: QualityGateResult): number {
   // win here either -- every parameter it counts had to pass the
   // deadParams audibility check first.
   const depthBonus = 0.3 * (gate.report.featureDepth?.score ?? 0);
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus;
+  // CPU COST — a light tie-breaker, not a correctness signal. The headline
+  // `latency` score deliberately stays at its deterministic-path 100
+  // regardless of measured per-sample cost (wall-clock timing is noisy and
+  // must never make the gating floor flaky); this term lets an absurdly
+  // expensive candidate lose a close tie to a cheaper one without being able
+  // to outweigh anything that actually affects correctness or musicality.
+  const cpuBonus = 0.15 * (gate.report.cpuCost?.score ?? 100);
+  // REFERENCE DEVIATION — orthogonal to fitness/depth: fitness asks "does it
+  // do its family's job", depth asks "does it have the family's controls",
+  // this asks "does it BEHAVE like a known-good member of its family" by
+  // comparing response shape against the family's golden recipe. Weighted
+  // between fitness and depth: a real signal about wrongness fitness alone
+  // can miss, but still secondary to whether the build is correct at all.
+  const referenceBonus = 0.2 * (gate.report.referenceDeviation?.score ?? 100);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus;
 }
 
 /* ------------------------------------------------------------------ */
@@ -154,6 +175,70 @@ export function voicingVariant(plugin: AudioPlugin, iteration: number): AudioPlu
     return { ...p, defaultValue: v, value: v };
   });
   return { ...plugin, parameters };
+}
+
+/* ------------------------------------------------------------------ */
+/* Deterministic structural variants                                   */
+/* ------------------------------------------------------------------ */
+
+/** Titles of stages this loop itself has already bolted onto the plugin,
+ *  read back from the marker comments appendPrimitiveStage/
+ *  prependPrimitiveStage emit -- lets later iterations reach for a
+ *  DIFFERENT primitive instead of stacking the same stage repeatedly. */
+function structuralStageTitles(dspFunction: string): Set<string> {
+  const titles = new Set<string>();
+  const re = /--- (?:APPENDED|PREPENDED) STAGE: (.+?) ---/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(dspFunction))) titles.add(m[1]);
+  return titles;
+}
+
+/**
+ * Deterministic STRUCTURAL search: unlike voicingVariant (same DSP, a knob
+ * nudged), this produces a candidate with a genuinely different signal
+ * path -- a verified primitive stage (dspPrimitives.ts) appended or
+ * prepended to the plugin's CURRENT dspFunction. Direction alternates by
+ * iteration parity (append/prepend are structurally different: finishing
+ * the processed output vs. pre-shaping the source); the primitive chosen
+ * cycles through the prompt's relevant primitives so repeated iterations
+ * explore DIFFERENT stages rather than reinforcing one pick.
+ *
+ * Every candidate this returns still goes through the SAME quality gate as
+ * any other -- this function only proposes, never judges. Returns null when
+ * no relevant primitive exists (never happens in practice -- there is always
+ * a default pool) or the base body can't be safely wrapped (multiple/early
+ * returns, e.g. the autotune recipe), so the caller falls back to
+ * voicingVariant -- the same "safe on ANY plugin" contract voicingVariant
+ * itself documents, just for structure instead of parameters.
+ */
+export function structuralVariant(
+  plugin: AudioPlugin,
+  prompt: string,
+  iteration: number
+): { plugin: AudioPlugin; changeSummary: string } | null {
+  const pool = promptRelevantPrimitives(prompt);
+  if (pool.length === 0) return null;
+
+  // Prefer a primitive not already bolted on by a prior structural pass, so
+  // the chain grows with distinct character instead of duplicating a stage;
+  // once every relevant primitive has been tried, allow reuse (a fresh
+  // append/prepend of an already-used primitive still differs structurally
+  // from whichever iteration first tried it, since direction and position
+  // in the chain differ).
+  const already = structuralStageTitles(plugin.dspFunction);
+  const fresh = pool.filter((p) => !already.has(p.title));
+  const source = fresh.length > 0 ? fresh : pool;
+  const stage: DspPrimitive = source[(iteration - 1) % source.length];
+
+  const append = iteration % 2 === 1;
+  const result = append
+    ? appendPrimitiveStage(plugin.dspFunction, plugin.parameters, stage)
+    : prependPrimitiveStage(plugin.dspFunction, plugin.parameters, stage);
+  if (!result) return null;
+
+  const candidate: AudioPlugin = { ...plugin, dspFunction: result.body, parameters: result.parameters };
+  const changeSummary = `${append ? "added" : "prepended"} a ${stage.title} stage`;
+  return { plugin: candidate, changeSummary };
 }
 
 /** Human-readable default-value differences between two versions of a plugin
@@ -269,6 +354,12 @@ export async function runRefinementLoop(
   const initialScore = refinementScore(initial.gate);
   let bestScore = initialScore;
   const trace: RefinementIteration[] = [];
+  // Counts only the iterations that actually REACH structuralVariant (every
+  // other loop iteration, see Strategy 2 below) -- kept independent of the
+  // outer loop index `n` so structuralVariant's own append/prepend
+  // alternation and primitive cycling aren't silently coupled to (and
+  // cancelled out by) the outer schedule's parity.
+  let structuralCalls = 0;
 
   // Every distinct gated version, kept for ranking + the blind listening test.
   interface Collected { label: string; plugin: AudioPlugin; gate: QualityGateResult; score: number; changeSummary: string; }
@@ -340,12 +431,33 @@ export async function runRefinementLoop(
       }
     }
 
-    // Strategy 2: deterministic voicing variant (also the LLM-failure fallback).
+    // Strategy 2: deterministic search, also the LLM-failure fallback. The
+    // FIRST pass on any given best is always the safe, always-succeeds,
+    // never-touches-code voicing nudge (matching voicingVariant's original
+    // "safe on ANY plugin, including a build that just arrived via a seed"
+    // guarantee); EVEN iterations reach for a STRUCTURAL variant instead (a
+    // different signal path -- widens WHAT gets searched, not just knob
+    // positions) on whatever the current best is, which may itself already
+    // be a voiced variant from the prior odd iteration, so the two search
+    // dimensions compound instead of competing for the same iteration
+    // budget. structuralVariant falls back to null (handled below) when the
+    // base body can't be safely wrapped (e.g. an early-return recipe).
+    // structuralVariant is given its OWN call counter (not `n`) so its
+    // internal append/prepend alternation and primitive cycling stay
+    // independent of -- rather than perfectly correlated with, and thereby
+    // cancelled by -- the outer schedule's own parity.
     if (!candidate) {
-      candidate = voicingVariant(best.plugin, n);
-      action = action ? `${action}; tried voicing variant instead` : `voicing variant (seeded nudge ${n})`;
-      const deltas = paramDeltas(best.plugin, candidate);
-      changeSummary = deltas.length > 0 ? deltas.join(", ") : "voicing nudge (no audible change)";
+      const structural = n % 2 === 0 ? structuralVariant(best.plugin, opts.prompt, ++structuralCalls) : null;
+      if (structural) {
+        candidate = structural.plugin;
+        action = action ? `${action}; tried structural variant instead` : `structural variant (${structural.changeSummary})`;
+        changeSummary = structural.changeSummary;
+      } else {
+        candidate = voicingVariant(best.plugin, n);
+        action = action ? `${action}; tried voicing variant instead` : `voicing variant (seeded nudge ${n})`;
+        const deltas = paramDeltas(best.plugin, candidate);
+        changeSummary = deltas.length > 0 ? deltas.join(", ") : "voicing nudge (no audible change)";
+      }
     }
 
     const candidateGate = gateOf(candidate);

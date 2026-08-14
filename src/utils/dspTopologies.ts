@@ -126,7 +126,7 @@ return comp * mix + inputSample * (1 - mix);`,
       { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.env = 0; state.prevOut = 0; state.prevIn = 0; state.init = true; }
+    body: `if (!state.init) { state.env = 0; state.prevOut = 0; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
 let thresh = params.threshold !== undefined ? params.threshold : -26;
 let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 3);
 let attack = params.attack !== undefined ? params.attack : 25;
@@ -148,9 +148,16 @@ let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
 let g = Math.pow(10, (gainDb + makeup) / 20);
 let hot = 1 + warmth * 4;
 let norm = 1 + warmth * 2.2;
+// The Warmth tanh is a real saturator, not a safety clamp, so it gets the
+// same 2x oversampling as the distortion recipe: midpoint + current shaped,
+// combined with a triangular [0.25, 0.5, 0.25] halfband decimator against
+// the PREVIOUS cycle's shaped current.
 let lin = inputSample * g;
 let mid = 0.5 * (state.prevIn + inputSample) * g;
-let out = 0.5 * (Math.tanh(mid * hot) + Math.tanh(lin * hot)) / norm;
+let shapedMid = Math.tanh(mid * hot);
+let shapedCur = Math.tanh(lin * hot);
+let out = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / norm;
+state.prevShaped = shapedCur;
 state.prevIn = inputSample;
 state.prevOut = out;
 return out * mix + inputSample * (1 - mix);`,
@@ -346,7 +353,7 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
       { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4200, unit: "Hz" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.prevIn = 0; state.init = true; }
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
 let drive = params.drive !== undefined ? params.drive : 8;
 let tone = params.tone !== undefined ? params.tone : 4200;
 let mix = params.mix !== undefined ? params.mix : 1;
@@ -354,10 +361,14 @@ state.smDrive += 0.002 * (drive - state.smDrive);
 let g = Math.pow(10, state.smDrive / 20);
 let bias = 0.22;
 let biasRest = Math.tanh(bias);
+// 2x oversampled with a triangular [0.25, 0.5, 0.25] halfband decimator
+// (this sample's midpoint-and-current shaped values plus the PREVIOUS
+// cycle's shaped current) -- a real halfband null, not a plain box average.
 let midIn = 0.5 * (state.prevIn + inputSample);
 let shapedMid = Math.tanh(midIn * g + bias) - biasRest;
 let shapedCur = Math.tanh(inputSample * g + bias) - biasRest;
-let wet = 0.5 * (shapedMid + shapedCur) / Math.pow(g, 0.65);
+let wet = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(g, 0.65);
+state.prevShaped = shapedCur;
 state.prevIn = inputSample;
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);
@@ -375,17 +386,21 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
       { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 3600, unit: "Hz" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.lp = 0; state.smDrive = 14; state.prevIn = 0; state.init = true; }
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 14; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
 let drive = params.drive !== undefined ? params.drive : 14;
 let tone = params.tone !== undefined ? params.tone : 3600;
 let mix = params.mix !== undefined ? params.mix : 1;
 state.smDrive += 0.002 * (drive - state.smDrive);
 let g = Math.pow(10, state.smDrive / 20);
+// 2x oversampled with a triangular [0.25, 0.5, 0.25] halfband decimator --
+// softsign's fold-back shoulders are sharper than tanh's, so the plain box
+// average left more image energy behind; the halfband null cuts it further.
 let midIn = 0.5 * (state.prevIn + inputSample) * g;
 let curIn = inputSample * g;
 let shapedMid = midIn / (1 + Math.abs(midIn));
 let shapedCur = curIn / (1 + Math.abs(curIn));
-let wet = 0.5 * (shapedMid + shapedCur) / Math.pow(g, 0.7);
+let wet = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(g, 0.7);
+state.prevShaped = shapedCur;
 state.prevIn = inputSample;
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);

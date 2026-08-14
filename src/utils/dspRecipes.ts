@@ -247,7 +247,7 @@ return Math.tanh(out);`,
       { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 0, unit: "dB" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.low = 0; state.band = 0; state.smF = 1400; state.init = true; }
+    body: `if (!state.init) { state.low = 0; state.band = 0; state.smF = 1400; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
 let cutoff = params.cutoff !== undefined ? params.cutoff : 1400;
 let res = params.resonance !== undefined ? params.resonance : 0.4;
 let drive = params.drive !== undefined ? params.drive : 0;
@@ -258,9 +258,25 @@ let q = 1.2 - res;
 // Drive saturates the filter INPUT, so pushing resonance thickens into
 // analog-style growl instead of the thin whistle a clean SVF produces.
 // The gain-compensating divisor keeps the knob a character control rather
-// than a disguised volume control.
+// than a disguised volume control. 2x oversampled with a triangular
+// [0.25, 0.5, 0.25] halfband decimator (this sample's midpoint-and-current
+// shaped values plus the PREVIOUS cycle's shaped current) -- at Drive
+// pushed hard the tanh's harmonics climb well above Nyquist and fold back
+// as inharmonic fizz if shaped at 1x; bypassed at Drive=0 so the clean
+// filter path is untouched.
 let dg = Math.pow(10, drive / 20);
-let xin = drive > 0.01 ? Math.tanh(inputSample * dg) / Math.pow(dg, 0.6) : inputSample;
+let xin;
+if (drive > 0.01) {
+  let midIn = 0.5 * (state.prevIn + inputSample);
+  let shapedMid = Math.tanh(midIn * dg);
+  let shapedCur = Math.tanh(inputSample * dg);
+  xin = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(dg, 0.6);
+  state.prevShaped = shapedCur;
+} else {
+  xin = inputSample;
+  state.prevShaped = 0;
+}
+state.prevIn = inputSample;
 state.low += f * state.band;
 let high = xin - state.low - q * state.band;
 state.band += f * high;
@@ -270,6 +286,7 @@ return wet * mix + inputSample * (1 - mix);`,
       "Clamp the frequency coefficient (f < ~0.25 for a Chamberlin SVF) or the filter explodes above ~10 kHz.",
       "Smooth the cutoff per sample (state.smF += 0.002 * (target - state.smF)) -- jumping coefficients zipper audibly.",
       "Map resonance so damping never reaches 0; q = 1.2 - res with res <= 0.9 stays stable.",
+      "OVERSAMPLE the drive saturation 2x (triangular halfband decimator, same idiom as the distortion recipe) -- shaping the raw sample at 1x folds tanh's harmonics back as inharmonic fizz once Drive is pushed, and this family is graded on staying spectrally clean.",
     ],
   },
   {
@@ -281,17 +298,22 @@ return wet * mix + inputSample * (1 - mix);`,
       { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4500, unit: "Hz" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.prevIn = 0; state.init = true; }
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
 let drive = params.drive !== undefined ? params.drive : 8;
 let tone = params.tone !== undefined ? params.tone : 4500;
 let mix = params.mix !== undefined ? params.mix : 1;
 state.smDrive += 0.002 * (drive - state.smDrive);
 let g = Math.pow(10, state.smDrive / 20);
 // 2x oversampled soft clip: shape the linear-interp midpoint AND the sample,
-// then average (a Nyquist-null halfband decimator). Folded harmonics that
-// read as digital fizz land ~6+ dB lower than shaping the raw sample alone.
+// then combine with a TRIANGULAR [0.25, 0.5, 0.25] halfband decimator (this
+// sample's midpoint + current, plus the PREVIOUS cycle's shaped current) --
+// a real halfband null, not just a box average, so images above Nyquist fold
+// back roughly another 2x further down than a plain [0.5, 0.5] mix.
 let midIn = 0.5 * (state.prevIn + inputSample);
-let wet = 0.5 * (Math.tanh(midIn * g) + Math.tanh(inputSample * g)) / Math.pow(g, 0.65);
+let shapedMid = Math.tanh(midIn * g);
+let shapedCur = Math.tanh(inputSample * g);
+let wet = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(g, 0.65);
+state.prevShaped = shapedCur;
 state.prevIn = inputSample;
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);
@@ -299,7 +321,7 @@ wet = state.lp;
 return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
     pitfalls: [
       "Compensate the drive gain (divide by ~g^0.65) or turning Drive up just makes it louder, not more distorted.",
-      "OVERSAMPLE the nonlinearity 2x: shape the midpoint between the previous and current input as well as the current input, then average the two shaped values -- running tanh on the raw sample alone folds harmonics back as inharmonic digital fizz the quality gate measures and penalizes.",
+      "OVERSAMPLE the nonlinearity 2x: shape the midpoint between the previous and current input as well as the current input, then combine with a triangular [0.25, 0.5, 0.25] halfband decimator (this sample's mid+current, plus the PREVIOUS cycle's shaped current) -- running tanh on the raw sample alone, or a plain 2-tap box average, folds harmonics back as inharmonic digital fizz the quality gate measures and penalizes.",
       "Follow the clipper with a gentle lowpass -- raw tanh harmonics above ~8 kHz read as harsh fizz.",
       "Smooth the drive value per sample so automation doesn't zipper.",
     ],

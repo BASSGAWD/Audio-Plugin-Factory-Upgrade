@@ -16,7 +16,10 @@
  *  - performance: static real-time-safety analysis of the DSP body.
  *  - latency: scored from measured generation wall-time (see scoreLatency --
  *    this is generation responsiveness, not the plugin's audio latency, which
- *    is ~0 in this per-sample engine).
+ *    is ~0 in this per-sample engine). The plugin's actual per-sample CPU
+ *    cost is measured separately (see measureCpuCost / CpuCost) and reported
+ *    informationally -- it never touches this headline score, because
+ *    wall-clock timing is noisy on a machine doing other concurrent work.
  */
 
 import { AudioPlugin, BuildReport, PluginParameter } from "../types";
@@ -26,6 +29,7 @@ import { UiTheme, buildUiSpec, composeTheme, orderParametersBySpec } from "./uiS
 import { auditDspCode, formatCodeAudit } from "./codeAudit";
 import { ArchetypeId, applyArchetype, inferControlType, pickArchetype } from "./guiArchetypes";
 import { measureFeatureDepth } from "./featureManifest";
+import { DSP_RECIPES, DspRecipe } from "./dspRecipes";
 
 export interface QualityScores {
   looks: number;
@@ -793,6 +797,262 @@ export function measureCharacterIndex(dspFunction: string, parameters: PluginPar
   return count === 0 ? 0 : sum / count;
 }
 
+/* ------------------------------------------------------------------ */
+/* Reference deviation: does this behave like a KNOWN-GOOD family member? */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The single, unambiguous "the" golden reference for a family -- mirrors
+ * dspRecipes.ts's (private, unexported) FAMILY_TO_RECIPES mapping, kept in
+ * sync by hand since this module does not own dspRecipes.ts. Composite
+ * families (multiband_saturator, hybrid_other, utility) have no ONE
+ * single-stage reference behavior to be "like", so they are deliberately
+ * absent here -- this measurement returns null rather than compare a
+ * multi-stage build against an arbitrary single-stage recipe.
+ */
+const REFERENCE_RECIPE_ID_FOR_FAMILY: Partial<Record<PluginFamily, string>> = {
+  eq: "eq",
+  filter: "filter",
+  distortion: "distortion",
+  saturator: "distortion",
+  amp_sim: "distortion",
+  delay: "delay",
+  reverb: "reverb",
+  modulation: "modulation",
+  dynamics: "dynamics",
+  sampler: "sampler",
+  pitch: "pitch",
+  synthesizer: "synth",
+};
+
+function goldenRecipeFor(family: PluginFamily | null | undefined): DspRecipe | null {
+  if (!family) return null;
+  const id = REFERENCE_RECIPE_ID_FOR_FAMILY[family];
+  if (!id) return null;
+  return DSP_RECIPES.find((r) => r.id === id) ?? null;
+}
+
+export interface ReferenceDeviation {
+  /** Which golden recipe (dspRecipes.ts id) this candidate was compared against. */
+  referenceId: string;
+  /** 0..2: combined distance between the candidate's and the reference's
+   *  measured RESPONSE on the same probe signals, each rendered at its own
+   *  default settings (0 = matches the reference's shape, 2 = the
+   *  theoretical max). Two components, averaged: spectral energy
+   *  distribution on a broadband probe (catches a filter/EQ/distortion that
+   *  doesn't reshape the spectrum the way its family does) and envelope
+   *  SHAPE over time on an input-then-silence probe (catches a
+   *  compressor/reverb/delay that doesn't reshape dynamics or ring on the
+   *  way its family does -- spectral shape alone is nearly blind to this).
+   *  NOT a quality score -- a novel, legitimately better design SHOULD be
+   *  free to diverge from one specific reference; this is context, not a
+   *  correctness verdict. */
+  deviation: number;
+  /** 0-100 informational score: 100 = closely tracks how a proven member of
+   *  this family responds to the same signals; low = shares essentially
+   *  nothing in common with it structurally -- a strong "this may be
+   *  wired wrong at a level no single-parameter check would name" signal. */
+  score: number;
+  evidence: string;
+}
+
+/** Same broadband probe the brightness semantic checks use -- meaningful
+ *  even for generator families (synth/sampler) that ignore their input
+ *  entirely: what's compared there is each build's own resulting timbre. */
+const REF_DEVIATION_WINDOW = CROSS_SIGNAL_WINDOW;
+/** Envelope window for the temporal-shape comparison -- coarse enough to be
+ *  stable, fine enough to resolve a compressor's gain-reduction shape and a
+ *  reverb's decay against the ~0.7s tail probe (TAIL_TOTAL). */
+const REF_DEVIATION_ENV_WIN = 512;
+/** Deviation at/above this reads as "shares essentially nothing" -> score 0.
+ *  Calibrated (see referenceDeviationTest.ts) so every legitimate ALTERNATE
+ *  topology already shipping in this project's bank -- a different but
+ *  equally valid engineering choice for the same family -- lands
+ *  comfortably under it, while an inert/near-passthrough counterpart clears
+ *  it decisively; a number only that honest-vs-broken gap can calibrate,
+ *  not one invented in the abstract.
+ */
+const REF_DEVIATION_CEIL = 1.0;
+
+/** Normalized (sums to 1, or all-zero when silent) RMS-envelope trajectory
+ *  over the tail probe -- the SHAPE of energy over time, independent of
+ *  absolute loudness (which output trim already corrects elsewhere and
+ *  isn't the point of this comparison). */
+function envelopeShape(samples: Float32Array): number[] {
+  const raw = envelopeSeries(samples, REF_DEVIATION_ENV_WIN);
+  const sum = raw.reduce((a, b) => a + b, 0);
+  if (sum <= 1e-9) return raw.map(() => 0);
+  return raw.map((v) => v / sum);
+}
+
+/** How much louder material is held down relative to quiet material, in dB
+ *  (gainAtLevel's own convention: positive = compresses). A STATIONARY probe
+ *  -- spectral shape or a single-level envelope -- cannot see this at all
+ *  (fitnessDynamics needs the same two-level trick for exactly this reason):
+ *  a compressor and a passthrough can look identical on a probe that never
+ *  varies level. Null for either build means "not comparable on this axis",
+ *  not "identical" -- callers must treat it as excluded, not zero. */
+function levelGainDelta(dspFunc: (i: number, p: any, s: any, r?: number) => number, params: Record<string, number>): number | null {
+  const quiet = gainAtLevel(dspFunc, params, 0.1);
+  const loud = gainAtLevel(dspFunc, params, 1.6);
+  if (quiet === null || loud === null) return null;
+  return quiet - loud;
+}
+
+/** 2nd+3rd harmonic content on a clean tone -- distortion's defining trait,
+ *  which the generic spectral/envelope terms measure only weakly (clipping a
+ *  BROADBAND noise probe barely moves its aggregate spectral distribution,
+ *  since the added harmonics are themselves broadband-ish). Reuses
+ *  harmonicShare/cleanToneAt, already proven decisive in functionalFitnessTest. */
+function harmonicGenerationFor(dspFunc: (i: number, p: any, s: any, r?: number) => number, params: Record<string, number>): number | null {
+  const out = renderPass(dspFunc, params, 8192, cleanToneAt);
+  if (out.failed || out.rms < 1e-5) return null;
+  return harmonicShare(out.samples);
+}
+
+/** Tail energy relative to the active-region level -- reverb's defining
+ *  trait (does it ring on?), which the coarse envelope-shape term alone
+ *  under-weights against a strong plate/FDN's very different overall decay
+ *  curve shape. `samples` must already be a render on the tail probe
+ *  (input then silence) -- reuses whatever the caller already rendered. */
+function tailPersistence(samples: Float32Array): number {
+  let activeSq = 0;
+  const activeLen = Math.min(TAIL_INPUT_END, samples.length);
+  for (let i = 0; i < activeLen; i++) activeSq += samples[i] * samples[i];
+  const activeRms = Math.sqrt(activeSq / Math.max(1, activeLen));
+  if (activeRms < 1e-6) return 0;
+  return tailRms(samples) / activeRms;
+}
+
+/** Families whose defining behavior is harmonic generation -- amp_sim is a
+ *  gain-staged preamp drive by construction (see dspRecipes.ts's own
+ *  amp_sim -> distortion routing rationale), so it shares the same axis. */
+const HARMONIC_DEFINED_FAMILIES = new Set<PluginFamily>(["distortion", "saturator", "amp_sim"]);
+
+/**
+ * Run a candidate and its family's GOLDEN RECIPE through the SAME probe
+ * signals (each at its own default settings, since that is the plugin's
+ * defining behavior) and compare the shape of their responses -- spectrally
+ * (a broadband probe) and temporally (an input-then-silence probe, so
+ * dynamics/decay families are measured on the axis that actually defines
+ * them, not just the ones that happen to reshape a static spectrum). Reuses
+ * machinery measureCharacterIndex/fitnessModulation/fitnessReverb already
+ * verified, rather than inventing new signal-processing from scratch.
+ * Purely informational -- feeds refinementScore(), never the four headline
+ * dimensions.
+ */
+export function measureReferenceDeviation(
+  dspFunction: string,
+  parameters: PluginParameter[],
+  family: PluginFamily | null | undefined
+): ReferenceDeviation | null {
+  const golden = goldenRecipeFor(family);
+  if (!golden) return null;
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return null;
+  const refFunc = compileDspBody(golden.body);
+  if (!refFunc) return null; // golden recipes always compile; defensive only
+  const refParams = defaultParamsMap(golden.parameters as PluginParameter[]);
+  const candParams = defaultParamsMap(parameters);
+
+  const candSpec = renderPass(dspFunc, candParams, REF_DEVIATION_WINDOW, noiseProbeAt);
+  const refSpec = renderPass(refFunc, refParams, REF_DEVIATION_WINDOW, noiseProbeAt);
+  const candEnv = renderPass(dspFunc, candParams, TAIL_TOTAL, tailSignalAt);
+  const refEnv = renderPass(refFunc, refParams, TAIL_TOTAL, tailSignalAt);
+  if (candSpec.failed || refSpec.failed || candEnv.failed || refEnv.failed) return null;
+
+  let candEnergy = 0;
+  for (let i = 0; i < candSpec.samples.length; i++) candEnergy += candSpec.samples[i] * candSpec.samples[i];
+  let refEnergy = 0;
+  for (let i = 0; i < refSpec.samples.length; i++) refEnergy += refSpec.samples[i] * refSpec.samples[i];
+
+  // Both silent on the spectral probe -- there is no shape to compare, and
+  // calling two flatlines "a match" would be a meaningless claim either way.
+  if (candEnergy <= 1e-9 && refEnergy <= 1e-9) {
+    return {
+      referenceId: golden.id,
+      deviation: 0,
+      score: 100,
+      evidence: `both this build and the ${golden.id} reference render silent on the probe signal`,
+    };
+  }
+  // One is silent and the other isn't -- the starkest possible mismatch;
+  // score at the floor without needing the shape math at all.
+  if (candEnergy <= 1e-9 || refEnergy <= 1e-9) {
+    return {
+      referenceId: golden.id,
+      deviation: 2,
+      score: 0,
+      evidence: `this build is ${candEnergy <= 1e-9 ? "silent" : "audible"} on the probe signal while the family's ${golden.id} reference is ${refEnergy <= 1e-9 ? "silent" : "audible"}`,
+    };
+  }
+
+  const candDist = spectralBandDistribution(candSpec.samples, SAMPLE_RATE);
+  const refDist = spectralBandDistribution(refSpec.samples, SAMPLE_RATE);
+  let spectralL1 = 0;
+  for (let i = 0; i < candDist.length; i++) spectralL1 += Math.abs(candDist[i] - refDist[i]);
+
+  const candShape = envelopeShape(candEnv.samples);
+  const refShape = envelopeShape(refEnv.samples);
+  let envelopeL1 = 0;
+  const envLen = Math.min(candShape.length, refShape.length);
+  for (let i = 0; i < envLen; i++) envelopeL1 += Math.abs(candShape[i] - refShape[i]);
+
+  // Level-dependent gain (compression behavior): a STATIONARY probe -- the
+  // spectral and envelope terms above -- is structurally blind to this (a
+  // compressor and a straight passthrough can render near-identically on a
+  // probe whose level never changes). Restricted to "dynamics" ON PURPOSE:
+  // it is the one family whose whole job IS a level-dependent gain response,
+  // so a big candidate-vs-reference gap there is a genuine red flag. For
+  // every other family it would be actively misleading rather than neutral
+  // -- e.g. a fuzz distortion's dramatically level-sensitive gain curve
+  // (measured: ~1.25 vs a soft-clip reference) is exactly what gives fuzz
+  // its character, not a defect, and this term would punish it for being a
+  // good fuzz. Excluded (not zeroed) when either build can't be measured on
+  // this axis at all, so silence there never masquerades as a match.
+  const candGainDelta = family === "dynamics" ? levelGainDelta(dspFunc, candParams) : null;
+  const refGainDelta = family === "dynamics" ? levelGainDelta(refFunc, refParams) : null;
+  let levelDev: number | null = null;
+  if (candGainDelta !== null && refGainDelta !== null) {
+    levelDev = Math.max(0, Math.min(2, Math.abs(candGainDelta - refGainDelta) / Math.max(4, Math.abs(refGainDelta))));
+  }
+
+  // Harmonic generation (distortion/saturator/amp_sim's defining trait).
+  const candHarm = family && HARMONIC_DEFINED_FAMILIES.has(family) ? harmonicGenerationFor(dspFunc, candParams) : null;
+  const refHarm = family && HARMONIC_DEFINED_FAMILIES.has(family) ? harmonicGenerationFor(refFunc, refParams) : null;
+  let harmDev: number | null = null;
+  if (candHarm !== null && refHarm !== null) {
+    harmDev = Math.max(0, Math.min(2, Math.abs(candHarm - refHarm) / Math.max(0.02, refHarm)));
+  }
+
+  // Tail persistence (reverb's defining trait: does it ring on?). Reuses the
+  // tail-probe renders already taken for the envelope-shape term above.
+  const tailDev =
+    family === "reverb"
+      ? Math.max(0, Math.min(2, Math.abs(tailPersistence(candEnv.samples) - tailPersistence(refEnv.samples)) / Math.max(0.05, tailPersistence(refEnv.samples))))
+      : null;
+
+  const terms = [
+    spectralL1,
+    envelopeL1,
+    ...(levelDev !== null ? [levelDev] : []),
+    ...(harmDev !== null ? [harmDev] : []),
+    ...(tailDev !== null ? [tailDev] : []),
+  ];
+  const deviation = Math.max(0, Math.min(2, terms.reduce((a, b) => a + b, 0) / terms.length));
+  const score = Math.max(0, Math.min(100, Math.round((1 - deviation / REF_DEVIATION_CEIL) * 100)));
+  const extraLabels = [levelDev !== null ? "level-dependent gain" : "", harmDev !== null ? "harmonic generation" : "", tailDev !== null ? "tail persistence" : ""].filter(Boolean);
+  return {
+    referenceId: golden.id,
+    deviation: Math.round(deviation * 1000) / 1000,
+    score,
+    evidence:
+      `response shape (spectrum + envelope-over-time${extraLabels.length ? " + " + extraLabels.join(" + ") : ""}) differs from the family's "${golden.id}" reference by ${deviation.toFixed(2)} ` +
+      `(0 = matches, ${REF_DEVIATION_CEIL}+ = shares essentially nothing; spectral ${spectralL1.toFixed(2)}, envelope ${envelopeL1.toFixed(2)}` +
+      `${levelDev !== null ? `, level-gain ${levelDev.toFixed(2)}` : ""}${harmDev !== null ? `, harmonic ${harmDev.toFixed(2)}` : ""}${tailDev !== null ? `, tail ${tailDev.toFixed(2)}` : ""})`,
+  };
+}
+
 /** In-place iterative radix-2 Cooley-Tukey FFT (length must be a power of 2).
  *  Forward transform; re/im are overwritten with the spectrum. */
 function fftInPlace(re: Float64Array, im: Float64Array): void {
@@ -921,7 +1181,39 @@ export interface FunctionalFitness {
   metric: string;
   /** The measured evidence, in plain words with real numbers. */
   evidence: string;
+  /**
+   * The measurement as a GRADIENT rather than a grade.
+   *
+   * Several of these tests produce a signed, multiplicative error against a
+   * knob's own label -- an echo landing at 175 ms with Time set to 350, a
+   * -3 dB corner an octave above where Cutoff says. That error mechanically
+   * implies its own correction: multiply every read of `paramId` inside the
+   * DSP by `factor` and the knob starts telling the truth.
+   *
+   * Emitted only when the deviation is far past anything an honest design
+   * produces (see the CALIBRATE_* thresholds), and acted on only by
+   * calibrateParamScaling(), which re-measures and keeps the rewrite ONLY
+   * when it provably helped -- exactly the contract calibrateUnstableParams
+   * follows for range fixes.
+   */
+  calibration?: { paramId: string; factor: number };
 }
+
+/**
+ * How far past honest a measurement must land before it is allowed to propose
+ * a mechanical repair. Deliberately well outside the spread of the verified
+ * golden recipes and topologies (measured, see calibrationRepairTest.ts), so
+ * the repair pass costs nothing on a healthy build and only ever engages on a
+ * knob that is genuinely lying about itself.
+ */
+/** Delay echo timing: |measured - claimed| / claimed. Honest designs < 0.02. */
+const CALIBRATE_DELAY_ERR = 0.08;
+/** Filter corner, in octaves off nominal. Honest (even resonant) designs < 0.35. */
+const CALIBRATE_FILTER_OCTAVES = 0.6;
+/** LFO rate: |measured - claimed| / claimed, after the 1x/2x convention fold. */
+const CALIBRATE_RATE_ERR = 0.25;
+/** Oscillator pitch, in octave-folded semitones off the Pitch knob. */
+const CALIBRATE_PITCH_SEMIS = 0.6;
 
 /** Render the arp scaled to a target peak, returning output/input gain in dB. */
 function gainAtLevel(
@@ -1034,6 +1326,10 @@ function fitnessDelay(
     score,
     metric: "echo timing",
     evidence: `echo lands at ${((peakIdx / SAMPLE_RATE) * 1000).toFixed(0)} ms with Time set to ${timeMs.toFixed(0)} ms (${(errRatio * 100).toFixed(1)}% off)`,
+    // Delay length is linear in the Time value on every sane implementation,
+    // so the ratio of wanted-to-measured delay IS the correction factor.
+    calibration:
+      errRatio > CALIBRATE_DELAY_ERR ? { paramId: timeParam.id, factor: expected / peakIdx } : undefined,
   };
 }
 
@@ -1125,6 +1421,11 @@ function fitnessFilter(
     score,
     metric: "cutoff calibration",
     evidence: `-3 dB corner measured at ~${(cutoff * cornerMult).toFixed(0)} Hz with Cutoff set to ${cutoff.toFixed(0)} Hz (${octavesOff.toFixed(1)} octaves off)${resonanceNote}`,
+    // The corner sits at cutoff * cornerMult; dividing the knob's value by
+    // cornerMult moves it onto the label. Only proposed past the point where
+    // no honest topology in the bank lands.
+    calibration:
+      octavesOff > CALIBRATE_FILTER_OCTAVES ? { paramId: cutoffParam.id, factor: 1 / cornerMult } : undefined,
   };
 }
 
@@ -1294,10 +1595,19 @@ function fitnessModulation(
   // accept either as correct calibration.
   const err = Math.min(Math.abs(measuredHz - setHz), Math.abs(measuredHz - setHz * 2)) / Math.max(0.05, setHz);
   const rateScore = Math.max(0, Math.min(100, Math.round((1 - err / 0.5) * 100)));
+  // Which convention this effect follows (one dip per cycle or two) is decided
+  // by whichever target the measurement is nearer in RATIO terms -- the same
+  // ambiguity the score already forgives. Correcting toward the far one would
+  // "fix" a correct through-zero comb into a wrong one.
+  const oneX = Math.abs(Math.log(measuredHz / Math.max(1e-6, setHz)));
+  const twoX = Math.abs(Math.log(measuredHz / Math.max(1e-6, setHz * 2)));
+  const target = oneX <= twoX ? setHz : setHz * 2;
   return {
     score: Math.round(depthScore * 0.6 + rateScore * 0.4),
     metric: "modulation depth + rate",
     evidence: `sweeps ${(depth * 100).toFixed(1)}% deep at ~${measuredHz.toFixed(2)} Hz with Rate set to ${setHz.toFixed(2)} Hz`,
+    calibration:
+      err > CALIBRATE_RATE_ERR && measuredHz > 1e-6 ? { paramId: rateParam.id, factor: target / measuredHz } : undefined,
   };
 }
 
@@ -1404,10 +1714,17 @@ function fitnessSynth(
   const semis = 12 * Math.log2(detected / Math.max(1, setHz));
   const foldedSemis = Math.abs(semis - 12 * Math.round(semis / 12));
   const score = Math.max(0, Math.min(100, Math.round((1 - foldedSemis / 3) * 100)));
+  // Correct toward the OCTAVE the detector actually reported, not toward the
+  // raw knob value: an octave error here is as often the autocorrelation
+  // locking a subharmonic as a real mistuning, and "repairing" that would
+  // transpose an honest oscillator by a full octave.
+  const octaveTarget = setHz * Math.pow(2, Math.round(semis / 12));
   return {
     score,
     metric: "pitch accuracy",
     evidence: `sounds ${detected.toFixed(1)} Hz with Pitch set to ${setHz.toFixed(1)} Hz (${foldedSemis.toFixed(2)} semitones off, octave-folded)`,
+    calibration:
+      foldedSemis > CALIBRATE_PITCH_SEMIS ? { paramId: pitchParam.id, factor: octaveTarget / detected } : undefined,
   };
 }
 
@@ -1507,6 +1824,173 @@ export function measureFunctionalFitness(
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Calibration repair: turn a measured error into a mechanical FIX      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A knob that lies about itself by a clean multiplicative factor -- an echo
+ * at half the time the Time knob claims, a corner two octaves above where
+ * Cutoff says -- is not merely a low score. The gate already knows the exact
+ * factor, so the correction is arithmetic, not another model round-trip.
+ *
+ * The repair rewrites every VALUE read of `params.<id>` in the DSP body to
+ * `(params.<id> * factor)`. The knob's declared range, units, and displayed
+ * number all stay exactly as the user sees them; only the number the DSP
+ * receives is corrected, so the label becomes true instead of the range
+ * becoming a lie.
+ */
+export interface CalibrationRepair {
+  paramId: string;
+  /** Multiplier applied to the DSP's reads of that parameter. */
+  factor: number;
+  /** Which fitness measurement produced the gradient ("echo timing", ...). */
+  metric: string;
+  /** Functional fitness before and after -- the proof it was kept for. */
+  before: number;
+  after: number;
+  /** Human-readable note for the build transcript. */
+  note: string;
+}
+
+/** Factors outside this band mean the measurement, not the plugin, is wrong
+ *  (a detector that locked onto noise). Refuse to "repair" from those. */
+const CALIBRATE_MIN_FACTOR = 0.05;
+const CALIBRATE_MAX_FACTOR = 20;
+/** Below ~2% the correction is inside the measurement's own resolution. */
+const CALIBRATE_MIN_LOG_FACTOR = 0.02;
+/** Fitness points a rewrite must gain to be worth shipping. Well above the
+ *  1-2 point jitter of the probe grids, so noise can never trigger a rewrite. */
+const CALIBRATE_MIN_GAIN = 5;
+/** A second pass can finish what a nonlinear first pass started; more than
+ *  that is chasing measurement noise. */
+const CALIBRATE_MAX_PASSES = 2;
+
+function escapeForRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Rewrite every read of `params.<id>` (dot or bracket form) as
+ * `(params.<id> * factor)`.
+ *
+ * Two things it deliberately refuses to touch:
+ *  - comparison sites (`params.x !== undefined`). The whole codebase reads
+ *    parameters through that guard, and scaling the guard turns a missing
+ *    parameter into `NaN !== undefined` -> true -> NaN poured into the audio
+ *    path. The guard stays literal; the VALUE branch gets scaled.
+ *  - any body that WRITES to the parameter (`params.x = `, `+=`, `++`).
+ *    Returns null instead, so the caller ships the original code.
+ *
+ * Returns null when nothing was rewritten, so "no read sites found" can
+ * never be mistaken for "repair applied".
+ */
+export function scaleParamReads(dspFunction: string, id: string, factor: number): string | null {
+  const esc = escapeForRegExp(id);
+  const pattern = new RegExp(`params\\s*(?:\\.\\s*${esc}|\\[\\s*(['"])${esc}\\1\\s*\\])(?![\\w$])`, "g");
+  const mult = Math.round(factor * 1e6) / 1e6;
+
+  let out = "";
+  let last = 0;
+  let rewrites = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(dspFunction)) !== null) {
+    const after = dspFunction.slice(match.index + match[0].length);
+    // Writes make this parameter a mutable local, not a knob read -- bail.
+    if (/^\s*(?:\+\+|--|[-+*/%|&^]?=(?!=))/.test(after)) return null;
+    out += dspFunction.slice(last, match.index);
+    // Leave `!== undefined` / `=== x` style guards alone (see doc comment).
+    out += /^\s*(?:===|!==|==|!=)/.test(after) ? match[0] : `(${match[0]} * ${mult})`;
+    if (!/^\s*(?:===|!==|==|!=)/.test(after)) rewrites++;
+    last = match.index + match[0].length;
+  }
+  if (rewrites === 0) return null;
+  return out + dspFunction.slice(last);
+}
+
+/** A repaired build may not be WORSE on any correctness axis the headline
+ *  musicality score reads. This is what keeps a calibration fix from ever
+ *  buying accuracy with a dead knob or a silent output. */
+function musicalityHolds(before: MusicalityMeasurement, after: MusicalityMeasurement): boolean {
+  if (after.fatal) return false;
+  if (after.isSilent && !before.isSilent) return false;
+  if (after.deadParams.length > before.deadParams.length) return false;
+  if (after.unstableParams.length > before.unstableParams.length) return false;
+  if (after.silentOnSignals.length > before.silentOnSignals.length) return false;
+  return true;
+}
+
+/**
+ * Apply the calibration gradients the fitness measurements produced, keeping
+ * each rewrite ONLY when re-measurement proves it helped -- the same contract
+ * calibrateUnstableParams follows for range fixes, and the reason a wrong
+ * gradient costs nothing but a little CPU.
+ *
+ * Returns the (possibly rewritten) DSP together with the measurements taken
+ * on whatever it decided to ship, so the caller never re-measures.
+ */
+export function calibrateParamScaling(
+  dspFunction: string,
+  parameters: PluginParameter[],
+  family: PluginFamily | null | undefined,
+  baseMusicality: MusicalityMeasurement,
+  baseFitness: FunctionalFitness | null
+): {
+  dspFunction: string;
+  repairs: CalibrationRepair[];
+  musicality: MusicalityMeasurement;
+  fitness: FunctionalFitness | null;
+} {
+  const repairs: CalibrationRepair[] = [];
+  let curDsp = dspFunction;
+  let curFit = baseFitness;
+  let curMus = baseMusicality;
+  if (baseMusicality.fatal) return { dspFunction: curDsp, repairs, musicality: curMus, fitness: curFit };
+
+  for (let pass = 0; pass < CALIBRATE_MAX_PASSES; pass++) {
+    const cal = curFit?.calibration;
+    if (!cal || !curFit) break;
+    if (!Number.isFinite(cal.factor)) break;
+    if (cal.factor < CALIBRATE_MIN_FACTOR || cal.factor > CALIBRATE_MAX_FACTOR) break;
+    if (Math.abs(Math.log(cal.factor)) < CALIBRATE_MIN_LOG_FACTOR) break;
+    const param = parameters.find((p) => p.id === cal.paramId);
+    if (!param) break;
+
+    const candidateDsp = scaleParamReads(curDsp, cal.paramId, cal.factor);
+    if (!candidateDsp || candidateDsp === curDsp) break;
+    if (!compileDspBody(candidateDsp)) break;
+
+    const candFit = measureFunctionalFitness(candidateDsp, parameters, family);
+    if (!candFit || candFit.score < curFit.score + CALIBRATE_MIN_GAIN) break;
+    const candMus = measureMusicality(candidateDsp, parameters);
+    if (!musicalityHolds(curMus, candMus)) break;
+    // A rescaled read can shift a DIFFERENT parameter's semantic honesty
+    // (e.g. correcting Pitch changes the harmonic content a Cutoff-brightness
+    // check probes) -- the fix must not trade one form of correctness for
+    // another, so re-verify semantics too and refuse a net regression.
+    const skipIds = new Set([...curMus.deadParams, ...curMus.unstableParams]);
+    const beforeViolations = verifyParamSemantics(curDsp, parameters, skipIds).violations.length;
+    const afterViolations = verifyParamSemantics(candidateDsp, parameters, skipIds).violations.length;
+    if (afterViolations > beforeViolations) break;
+
+    repairs.push({
+      paramId: cal.paramId,
+      factor: Math.round(cal.factor * 1e6) / 1e6,
+      metric: curFit.metric,
+      before: curFit.score,
+      after: candFit.score,
+      note:
+        `Calibrated: "${param.name}" was off by ${cal.factor.toFixed(3)}x -- the DSP's reads of it are now scaled so the knob's number matches what it actually does ` +
+        `(${curFit.metric} ${curFit.score} -> ${candFit.score}/100; ${candFit.evidence})`,
+    });
+    curDsp = candidateDsp;
+    curFit = candFit;
+    curMus = candMus;
+  }
+
+  return { dspFunction: curDsp, repairs, musicality: curMus, fitness: curFit };
+}
+
 export function measureAliasing(dspFunction: string, parameters: PluginParameter[]): number {
   const dspFunc = compileDspBody(dspFunction);
   if (!dspFunc) return 0;
@@ -1575,6 +2059,129 @@ export function analyzeRealtimeSafety(dspFunction: string): { evidence: string; 
   }
 
   return { evidence: issues.join("; "), score: Math.max(0, score) };
+}
+
+/* ------------------------------------------------------------------ */
+/* CPU cost: measure real per-sample DSP wall-time (informational)      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Cross-platform monotonic clock: `performance.now()` exists in both the
+ * browser (this module is imported by App.tsx) and modern Node (tsx/test),
+ * matching the fallback already used in buildPlanner.ts.
+ */
+const now = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+export interface CpuCost {
+  /** Measured wall-clock time per rendered sample, in nanoseconds -- the
+   *  median of several timed passes after a JIT warm-up run. Absolute
+   *  values are noisy on a shared/loaded machine; only used as a RELATIVE
+   *  signal between candidates of the same build, never a pass/fail gate. */
+  nsPerSample: number;
+  /** nsPerSample as a fraction of the real-time budget at 44.1kHz (1.0 =
+   *  the entire per-sample budget). Context for a human reading the
+   *  report -- the SCORE below is deliberately much more conservative than
+   *  this ratio so it can discriminate between correct-and-cheap and
+   *  correct-and-expensive builds long before either is anywhere near
+   *  missing real time. */
+  budgetFraction: number;
+  /**
+   * 0-100: light, appropriately-scoped DSP (one-pole filters, a handful of
+   * comb/allpass taps, simple waveshaping) scores near 100; a per-sample
+   * body doing disproportionate real work -- per-sample convolution, dense
+   * unnecessary oversampling, redundant inner loops -- scores lower. This
+   * is the dimension `scoreLatency` claims to measure but doesn't: that
+   * function grades GENERATION wall-time and returns a flat 100 for every
+   * deterministic/offline build (== every build the offline gate ever
+   * evaluates), so it currently carries zero information about the
+   * plugin's own audio cost. This measurement fills that gap.
+   *
+   * Deliberately INFORMATIONAL, not wired into the headline `latency`
+   * score: wall-clock timing is measurably noisy on a machine running
+   * other concurrent work, and a flaky headline score that occasionally
+   * dips a correct build below the >=97 floor would be strictly worse
+   * than the current uninformative-but-stable 100. Combined with the
+   * static analyzeRealtimeSafety findings (below) so a build that is BOTH
+   * measurably expensive AND unsafely coded is flagged on both signals.
+   */
+  score: number;
+  /** Static real-time-safety findings folded in (empty when clean) --
+   *  unguarded allocation, logging, or blocking calls in the audio path. */
+  staticIssues: string;
+  evidence: string;
+}
+
+/** Real-time budget per sample at 44.1kHz, in nanoseconds (~22.7 us). */
+const CPU_BUDGET_NS = 1e9 / SAMPLE_RATE;
+/** Below this, score is a flat 100. Generous on purpose (budget/40): every
+ *  verified golden recipe and topology in the bank measures well under it
+ *  (see cpuCostTest.ts) -- only DSP doing real disproportionate per-sample
+ *  work moves the needle, which is the entire point of a discriminating
+ *  signal rather than a pass/fail cliff at the real-time budget itself. */
+const CPU_TARGET_NS = CPU_BUDGET_NS / 40;
+const CPU_WARMUP_SAMPLES = 3000;
+const CPU_TIMED_SAMPLES = 10000;
+const CPU_TRIALS = 3;
+
+/**
+ * Time the ACTUAL per-sample DSP cost by running it, not by reasoning about
+ * it statically. `renderPass` already renders thousands of samples for every
+ * other measurement in this file, so timing one more pass is nearly free.
+ * A JIT warm-up precedes the timed passes so V8's cold-interpreter overhead
+ * doesn't swamp real DSP-cost differences; the timed result is the MEDIAN of
+ * several trials, which is far more robust than the mean to a noisy machine
+ * (a single stall from another process biases a mean but not a median).
+ */
+export function measureCpuCost(dspFunction: string, parameters: PluginParameter[]): CpuCost | null {
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return null;
+  const params = defaultParamsMap(parameters);
+  const state: any = {};
+
+  try {
+    for (let i = 0; i < CPU_WARMUP_SAMPLES; i++) {
+      dspFunc(PRIMARY_SIGNAL.at(i), params, state, PRIMARY_SIGNAL.at(i + STEREO_SKEW));
+    }
+  } catch {
+    return null;
+  }
+
+  const trialsNs: number[] = [];
+  for (let t = 0; t < CPU_TRIALS; t++) {
+    const start = now();
+    try {
+      for (let i = 0; i < CPU_TIMED_SAMPLES; i++) {
+        dspFunc(PRIMARY_SIGNAL.at(i), params, state, PRIMARY_SIGNAL.at(i + STEREO_SKEW));
+      }
+    } catch {
+      return null;
+    }
+    const elapsedMs = now() - start;
+    trialsNs.push((elapsedMs * 1e6) / CPU_TIMED_SAMPLES);
+  }
+  trialsNs.sort((a, b) => a - b);
+  const nsPerSample = Math.max(0, trialsNs[Math.floor(trialsNs.length / 2)]);
+
+  const budgetFraction = nsPerSample / CPU_BUDGET_NS;
+  const score =
+    nsPerSample <= CPU_TARGET_NS
+      ? 100
+      : Math.max(0, Math.min(100, Math.round(100 * (1 - (nsPerSample - CPU_TARGET_NS) / (CPU_BUDGET_NS - CPU_TARGET_NS)))));
+
+  const staticSafety = analyzeRealtimeSafety(dspFunction);
+  // Fold the static findings in as an additional penalty (capped, since the
+  // headline `performance` score already fully accounts for them -- this is
+  // only so a body that is BOTH slow AND unsafe reads as worse than one that
+  // is merely slow, without double-counting when it's just unsafe).
+  const combinedScore = Math.max(0, Math.min(score, staticSafety.score < 100 ? score - 5 : score));
+
+  return {
+    nsPerSample: Math.round(nsPerSample * 100) / 100,
+    budgetFraction: Math.round(budgetFraction * 1000) / 1000,
+    score: combinedScore,
+    staticIssues: staticSafety.evidence,
+    evidence: `~${nsPerSample.toFixed(0)} ns/sample (${(budgetFraction * 100).toFixed(2)}% of the ${CPU_BUDGET_NS.toFixed(0)} ns real-time budget at 44.1kHz)${staticSafety.evidence ? `; static: ${staticSafety.evidence}` : ""}`,
+  };
 }
 
 /** Category-matched visual themes so every generation gets a deliberate look. */
@@ -1820,13 +2427,14 @@ export function runQualityGate(
   // --- Musicality: measure, then fix gain staging deterministically ---
   let m = measureMusicality(plugin.dspFunction, plugin.parameters);
   let workingParams = plugin.parameters;
+  let workingDsp = plugin.dspFunction;
 
   // Range calibration: an unstable extreme becomes a FIXED range, not a
   // warning. Only kept when re-measurement proves it actually helped.
   if (!m.fatal && m.unstableParams.length > 0) {
-    const cal = calibrateUnstableParams(plugin.dspFunction, workingParams, m.unstableParams);
+    const cal = calibrateUnstableParams(workingDsp, workingParams, m.unstableParams);
     if (cal.calibrated.length > 0) {
-      const m2 = measureMusicality(plugin.dspFunction, cal.parameters);
+      const m2 = measureMusicality(workingDsp, cal.parameters);
       if (!m2.fatal && m2.unstableParams.length < m.unstableParams.length) {
         m = m2;
         workingParams = cal.parameters;
@@ -1835,10 +2443,31 @@ export function runQualityGate(
     }
   }
 
+  // --- Calibration repair: a knob whose measured behaviour is a clean
+  //     multiplicative factor off its own label (echo timing, filter corner,
+  //     LFO rate, oscillator pitch) gets its DSP reads rescaled so the number
+  //     on the knob matches what it actually does. Applied, RE-MEASURED, and
+  //     kept only when functional fitness measurably improved and nothing on
+  //     the musicality side regressed -- same contract as the range
+  //     calibration above. Informational: it can only raise
+  //     report.functionalFitness, never a headline score. ---
+  let fitness = m.fatal ? null : measureFunctionalFitness(workingDsp, workingParams, opts.family ?? null);
+  const calibrationRepairs: CalibrationRepair[] = [];
+  if (!m.fatal && fitness?.calibration) {
+    const scaled = calibrateParamScaling(workingDsp, workingParams, opts.family ?? null, m, fitness);
+    if (scaled.repairs.length > 0) {
+      workingDsp = scaled.dspFunction;
+      m = scaled.musicality;
+      fitness = scaled.fitness;
+      calibrationRepairs.push(...scaled.repairs);
+      scaled.repairs.forEach((r) => notes.push(`${r.note}.`));
+    }
+  }
+
   // --- Parameter semantics: every knob must do what its name claims ---
   const semantics = m.fatal
     ? { checks: [] as SemanticCheck[], violations: [] as string[] }
-    : verifyParamSemantics(plugin.dspFunction, workingParams, new Set([...m.deadParams, ...m.unstableParams]));
+    : verifyParamSemantics(workingDsp, workingParams, new Set([...m.deadParams, ...m.unstableParams]));
   for (const c of semantics.checks) {
     if (!c.ok) notes.push(`Semantic violation: "${c.param}" is audible but does not behave like its name (${c.property}: ${c.detail}).`);
   }
@@ -1874,8 +2503,12 @@ export function runQualityGate(
   }
 
   // --- UI enforcement: guarantee the fixed layout some families require ---
-  // (built on the calibrated parameters so any range fixes actually ship)
-  const measuredPlugin: AudioPlugin = workingParams === plugin.parameters ? plugin : { ...plugin, parameters: workingParams };
+  // (built on the calibrated parameters/DSP so any range or scaling fixes
+  // actually ship -- this is what makes workingDsp the shipped code)
+  const measuredPlugin: AudioPlugin =
+    workingParams === plugin.parameters && workingDsp === plugin.dspFunction
+      ? plugin
+      : { ...plugin, parameters: workingParams, dspFunction: workingDsp };
   const enforced = enforceFamilyRequirements(measuredPlugin, opts.family ?? null);
   enforced.changes.forEach((c) => notes.push(`Layout: ${c}.`));
 
@@ -1904,7 +2537,7 @@ export function runQualityGate(
   if (archetype !== "grid") notes.push(`GUI archetype: ${archetype} (matched to how this plugin should look and behave).`);
 
   // --- Performance: static real-time safety ---
-  const perf = analyzeRealtimeSafety(plugin.dspFunction);
+  const perf = analyzeRealtimeSafety(workingDsp);
   if (perf.evidence) notes.push(`Real-time safety: ${perf.evidence}.`);
 
   const scores: QualityScores = {
@@ -1919,14 +2552,14 @@ export function runQualityGate(
   const confidence = m.fatal
     ? 0
     : Math.max(0, Math.min(100, minScore - m.deadParams.length * 5 - m.unstableParams.length * 10 - semantics.violations.length * 5));
-  const characterIndex = m.fatal ? 0 : measureCharacterIndex(plugin.dspFunction, workingParams);
+  const characterIndex = m.fatal ? 0 : measureCharacterIndex(workingDsp, workingParams);
 
   // Aliasing/harshness: measured always (informational), but only counted a
   // DEFECT for families that are supposed to stay spectrally clean -- a
   // ring-mod, pitch shifter, chorus, or generator is inharmonic by design, so
   // a high index there is character, not a bug. `harsh` drives the refinement
   // penalty and a report warning; it never touches the four headline scores.
-  const aliasingIndex = m.fatal ? 0 : measureAliasing(plugin.dspFunction, workingParams);
+  const aliasingIndex = m.fatal ? 0 : measureAliasing(workingDsp, workingParams);
   const harsh = !m.fatal && !!opts.family && CLEAN_FAMILIES.has(opts.family) && aliasingIndex > ALIAS_DEFECT_THRESHOLD;
   if (harsh) {
     notes.push(`Aliasing/harshness: ${aliasingIndex.toFixed(2)} inharmonic energy on a clean tone -- a ${opts.family} should stay smooth; this has audible digital fizz (oversample or lowpass the nonlinearity).`);
@@ -1935,7 +2568,7 @@ export function runQualityGate(
   // Inter-sample true peak (dBTP), 4x Catmull-Rom reconstruction. The trim
   // computed above is applied at the ENGINE's output stage, so report the
   // trimmed level -- what a converter would actually see.
-  const rawTruePeakDb = m.fatal ? -Infinity : measureTruePeak(plugin.dspFunction, workingParams);
+  const rawTruePeakDb = m.fatal ? -Infinity : measureTruePeak(workingDsp, workingParams);
   const truePeakDb = Number.isFinite(rawTruePeakDb) ? rawTruePeakDb + 20 * Math.log10(Math.max(1e-6, outputTrim)) : rawTruePeakDb;
   if (Number.isFinite(truePeakDb)) {
     if (truePeakDb > -0.1) {
@@ -1954,7 +2587,7 @@ export function runQualityGate(
   // Static engineering audit: grade the CODE (real-time safety, numerical
   // robustness, smoothing, maintainability), not just the sound. Informational
   // — never touches the four headline scores, so the >=97 floor stays provable.
-  const codeAudit = m.fatal ? null : auditDspCode(plugin.dspFunction, workingParams);
+  const codeAudit = m.fatal ? null : auditDspCode(workingDsp, workingParams);
   if (codeAudit) {
     notes.push(formatCodeAudit(codeAudit));
   }
@@ -1962,7 +2595,9 @@ export function runQualityGate(
   // Functional fitness: does it do its family's JOB, and how well? The four
   // headline scores saturate at 100 for every correct build; this is what
   // separates a compressor that compresses from one that merely runs.
-  const fitness = m.fatal ? null : measureFunctionalFitness(plugin.dspFunction, workingParams, opts.family);
+  // (Already measured above, before/after the calibration-repair pass --
+  // `fitness` here is the FINAL, post-repair value, so a knob the gate just
+  // fixed reports its corrected score, not its pre-repair one.)
   if (fitness) {
     notes.push(`Functional fitness ${fitness.score}/100 (${fitness.metric}): ${fitness.evidence}.`);
   }
@@ -1977,6 +2612,32 @@ export function runQualityGate(
   const depth = measureFeatureDepth(polished.parameters, opts.family);
   if (depth) {
     notes.push(`Feature depth ${depth.score}/100: ${depth.evidence}.`);
+  }
+
+  // --- CPU cost: the real audio cost `latency` claims to measure but does
+  //     not (scoreLatency returns a flat 100 for every deterministic/offline
+  //     build). Measured by TIMING the DSP, not reasoning about it statically
+  //     -- renderPass already renders thousands of samples for every other
+  //     measurement above, so this is nearly free. Deliberately informational
+  //     (see CpuCost doc comment): it ranks candidates in refinementScore(),
+  //     it never touches the headline `latency` score, because wall-clock
+  //     timing is measurably noisy on a machine doing other concurrent work
+  //     and a flaky headline score would be worse than the current stable
+  //     (if uninformative) 100. ---
+  const cpuCost = m.fatal ? null : measureCpuCost(workingDsp, workingParams);
+  if (cpuCost) {
+    notes.push(`CPU cost ${cpuCost.score}/100: ${cpuCost.evidence}.`);
+  }
+
+  // --- Reference deviation: does this behave like a known-good member of
+  //     its family? Runs the candidate and its family's golden recipe
+  //     through the SAME probe signal and compares the shape of their
+  //     responses -- catches classes of structural wrongness no single
+  //     named parameter check can (a knob-level test can't see "this
+  //     doesn't look like a compressor at all"). Informational only. ---
+  const referenceDeviation = m.fatal ? null : measureReferenceDeviation(workingDsp, workingParams, opts.family ?? null);
+  if (referenceDeviation) {
+    notes.push(`Reference deviation ${referenceDeviation.score}/100: ${referenceDeviation.evidence}.`);
   }
 
   const report: BuildReport = {
@@ -2004,6 +2665,9 @@ export function runQualityGate(
     codeFindings: codeAudit ? codeAudit.findings.map((f) => `[${f.severity}] ${f.message}`) : undefined,
     functionalFitness: fitness ?? undefined,
     featureDepth: depth ? { score: depth.score, evidence: depth.evidence, missing: [...depth.missing.required, ...depth.missing.expected] } : undefined,
+    calibrationRepairs: calibrationRepairs.length > 0 ? calibrationRepairs.map((r) => ({ paramId: r.paramId, factor: r.factor, metric: r.metric, before: r.before, after: r.after })) : undefined,
+    cpuCost: cpuCost ?? undefined,
+    referenceDeviation: referenceDeviation ?? undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

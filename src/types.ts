@@ -155,6 +155,42 @@ export interface BuildReport {
    *  minimal one. Informational — ranks candidates, never gates shipping.
    *  `missing` names the required/expected controls this build lacks. */
   featureDepth?: { score: number; evidence: string; missing: string[] };
+  /**
+   * Calibration repairs the gate applied: a knob whose functional-fitness
+   * measurement (echo timing, filter corner, LFO rate, oscillator pitch)
+   * implied an exact multiplicative correction had its DSP reads rescaled so
+   * the number on the knob matches what it actually does. Each entry was
+   * applied, RE-MEASURED, and kept ONLY because functional fitness measurably
+   * improved and nothing on the musicality side regressed — never assumed.
+   * `before`/`after` are the functional-fitness score for that metric.
+   * Informational; the shipped dspFunction already reflects these repairs.
+   */
+  calibrationRepairs?: Array<{ paramId: string; factor: number; metric: string; before: number; after: number }>;
+  /**
+   * Measured per-sample DSP wall-time (real audio cost), combined with the
+   * static real-time-safety findings. This is the signal the headline
+   * `latency` score claims to carry but doesn't — scoreLatency grades
+   * generation wall-time and returns a flat 100 for every deterministic/
+   * offline build, so a per-sample-convolution reverb and a one-pole filter
+   * score identically there. Informational — ranks candidates in
+   * refinementScore(), never touches the headline `latency` score (wall-clock
+   * timing is noisy on a shared machine; a flaky headline score would be
+   * worse than the current uninformative-but-stable 100).
+   */
+  cpuCost?: { nsPerSample: number; budgetFraction: number; score: number; staticIssues: string; evidence: string };
+  /**
+   * Does this build behave like a known-good member of its family? The
+   * candidate and its family's GOLDEN RECIPE are run through the SAME probe
+   * signal (each at its own defaults) and their responses' spectral shapes
+   * are compared. Catches classes of structural wrongness no single named
+   * parameter check can name — a build that "doesn't look like a compressor
+   * at all" even though every individual knob passed its own test. NOT a
+   * quality verdict (a legitimately better design should be free to diverge
+   * from one specific reference) — informational, ranks candidates in
+   * refinementScore(), never gates shipping. Absent for composite families
+   * (multiband_saturator, hybrid_other, utility) with no single reference.
+   */
+  referenceDeviation?: { referenceId: string; deviation: number; score: number; evidence: string };
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

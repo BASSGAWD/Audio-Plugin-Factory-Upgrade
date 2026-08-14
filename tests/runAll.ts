@@ -45,9 +45,13 @@ const TEST_FILES = [
   "researchIndexTest.ts",
   "fusionTest.ts",
   "functionalFitnessTest.ts",
+  "calibrationRepairTest.ts",
+  "cpuCostTest.ts",
+  "referenceDeviationTest.ts",
   "guiArchetypeTest.ts",
   "eqCurveTest.ts",
   "featureDepthTest.ts",
+  "antiAliasingTest.ts",
 ];
 
 let failed = 0;

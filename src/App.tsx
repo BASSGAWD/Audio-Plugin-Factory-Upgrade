@@ -52,7 +52,7 @@ import {
   TRANSLATE_PORTABLE_PROMPT,
 } from "./utils/dspPromptKit";
 import { verifyAndRepairDsp } from "./utils/pluginVerifier";
-import { runQualityGate, formatBuildReport, measurePreviewTrim } from "./utils/qualityGate";
+import { runQualityGate, formatBuildReport, measurePreviewTrim, sanitizeSample } from "./utils/qualityGate";
 import { buildOfflineCandidates } from "./utils/offlineBuilder";
 import { recordLessons } from "./utils/learnedPitfalls";
 import { buildPortableScaffolds } from "./utils/portableCodegen";
@@ -1075,6 +1075,21 @@ function sanitizeDspCode(codeString) {
   return sanitizedCode;
 }
 
+// Mandatory final safety net -- mirrors sanitizeSample() in
+// src/utils/qualityGate.ts by hand, since this code runs inside
+// AudioWorkletGlobalScope, a separate JS realm with no access to the app's
+// ES modules. Applied UNCONDITIONALLY to every per-sample DSP return value
+// before it reaches this user's speakers: NaN/Infinity -> 0, denormals
+// (nonzero magnitude below ~1e-15) flushed to 0 (JS has no hardware
+// FTZ/DAZ), hard-ceiling clip to +/-4.0 as an absolute last-resort backstop.
+function sanitizeSample(x) {
+  if (!Number.isFinite(x)) return 0;
+  if (x !== 0 && Math.abs(x) < 1e-15) return 0;
+  if (x > 4) return 4;
+  if (x < -4) return -4;
+  return x;
+}
+
 class DynamicDSPProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -1176,11 +1191,15 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
         if (outputRight) outputRight[i] = srcR;
       } else if (this.dspFunc) {
         try {
-          let resL = (this.dspFunc(srcL, this.params, this.dspState, srcR) || 0) * this.outputTrim;
+          // Safety net: sanitize the raw DSP return (and any right-channel
+          // write to state.outR) BEFORE outputTrim math or the stateful
+          // DC-block/anti-alias recursions below -- otherwise one NaN/
+          // Infinity sample poisons those recursive filters permanently.
+          let resL = sanitizeSample(this.dspFunc(srcL, this.params, this.dspState, srcR)) * this.outputTrim;
           // Opt-in stereo contract: a stereo DSP writes its right channel to
           // state.outR each sample; mono DSP never touches it -> dual-mono.
           const rawR = this.dspState.outR;
-          let resR = rawR !== undefined && isFinite(rawR) ? rawR * this.outputTrim : resL;
+          let resR = rawR !== undefined ? sanitizeSample(rawR) * this.outputTrim : resL;
 
           if (this.dcBlockOn) {
             const blockedL = resL - this.dcX1 + 0.995 * this.dcY1;
@@ -1314,9 +1333,17 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
               if (outputDataR) outputDataR[i] = srcR;
             } else if (dspCompiledFunc) {
               try {
-                let resL = (dspCompiledFunc(srcL, currentParams, currentState, srcR) || 0) * outputTrimRef.current;
+                // Safety net: sanitize the compiled DSP body's raw return (and
+                // any right-channel write to state.outR) BEFORE it can reach
+                // outputTrim math or the stateful DC-block/anti-alias
+                // recursions below -- otherwise a single NaN/Infinity sample
+                // poisons those recursive filters permanently (e.g.
+                // Infinity - Infinity = NaN, which then never recovers), long
+                // after the offending DSP call has passed. See sanitizeSample
+                // in src/utils/qualityGate.ts for the full contract.
+                let resL = sanitizeSample(dspCompiledFunc(srcL, currentParams, currentState, srcR)) * outputTrimRef.current;
                 const rawR = (currentState as any).outR;
-                let resR = rawR !== undefined && isFinite(rawR) ? rawR * outputTrimRef.current : resL;
+                let resR = rawR !== undefined ? sanitizeSample(rawR) * outputTrimRef.current : resL;
 
                 if (dcBlockRef.current) {
                   const blockedL = resL - dcX1 + 0.995 * dcY1;

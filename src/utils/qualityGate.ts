@@ -219,6 +219,41 @@ interface RenderStats {
  *  energy and character as the left feed. Mono DSP ignores it entirely. */
 const STEREO_SKEW = 97;
 
+/**
+ * Mandatory final safety net. Every place a compiled per-sample DSP body's
+ * return value is about to be treated as an audio sample -- here in the
+ * offline gate's render path, and (mirrored by hand, since it runs in a
+ * separate JS realm) in the live AudioWorklet/ScriptProcessor playback path
+ * in App.tsx -- passes through this UNCONDITIONALLY, regardless of what the
+ * recipe, structural composition, or LLM output did internally:
+ *
+ *  - NaN/Infinity -> 0. A divide-by-zero, an unstable feedback coefficient,
+ *    or a structural-search combination of primitives never individually
+ *    tested together must never reach a speaker as full-scale noise.
+ *  - denormals (nonzero magnitude below ~1e-15) -> flushed to exactly 0.
+ *    JS has no hardware FTZ/DAZ, so an unflushed denormal-producing
+ *    reverb/delay tail can stall the CPU for the lifetime of the plugin.
+ *  - hard-ceiling clip to +/-4.0 as an absolute last-resort backstop --
+ *    comfortably above any legitimate signal (unity is +/-1.0, and the
+ *    live path's own final output clip is +/-1.0) but far below anything
+ *    that could be genuinely damaging.
+ *
+ * This is NOT a mixing/loudness decision -- it is not the true-peak/
+ * loudness measurement elsewhere in this file -- and it must never fire on
+ * any golden recipe or topology variant at reasonable settings (see
+ * safetyNetTest.ts). If it ever does on a legitimate build, that is a bug
+ * in the threshold, not a plugin to "fix".
+ */
+const DENORMAL_FLOOR = 1e-15;
+const SAFETY_CEILING = 4.0;
+export function sanitizeSample(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  if (x !== 0 && Math.abs(x) < DENORMAL_FLOOR) return 0;
+  if (x > SAFETY_CEILING) return SAFETY_CEILING;
+  if (x < -SAFETY_CEILING) return -SAFETY_CEILING;
+  return x;
+}
+
 function renderPass(
   dspFunc: (i: number, p: any, s: any, r?: number) => number,
   params: Record<string, number>,
@@ -236,15 +271,26 @@ function renderPass(
   const fail = (): RenderStats => ({ rms: 0, dcOffset: 0, clippingRatio: 0, failed: true, samples: out, samplesR: null, stereo: false });
 
   for (let i = 0; i < length; i++) {
-    let y = 0;
+    let raw = 0;
     try {
-      y = dspFunc(signal(i), params, state, signal(i + STEREO_SKEW));
+      raw = dspFunc(signal(i), params, state, signal(i + STEREO_SKEW));
     } catch {
       return fail();
     }
-    if (!Number.isFinite(y)) {
+    // NaN/Infinity here is treated as an outright FAILED render (not merely
+    // sanitized to 0 and continued) so this file's instability detection
+    // keeps working exactly as before -- calibrateUnstableParams, the
+    // unstableParams audit, and every downstream `.failed` check depend on
+    // this signal to find and FIX (or flag) a broken parameter range, which
+    // silently zeroing the sample and continuing would hide. Every FINITE
+    // sample still passes through sanitizeSample UNCONDITIONALLY (denormal
+    // flush + hard-ceiling clip) before it is used as an audio sample below
+    // -- the same safety net the live playback path applies at its own
+    // per-sample DSP call site.
+    if (!Number.isFinite(raw)) {
       return fail();
     }
+    const y = sanitizeSample(raw);
     out[i] = y;
     sumSq += y * y;
     dcSum += y;
@@ -253,10 +299,11 @@ function renderPass(
     const yr = state.outR;
     if (yr !== undefined) {
       if (!Number.isFinite(yr)) return fail();
+      const yrSafe = sanitizeSample(yr);
       if (!outR) outR = new Float32Array(length);
-      outR[i] = yr;
-      sumSqR += yr * yr;
-      if (yr >= 0.999 || yr <= -0.999) clipCount++;
+      outR[i] = yrSafe;
+      sumSqR += yrSafe * yrSafe;
+      if (yrSafe >= 0.999 || yrSafe <= -0.999) clipCount++;
     }
   }
 
@@ -297,8 +344,12 @@ function isDecorativeParam(p: PluginParameter): boolean {
  * dry signal at defaults, silence, clipping, DC, and whether each parameter
  * audibly changes the sound between its min and max.
  */
-export function measureMusicality(dspFunction: string, parameters: PluginParameter[]): MusicalityMeasurement {
-  const failure = (evidence: string): MusicalityMeasurement => ({
+/** Canonical "measurement never ran" result -- shared by measureMusicality's
+ *  own compile/render-failure paths and by runQualityGate's cheap pre-check
+ *  short-circuit (quickHealthCheck below), so both produce an identically-
+ *  shaped fatal MusicalityMeasurement. */
+function fatalMusicalityMeasurement(evidence: string): MusicalityMeasurement {
+  return {
     ok: false,
     inputRms: 0,
     outputRms: 0,
@@ -313,7 +364,11 @@ export function measureMusicality(dspFunction: string, parameters: PluginParamet
     silentOnSignals: [],
     evidence,
     fatal: true,
-  });
+  };
+}
+
+export function measureMusicality(dspFunction: string, parameters: PluginParameter[]): MusicalityMeasurement {
+  const failure = fatalMusicalityMeasurement;
 
   const dspFunc = compileDspBody(dspFunction);
   if (!dspFunc) return failure("dspFunction does not compile");
@@ -2447,6 +2502,58 @@ function scoreMusicality(m: MusicalityMeasurement, trimmed: boolean, dcBlocked: 
   return Math.max(0, score);
 }
 
+/* ------------------------------------------------------------------ */
+/* Fail-fast pre-check: recognize a broken candidate before paying for  */
+/* the full measurement suite                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * runQualityGate chains a heavy stack of measurements after musicality --
+ * calibration search, functional fitness, an aliasing FFT, true-peak
+ * oversampling, a static code audit, multi-trial CPU timing, and a
+ * multi-render reference-deviation comparison -- none of which change the
+ * verdict for a candidate that is already provably broken. Worse,
+ * measureMusicality ITSELF runs an expensive per-parameter audibility sweep
+ * (every non-decorative parameter, at both its min and max, across all four
+ * bank signals) that a broken candidate pays for too, even though nothing
+ * downstream will ever look at the result.
+ *
+ * This probe renders the EXACT same signal, window, and default settings as
+ * measureMusicality's own primary render, and uses the identical isSilent
+ * ratio threshold -- it is not a new, separately-calibrated check that could
+ * diverge from the full pass, just the same verdict reached before the
+ * expensive sweep after it runs. Returns null when the candidate is healthy
+ * enough to be worth the full suite.
+ */
+export function quickHealthCheck(dspFunction: string, parameters: PluginParameter[]): MusicalityMeasurement | null {
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return fatalMusicalityMeasurement("dspFunction does not compile");
+
+  const defaults = defaultParamsMap(parameters);
+  const probe = renderPass(dspFunc, defaults, SAMPLE_RATE);
+  if (probe.failed) {
+    return fatalMusicalityMeasurement("output produced NaN/Infinity or threw on musical program material at default settings");
+  }
+
+  let inSumSq = 0;
+  for (let i = 0; i < SAMPLE_RATE; i++) {
+    const x = PRIMARY_SIGNAL.at(i);
+    inSumSq += x * x;
+  }
+  const inputRms = Math.sqrt(inSumSq / SAMPLE_RATE);
+  // Same signal, window, and 2% (~34 dB) ratio measureMusicality's own
+  // isSilent check uses below -- not a new threshold to calibrate, the
+  // identical computation performed earlier so the expensive sweep after it
+  // is never reached for a candidate that would fail it anyway.
+  if (probe.rms < inputRms * 0.02) {
+    return fatalMusicalityMeasurement(
+      "output is essentially silent on musical program material at default settings -- the per-parameter audibility sweep and the rest of the measurement suite were skipped as moot"
+    );
+  }
+
+  return null;
+}
+
 /**
  * Run the full gate: measure, deterministically fix (output trim + visual
  * polish), score all four dimensions, and return the improved plugin plus a
@@ -2458,8 +2565,15 @@ export function runQualityGate(
 ): QualityGateResult {
   const notes: string[] = [];
 
+  // --- Fail-fast pre-check: a candidate that doesn't compile, throws/NaNs,
+  //     or is silent at defaults is provably broken from a probe far
+  //     cheaper than the full measurement suite this function chains below
+  //     it (per-parameter audibility sweep, calibration, functional
+  //     fitness, aliasing FFT, true peak, code audit, CPU timing, reference
+  //     deviation) -- see quickHealthCheck and safetyNetTest.ts for the
+  //     measured saving. ---
   // --- Musicality: measure, then fix gain staging deterministically ---
-  let m = measureMusicality(plugin.dspFunction, plugin.parameters);
+  let m = quickHealthCheck(plugin.dspFunction, plugin.parameters) ?? measureMusicality(plugin.dspFunction, plugin.parameters);
   let workingParams = plugin.parameters;
   let workingDsp = plugin.dspFunction;
 

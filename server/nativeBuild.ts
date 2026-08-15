@@ -302,6 +302,7 @@ ${fields}
 function generatePluginProcessorHeader(projectName: string): string {
   return `#pragma once
 #include <JuceHeader.h>
+#include <cmath>
 #include "Parameters.h"
 #include "dsp/ProcessorCore.h"
 
@@ -352,7 +353,72 @@ private:
 `;
 }
 
-function generatePluginProcessorCpp(projectName: string, parameters: NativeParameter[]): string {
+// Safety net emitted verbatim into every generated PluginProcessor.cpp,
+// regardless of whether the DSP core translation succeeded, failed, or fell
+// back to the passthrough placeholder: guarantees every sample written to
+// the host's audio buffer is finite, denormal-free, and bounded. This is the
+// last line of defense against a runaway filter, an unstable feedback path,
+// or a divide-by-zero landing on a bad coefficient inside the (possibly
+// LLM-translated) DSP core -- never a mixing/loudness decision, just a floor
+// that a correctly behaving plugin should never actually hit. Kept as a
+// small file-local free function (not a class method) so no header change is
+// required to wire it in.
+const SANITIZE_SAMPLE_HELPER = `namespace
+{
+    // Safety net: sanitizes a computed DSP output sample immediately before
+    // it is written to the host's audio buffer.
+    static inline float sanitizeSample (float x) noexcept
+    {
+        if (! std::isfinite (x))
+            return 0.0f;
+
+        if (std::abs (x) < 1.0e-30f)
+            return 0.0f; // flush denormals to zero -- avoids FPU stalls on x86
+
+        return juce::jlimit (-4.0f, 4.0f, x);
+    }
+}`;
+
+/**
+ * The processBlock definition, applying `sanitizeSample` to every computed
+ * output sample -- for every channel (mono or stereo; the same guarded
+ * write site handles both, since JUCE hands us N interleaved channel
+ * pointers here) -- immediately at the point it becomes the buffer's output
+ * value. Kept as its own function (rather than inlined into the bigger
+ * template below) so it -- together with SANITIZE_SAMPLE_HELPER -- can be
+ * audited in isolation via cppAudit's "full" context without the unrelated
+ * `new` in createPluginFilter()'s factory function below tripping a
+ * false-positive hot-path finding.
+ */
+function generateProcessBlockFunction(projectName: string, paramReads: string): string {
+  return `void ${projectName}AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    Params params;
+${paramReads}
+
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+    {
+        auto* data = buffer.getWritePointer (channel);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            data[i] = sanitizeSample (mCore.processSample (data[i], params));
+    }
+}`;
+}
+
+interface ProcessorCppResult {
+  /** The full PluginProcessor.cpp source to write to disk. */
+  cpp: string;
+  /** SANITIZE_SAMPLE_HELPER + the processBlock function only -- the exact
+   *  buffer-write site, isolated from the rest of the file so it can be
+   *  audited for the safety-net guard without unrelated code (e.g. the
+   *  factory function's legitimate one-time `new`) causing a false
+   *  positive on the unrelated hot-path-hazard rules. */
+  bufferWriteSite: string;
+}
+
+function generatePluginProcessorCpp(projectName: string, parameters: NativeParameter[]): ProcessorCppResult {
   const paramDefs = parameters
     .map(
       (p) =>
@@ -364,8 +430,13 @@ function generatePluginProcessorCpp(projectName: string, parameters: NativeParam
     .map((p) => `    params.${cppIdentifier(p.id)} = apvts.getRawParameterValue("${p.id}")->load();`)
     .join("\n");
 
-  return `#include "PluginProcessor.h"
+  const processBlockFn = generateProcessBlockFunction(projectName, paramReads);
+  const bufferWriteSite = `${SANITIZE_SAMPLE_HELPER}\n\n${processBlockFn}`;
+
+  const cpp = `#include "PluginProcessor.h"
 #include "PluginEditor.h"
+
+${SANITIZE_SAMPLE_HELPER}
 
 juce::AudioProcessorValueTreeState::ParameterLayout ${projectName}AudioProcessor::createParameterLayout()
 {
@@ -387,20 +458,7 @@ void ${projectName}AudioProcessor::prepareToPlay (double sampleRate, int)
     mCore.reset();
 }
 
-void ${projectName}AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
-{
-    juce::ScopedNoDenormals noDenormals;
-
-    Params params;
-${paramReads}
-
-    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-    {
-        auto* data = buffer.getWritePointer (channel);
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
-            data[i] = mCore.processSample (data[i], params);
-    }
-}
+${processBlockFn}
 
 juce::AudioProcessorEditor* ${projectName}AudioProcessor::createEditor()
 {
@@ -413,6 +471,8 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
     return new ${projectName}AudioProcessor();
 }
 `;
+
+  return { cpp, bufferWriteSite };
 }
 
 function generatePluginEditorHeader(projectName: string): string {
@@ -552,10 +612,29 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
   // original never had. Reviewer-grade findings are written next to the code
   // and surfaced in the scaffold result; a non-safe core is flagged loudly.
   const coreAudit = auditCppRealtimeSafety(translation.methodBody, "core");
-  const cppAuditFindings = coreAudit.findings.map((f) => `[${f.severity}] ${f.message}`);
-  console.log(`[native-build] ${formatCppAudit(coreAudit)}`);
+
+  // Second, independent check: the assembled PluginProcessor.cpp buffer-write
+  // site MUST carry the NaN/Inf/denormal safety-net guard (see
+  // generatePluginProcessorCpp) -- this is always emitted by the template
+  // regardless of whether the DSP translation above succeeded, so this
+  // should never actually fire against real output, but it exists so a
+  // future template regression can't silently ship an unguarded buffer
+  // write to a real DAW.
+  const processorCpp = generatePluginProcessorCpp(projectName, plugin.parameters);
+  const bufferWriteAudit = auditCppRealtimeSafety(processorCpp.bufferWriteSite, "full", { requireSafetyNet: true });
+
+  const cppAuditFindings = [
+    ...coreAudit.findings.map((f) => `[core] [${f.severity}] ${f.message}`),
+    ...bufferWriteAudit.findings.map((f) => `[processBlock] [${f.severity}] ${f.message}`),
+  ];
+  console.log(`[native-build] core: ${formatCppAudit(coreAudit)}`);
+  console.log(`[native-build] processBlock: ${formatCppAudit(bufferWriteAudit)}`);
   if (!coreAudit.realtimeSafe && dspTranslated) {
     const rt = `Translated C++ core is NOT real-time-safe (score ${coreAudit.score}/100): ${coreAudit.findings.filter((f) => f.severity === "critical").map((f) => f.message).join("; ")}`;
+    warning = warning ? `${warning} ${rt}` : rt;
+  }
+  if (!bufferWriteAudit.realtimeSafe) {
+    const rt = `Generated PluginProcessor.cpp is missing the mandatory NaN/Inf/denormal safety-net guard at the buffer write (score ${bufferWriteAudit.score}/100): ${bufferWriteAudit.findings.filter((f) => f.severity === "critical").map((f) => f.message).join("; ")}`;
     warning = warning ? `${warning} ${rt}` : rt;
   }
 
@@ -564,10 +643,10 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
   fs.writeFileSync(path.join(projectDir, "Source", "dsp", "ProcessorCore.h"), generateProcessorCoreHeader(translation));
   fs.writeFileSync(
     path.join(projectDir, "Source", "dsp", "REALTIME_AUDIT.txt"),
-    `${formatCppAudit(coreAudit)}\n\n${cppAuditFindings.length ? cppAuditFindings.join("\n") : "No heap allocation, locks, IO, or logging found in the audio path."}\n`
+    `${formatCppAudit(coreAudit)}\n\n${cppAuditFindings.length ? cppAuditFindings.join("\n") : "No heap allocation, locks, IO, or logging found in the audio path, and the NaN/Inf/denormal safety-net guard is present at the buffer write."}\n`
   );
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.h"), generatePluginProcessorHeader(projectName));
-  fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.cpp"), generatePluginProcessorCpp(projectName, plugin.parameters));
+  fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.cpp"), processorCpp.cpp);
   fs.writeFileSync(path.join(projectDir, "Source", "PluginEditor.h"), generatePluginEditorHeader(projectName));
   fs.writeFileSync(
     path.join(projectDir, "Source", "PluginEditor.cpp"),

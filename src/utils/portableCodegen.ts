@@ -164,16 +164,36 @@ ${params.map((p) => `        const float ${cppIdent(p)}Now = ${cppIdent(p)}Smoot
 
     void processBlock (juce::AudioBuffer<float>& buffer) noexcept
     {
+        juce::ScopedNoDenormals noDenormals;
 ${params.map((p) => `        ${cppIdent(p)}Smooth.setTargetValue(${cppIdent(p)});`).join("\n")}
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         {
             auto* data = buffer.getWritePointer (ch);
             for (int i = 0; i < buffer.getNumSamples(); ++i)
-                data[i] = processSample (data[i]);
+                data[i] = sanitizeSample (processSample (data[i]));
         }
     }
 
 private:
+    // Safety net: guarantees every sample written to the host's audio buffer
+    // is finite, denormal-free, and bounded. This is the last line of
+    // defense against a runaway filter, an unstable feedback path, or a
+    // divide-by-zero landing on a bad coefficient in the ported DSP above --
+    // never a mixing/loudness decision, just a floor that a correctly
+    // behaving plugin should never actually hit. Applied unconditionally to
+    // every output sample, for every channel, right before it reaches the
+    // buffer.
+    static inline float sanitizeSample (float x) noexcept
+    {
+        if (! std::isfinite (x))
+            return 0.0f;
+
+        if (std::abs (x) < 1.0e-30f)
+            return 0.0f; // flush denormals to zero -- avoids FPU stalls on x86
+
+        return juce::jlimit (-4.0f, 4.0f, x);
+    }
+
     double sampleRate = 44100.0;
     float z1 = 0.0f, z2 = 0.0f;
 ${smoothDecls}

@@ -63,13 +63,37 @@ function stripCpp(src: string): string {
     .replace(/'(\\.|[^'\\])*'/g, "''");
 }
 
+/** A NaN/Inf guard (isnan/isinf, or the !isfinite negation). */
+const FINITE_GUARD_PATTERN = /std::isfinite\s*\(|std::isnan\s*\(|std::isinf\s*\(|\bisfinite\s*\(|\bisnan\s*\(|\bisinf\s*\(/;
+/** A hard-ceiling clamp/clip — the last-resort bound on the sanitized sample. */
+const HARD_CEILING_PATTERN = /\bjlimit\s*\(|std::clamp\s*\(|\bjmin\s*\([^)]*\bjmax\s*\(|\bjmax\s*\([^)]*\bjmin\s*\(/;
+
+export interface CppAuditOptions {
+  /**
+   * When true (opt-in — existing callers are unaffected), additionally
+   * require the NaN/Inf/denormal safety-net guard (see portableCodegen.ts /
+   * nativeBuild.ts's `sanitizeSample`) to be present anywhere a processBlock
+   * writes to the audio buffer. Only meaningful with context "full". A
+   * missing guard is "critical": an unstable filter, feedback delay, or
+   * divide-by-zero can otherwise write NaN/Inf/full-scale noise straight
+   * into the host's audio graph.
+   */
+  requireSafetyNet?: boolean;
+}
+
 /**
  * Audit generated JUCE C++ for real-time-safety violations.
  * @param cpp     the C++ source (a processSample body, or a whole file)
  * @param context "core" = the per-sample DSP body; "full" = a complete file
  *                (adds the ScopedNoDenormals check on processBlock).
+ * @param options see CppAuditOptions. Defaults preserve prior behavior
+ *                exactly, so existing callers are unaffected.
  */
-export function auditCppRealtimeSafety(cpp: string, context: "core" | "full" = "core"): CppAuditReport {
+export function auditCppRealtimeSafety(
+  cpp: string,
+  context: "core" | "full" = "core",
+  options: CppAuditOptions = {}
+): CppAuditReport {
   const code = stripCpp(cpp);
   const findings: CppFinding[] = [];
 
@@ -80,6 +104,18 @@ export function auditCppRealtimeSafety(cpp: string, context: "core" | "full" = "
   if (context === "full" && /processBlock\s*\(/.test(code)) {
     if (!/ScopedNoDenormals/.test(code)) {
       findings.push({ severity: "warning", message: "processBlock does not declare juce::ScopedNoDenormals — recursive filters can drop into denormal arithmetic and spike CPU; add `juce::ScopedNoDenormals noDenormals;` at the top" });
+    }
+
+    if (options.requireSafetyNet) {
+      const hasFiniteGuard = FINITE_GUARD_PATTERN.test(code);
+      const hasHardCeiling = HARD_CEILING_PATTERN.test(code);
+      if (!hasFiniteGuard || !hasHardCeiling) {
+        findings.push({
+          severity: "critical",
+          message:
+            "processBlock writes samples to the audio buffer without a NaN/Inf/denormal safety-net guard — an unstable filter, feedback delay, or divide-by-zero can send full-scale noise straight into the host's audio graph; sanitize every sample immediately before the buffer write (std::isfinite check -> 0.0f, flush denormals to zero, hard-ceiling clip e.g. juce::jlimit(-4.0f, 4.0f, x))",
+        });
+      }
     }
   }
 

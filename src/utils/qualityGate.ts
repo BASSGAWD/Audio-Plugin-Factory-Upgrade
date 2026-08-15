@@ -941,6 +941,42 @@ const HARMONIC_DEFINED_FAMILIES = new Set<PluginFamily>(["distortion", "saturato
  * Purely informational -- feeds refinementScore(), never the four headline
  * dimensions.
  */
+// Golden recipes are static -- their reference renders never change across
+// calls. measureReferenceDeviation runs once per candidate per gate pass
+// (now on every structural-search iteration too), so re-rendering the SAME
+// golden recipe's spectral + envelope probes from scratch every single time
+// was pure waste. Cached per family, populated on first use.
+const goldenReferenceRenderCache = new Map<
+  PluginFamily,
+  {
+    refFunc: NonNullable<ReturnType<typeof compileDspBody>>;
+    refParams: ReturnType<typeof defaultParamsMap>;
+    refSpec: ReturnType<typeof renderPass>;
+    refEnv: ReturnType<typeof renderPass>;
+  } | null
+>();
+
+function getGoldenReferenceRenders(family: PluginFamily) {
+  const cached = goldenReferenceRenderCache.get(family);
+  if (cached !== undefined) return cached;
+  const golden = goldenRecipeFor(family);
+  const refFunc = golden ? compileDspBody(golden.body) : null;
+  let result: {
+    refFunc: NonNullable<typeof refFunc>;
+    refParams: ReturnType<typeof defaultParamsMap>;
+    refSpec: ReturnType<typeof renderPass>;
+    refEnv: ReturnType<typeof renderPass>;
+  } | null = null;
+  if (golden && refFunc) {
+    const refParams = defaultParamsMap(golden.parameters as PluginParameter[]);
+    const refSpec = renderPass(refFunc, refParams, REF_DEVIATION_WINDOW, noiseProbeAt);
+    const refEnv = renderPass(refFunc, refParams, TAIL_TOTAL, tailSignalAt);
+    if (!refSpec.failed && !refEnv.failed) result = { refFunc, refParams, refSpec, refEnv };
+  }
+  goldenReferenceRenderCache.set(family, result);
+  return result;
+}
+
 export function measureReferenceDeviation(
   dspFunction: string,
   parameters: PluginParameter[],
@@ -950,16 +986,14 @@ export function measureReferenceDeviation(
   if (!golden) return null;
   const dspFunc = compileDspBody(dspFunction);
   if (!dspFunc) return null;
-  const refFunc = compileDspBody(golden.body);
-  if (!refFunc) return null; // golden recipes always compile; defensive only
-  const refParams = defaultParamsMap(golden.parameters as PluginParameter[]);
+  const cachedRef = getGoldenReferenceRenders(family as PluginFamily);
+  if (!cachedRef) return null; // golden recipes always compile/render; defensive only
+  const { refFunc, refParams, refSpec, refEnv } = cachedRef;
   const candParams = defaultParamsMap(parameters);
 
   const candSpec = renderPass(dspFunc, candParams, REF_DEVIATION_WINDOW, noiseProbeAt);
-  const refSpec = renderPass(refFunc, refParams, REF_DEVIATION_WINDOW, noiseProbeAt);
   const candEnv = renderPass(dspFunc, candParams, TAIL_TOTAL, tailSignalAt);
-  const refEnv = renderPass(refFunc, refParams, TAIL_TOTAL, tailSignalAt);
-  if (candSpec.failed || refSpec.failed || candEnv.failed || refEnv.failed) return null;
+  if (candSpec.failed || candEnv.failed) return null;
 
   let candEnergy = 0;
   for (let i = 0; i < candSpec.samples.length; i++) candEnergy += candSpec.samples[i] * candSpec.samples[i];

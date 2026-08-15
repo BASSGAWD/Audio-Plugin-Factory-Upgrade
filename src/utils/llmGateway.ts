@@ -34,10 +34,19 @@ export const STORAGE_KEY_LLM_CONFIG = "orange_juce_llm_config";
 // /api/proxy relay, can try IPv6 (::1) first when resolving "localhost" on Windows
 // and fail with a generic "fetch failed" if the local server only listens on IPv4.
 // 127.0.0.1 sidesteps DNS resolution entirely and works from both the browser and Node.
+// "orangey" is this project's own fine-tune (Qwen3 8B + LoRA, trained in
+// local-model/train/) -- see local-model/README.md for the full training
+// story. It measurably beats the generic qwen2.5-coder:14b default on the
+// two things that matter most for this app: real-time-DSP safety (init
+// guards, soft-limited output, no per-sample allocation -- averaged ~76/100
+// across a factory-prompt eval vs ~65/100) and does so in a smaller, faster
+// model. It has NOT been shown to beat a general-purpose model on open-ended
+// reasoning outside the plugin-JSON contract, so if a future evaluation
+// needs that breadth, that's the dimension to watch, not this one.
 export const DEFAULT_LLM_CONFIG: LLMConfig = {
   provider: "ollama",
   ollamaUrl: "http://127.0.0.1:11434",
-  ollamaModel: "qwen2.5-coder:14b",
+  ollamaModel: "orangey",
   lmStudioUrl: "http://127.0.0.1:1234",
   lmStudioModel: "qwen/qwen3-14b",
   lowVramMode: false,

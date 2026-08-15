@@ -31,6 +31,16 @@ if not exist "node_modules\" (
   if errorlevel 1 goto :failed
 )
 
+REM --- 2b. Local model (orangey) -- best-effort, never blocks the server ---
+REM The app's default local model isn't in this repo (local-model/ is
+REM gitignored on purpose -- see CLAUDE.md), so a fresh clone needs it
+REM pulled down separately. Failure here is non-fatal: the app falls back
+REM to whatever else Ollama/LM Studio has via autoDetectProvider.
+where ollama >nul 2>&1
+if not errorlevel 1 (
+  call node scripts\setup-orangey-model.mjs
+)
+
 REM --- 3. Open the browser once the server actually answers ---
 start "orangejuce-open" /min powershell -NoProfile -Command "$u='http://localhost:3000'; for($i=0;$i -lt 60;$i++){ try{ if((Invoke-WebRequest -Uri ($u+'/api/health') -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200){ Start-Process $u; exit } }catch{}; Start-Sleep -Milliseconds 500 }"
 

@@ -21,6 +21,17 @@ import {
 
 export type EngineId = "offline" | LLMProvider;
 
+/**
+ * Raw Ollama/LM Studio model tags are internal identifiers, not names meant
+ * for a user to read ("orangey", "qwen2.5-coder:14b"). This app's own
+ * fine-tune deserves to be visible as a real product name, not a backend
+ * string, so it doesn't just look like a silent swap in Settings -- see
+ * local-model/README.md for what "orangey" actually is.
+ */
+function prettyModelName(rawModel: string): string {
+  return rawModel === "orangey" ? "Orangey 1.0" : rawModel;
+}
+
 interface LocalProbe {
   checking: boolean;
   ok: boolean;
@@ -159,7 +170,7 @@ export default function ModelPicker({
     if (engine === "fusion") {
       if (fusionChecking) return "Checking both engines…";
       if (fusionReady)
-        return `Recognized: Ollama (${cfg.ollamaModel}) + LM Studio (${cfg.lmStudioModel}) can work together — every request races both (fastest valid answer wins), and perfecting-loop reworks alternate between the models with the quality gate as judge.`;
+        return `Recognized: Ollama (${prettyModelName(cfg.ollamaModel)}) + LM Studio (${cfg.lmStudioModel}) can work together — every request races both (fastest valid answer wins), and perfecting-loop reworks alternate between the models with the quality gate as judge.`;
       const missing: string[] = [];
       if (!(probes.ollama.ok && probes.ollama.models.length > 0)) missing.push("Ollama needs a running server with a model pulled");
       if (!(probes.lm_studio.ok && probes.lm_studio.models.length > 0)) missing.push("LM Studio needs its server started with a chat model loaded");
@@ -186,7 +197,7 @@ export default function ModelPicker({
       ? "Gemini Cloud"
       : activeEngine === "fusion"
       ? "Fusion · Ollama + LM Studio"
-      : `${activeEngine === "ollama" ? "Ollama" : "LM Studio"} · ${currentModelName}`;
+      : `${activeEngine === "ollama" ? "Ollama" : "LM Studio"} · ${prettyModelName(currentModelName)}`;
 
   const triggerDot = dotFor(activeEngine);
 
@@ -264,12 +275,12 @@ export default function ModelPicker({
           >
             {!probe.models.includes(value) && (
               <option value="" disabled>
-                {value} (not loaded)
+                {prettyModelName(value)} (not loaded)
               </option>
             )}
             {probe.models.map((m) => (
               <option key={m} value={m}>
-                {m}
+                {prettyModelName(m)}
               </option>
             ))}
           </select>

@@ -52,6 +52,8 @@ const TEST_FILES = [
   "eqCurveTest.ts",
   "featureDepthTest.ts",
   "antiAliasingTest.ts",
+  "cppSafetyNetTest.ts",
+  "safetyNetTest.ts",
 ];
 
 let failed = 0;

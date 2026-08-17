@@ -156,6 +156,44 @@ function gatedBuild(prompt: string, dspOverride?: string): { plugin: AudioPlugin
   const brokenIdx = measureCharacterIndex("let a = ;", []);
   check("character index: uncompilable code is zero, not a crash", brokenIdx === 0);
 
+  /* 5b. Regression: characterIndex used to be PURELY a spectral-distribution
+   *      L1 distance -- structurally blind to delay/reverb/echo-type
+   *      character. A clean delay repeats the SAME frequency content later;
+   *      its overall spectral shape barely moves even though the effect is
+   *      obviously, audibly transformative. A real generated delay measured
+   *      0.0011 by the old code -- indistinguishable from the passthrough's
+   *      exact 0 above.
+   *
+   *      Isolate the claim cleanly: a PURE time-shift delay (no filtering,
+   *      no feedback, no saturation -- literally just a fixed read offset
+   *      into a ring buffer) has by construction IDENTICAL frequency-magnitude
+   *      content to its input; a pure delay only shifts phase. So the OLD
+   *      spectral-only measurement's verdict on this exact plugin was
+   *      necessarily at or near zero -- not "low", mathematically minimal --
+   *      while it is unambiguously, audibly a different signal (the delayed
+   *      copy lands where the input was silent). This isn't a strawman stand-in
+   *      for "delay in general" -- it's the specific case the spectral term
+   *      cannot see ANY of, by the nature of what a Fourier magnitude spectrum
+   *      is blind to. */
+  const pureDelayIdx = measureCharacterIndex(
+    "if (!state.init) { state.buf = new Float32Array(20000); state.ptr = 0; state.init = true; } state.buf[state.ptr] = inputSample; let out = state.buf[(state.ptr + 8000) % 20000]; state.ptr = (state.ptr + 1) % 20000; return out;",
+    []
+  );
+  check(
+    "character index: a pure time-shift delay (zero spectral change by construction) is no longer scored near-zero",
+    pureDelayIdx > 0.15,
+    `pureDelayIdx=${pureDelayIdx}`
+  );
+
+  // Sanity anchor: families that WERE already correctly scored (spectral
+  // reshaping is real and dominant) must not regress from adding the new
+  // temporal axis -- max(spectral, temporal) must not silently shrink an
+  // already-good spectral score.
+  check(
+    "character index: an already spectrally-characterful signal is unaffected by the new temporal axis",
+    Math.abs(measureCharacterIndex("return Math.tanh(inputSample * 40);", [{ id: "x", name: "X", min: 0, max: 1, defaultValue: 0, value: 0, unit: "" }]) - heavyDistortIdx) < 1e-9
+  );
+
   // Confirms the tie-breaker is real but bounded: two candidates with
   // identical gate scores but different characterIndex must rank by it,
   // and the gap it can create is small relative to the correctness terms.

@@ -832,6 +832,33 @@ function characterOnSignal(dspFunc: (i: number, p: any, s: any) => number, defau
   return Math.max(0, Math.min(1, l1 / 2));
 }
 
+/**
+ * TEMPORAL axis of character: does material appear in the OUTPUT where the
+ * INPUT went silent (an echo, a reverb tail)? characterOnSignal's spectral
+ * L1 is structurally blind to this -- a clean delay repeats the SAME
+ * frequency content later, so a static spectral-distribution snapshot barely
+ * moves even though the effect is obviously, audibly transformative. Reuses
+ * the input-then-silence tail probe (tailSignalAt/TAIL_TOTAL) and
+ * envelopeShape(), both already proven for reference-deviation's own
+ * temporal axis (reverb tail persistence, dynamics envelope comparison).
+ */
+function temporalCharacterOnTail(dspFunc: (i: number, p: any, s: any, r?: number) => number, defaults: Record<string, number>): number {
+  const dry = new Float32Array(TAIL_TOTAL);
+  for (let i = 0; i < TAIL_TOTAL; i++) dry[i] = tailSignalAt(i);
+  const wet = renderPass(dspFunc, defaults, TAIL_TOTAL, tailSignalAt);
+  if (wet.failed) return 0;
+
+  let wetEnergy = 0;
+  for (let i = 0; i < wet.samples.length; i++) wetEnergy += wet.samples[i] * wet.samples[i];
+  if (wetEnergy <= 1e-9) return 0; // silent output: nothing measurable, not "maximally different"
+
+  const dryShape = envelopeShape(dry);
+  const wetShape = envelopeShape(wet.samples);
+  let l1 = 0;
+  for (let i = 0; i < dryShape.length; i++) l1 += Math.abs(dryShape[i] - wetShape[i]);
+  return Math.max(0, Math.min(1, l1 / 2));
+}
+
 export function measureCharacterIndex(dspFunction: string, parameters: PluginParameter[]): number {
   const dspFunc = compileDspBody(dspFunction);
   if (!dspFunc) return 0;
@@ -849,7 +876,15 @@ export function measureCharacterIndex(dspFunction: string, parameters: PluginPar
       count++;
     }
   }
-  return count === 0 ? 0 : sum / count;
+  const spectralTerm = count === 0 ? 0 : sum / count;
+
+  // Combined via MAX, not average: a plugin only needs to be characterful on
+  // ONE axis to earn full credit -- a filter/distortion via spectral shape, a
+  // delay/reverb via temporal structure. Averaging would unfairly drag down
+  // a plugin that legitimately excels at just one (a great delay's spectral
+  // term stays near zero by nature; that must not halve its character score).
+  const temporalTerm = temporalCharacterOnTail(dspFunc, defaults);
+  return Math.max(spectralTerm, temporalTerm);
 }
 
 /* ------------------------------------------------------------------ */

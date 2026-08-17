@@ -1003,20 +1003,48 @@ function levelGainDelta(dspFunc: (i: number, p: any, s: any, r?: number) => numb
   return quiet - loud;
 }
 
+// Character-only probe for the dynamics axis: deliberately NOT gainAtLevel
+// (that stays exactly as-is for fitnessDynamics/referenceDeviation, which
+// have their own precision requirements and are called far less often).
+// Unlike a delay/reverb tail -- inherently hundreds of ms because that is
+// how long an audible echo or decay actually takes, and NOT safe to shrink
+// (a realistic 350ms default delay time sits almost exactly at this
+// project's tail-probe boundary; shrinking it would break the temporal-axis
+// fix above for realistic delay times) -- a compressor's envelope settles
+// in tens of ms by construction: this project's own recipes cap attack at
+// 30ms. A much shorter window is genuinely safe here, PROVIDED the probe
+// itself is steady rather than periodic -- arpAt changes notes every ~286ms,
+// so a short window risks landing mid-transition; sustainAt is a single
+// continuous tone with no bar changes to land badly on.
+const CHARACTER_LEVEL_WINDOW = 6615; // 150ms: 5x the slowest attack this project's recipes allow
+function quickGainAtLevel(dspFunc: (i: number, p: any, s: any, r?: number) => number, params: Record<string, number>, scale: number): number | null {
+  const sig = (i: number) => sustainAt(i) * scale;
+  let inSq = 0;
+  for (let i = 0; i < CHARACTER_LEVEL_WINDOW; i++) inSq += sig(i) * sig(i);
+  const inRms = Math.sqrt(inSq / CHARACTER_LEVEL_WINDOW);
+  if (inRms < 1e-6) return null;
+  const out = renderPass(dspFunc, params, CHARACTER_LEVEL_WINDOW, sig);
+  if (out.failed || out.rms < 1e-7) return null;
+  return 20 * Math.log10(out.rms / inRms);
+}
+
 /**
  * DYNAMICS axis of character: does louder material get held down relative
  * to quieter material? Neither the spectral nor temporal axis above can see
  * this -- both compare a STATIONARY probe's shape, and a compressor vs. a
  * passthrough render near-identically when the input level never varies
- * (the exact reason fitnessDynamics needs the same two-level trick). Reuses
- * levelGainDelta directly and the SAME 8dB reference point fitnessDynamics
- * already uses for "definitively working compressor" -- one calibration
- * constant for one underlying signal, not two independently-guessed numbers
- * for the same thing.
+ * (the exact reason fitnessDynamics needs the same two-level trick). Same
+ * 8dB reference point fitnessDynamics already uses for "definitively
+ * working compressor" -- one calibration constant for one underlying
+ * signal, not two independently-guessed numbers for the same thing; only
+ * the PROBE differs (quickGainAtLevel, ~1/7th the render cost), not the
+ * calibration.
  */
 function dynamicsCharacterOnLevel(dspFunc: (i: number, p: any, s: any, r?: number) => number, defaults: Record<string, number>): number {
-  const delta = levelGainDelta(dspFunc, defaults);
-  if (delta === null) return 0; // not comparable on this axis, not "no character"
+  const quiet = quickGainAtLevel(dspFunc, defaults, 0.1);
+  const loud = quickGainAtLevel(dspFunc, defaults, 1.6);
+  if (quiet === null || loud === null) return 0; // not comparable on this axis, not "no character"
+  const delta = quiet - loud;
   return Math.max(0, Math.min(1, delta / 8));
 }
 

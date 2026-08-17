@@ -350,7 +350,18 @@ export async function runResearch(
   const resolved: ResearchSources =
     sources && "provider" in (sources as LLMConfig) ? { llmConfig: sources as LLMConfig } : ((sources as ResearchSources) ?? {});
 
-  const existing = readResearchQueue().find((i) => i.concept === concept && i.status === "pending");
+  // Dedup on the RESOLVED corpus concept (e.g. "parallel-compression"), not
+  // the raw caller string (e.g. "parallel compression") -- that's also what
+  // gets stored on the queued item a few lines down (`primary?.concept ??
+  // concept`), so matching on anything else means the exact same request,
+  // reworded with different spacing/hyphenation, silently queues a second
+  // duplicate instead of returning the pending one. This previously went
+  // unnoticed because every prompt this pipeline had been exercised with
+  // happened to already equal its own corpus's canonical concept string
+  // (raw input === resolved concept is not something callers should have to
+  // guarantee).
+  const resolvedConcept = corpusEntriesFor(concept)[0]?.concept ?? concept;
+  const existing = readResearchQueue().find((i) => i.concept === resolvedConcept && i.status === "pending");
   if (existing) return existing;
 
   const [modelClaims, webClaims, references] = await Promise.all([

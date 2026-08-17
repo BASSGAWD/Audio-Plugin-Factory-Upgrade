@@ -125,7 +125,7 @@ return Math.tanh(inputSample * (1 - mix) + echo * mix);`,
   {
     id: "modulation",
     title: "Chorus (LFO-modulated fractional delay with linear interpolation)",
-    match: /chorus|flang|phaser|vibrato|tremolo|modulat|wobble|ensemble|leslie|rotary/i,
+    match: /chorus|flang|vibrato|modulat|wobble|ensemble|leslie|rotary/i,
     parameters: [
       { id: "rate", name: "Rate", min: 0.05, max: 8, defaultValue: 0.8, unit: "Hz" },
       { id: "depth", name: "Depth", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
@@ -151,6 +151,86 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
       "Fractional delay reads MUST interpolate (linear at minimum) or the modulation crackles.",
       "Advance the LFO phase per sample and wrap it; recomputing from a global time float loses precision over minutes.",
       "Keep the modulated delay center offset larger than the modulation depth so the read never crosses the write head.",
+    ],
+  },
+  {
+    // Tremolo was previously routed to the chorus recipe above by a shared
+    // "modulation" catch-all regex -- structurally wrong. A chorus wobbles
+    // PITCH by modulating a delay tap; a tremolo pumps LOUDNESS. Nothing
+    // about a delay line belongs here.
+    id: "tremolo",
+    title: "Tremolo (LFO-modulated amplitude)",
+    match: /tremolo|\btrem\b/i,
+    parameters: [
+      { id: "rate", name: "Rate", min: 0.5, max: 12, defaultValue: 5, unit: "Hz" },
+      { id: "depth", name: "Depth", min: 0, max: 1, defaultValue: 0.6, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.ph = 0; state.init = true; }
+let rate = params.rate !== undefined ? params.rate : 5;
+let depth = params.depth !== undefined ? params.depth : 0.6;
+let mix = params.mix !== undefined ? params.mix : 1;
+state.ph += 2 * Math.PI * rate / 44100;
+if (state.ph > 2 * Math.PI) state.ph -= 2 * Math.PI;
+// Sine LFO mapped to 0..1, then to a gain multiplier that dips by exactly
+// Depth at the trough and sits at unity at the peak -- Depth=0 is silent
+// bypass, Depth=1 chops all the way to full mute on each cycle.
+let lfo = (Math.sin(state.ph) + 1) / 2;
+let gain = 1 - depth * (1 - lfo);
+let wet = inputSample * gain;
+return inputSample * (1 - mix) + wet * mix;`,
+    pitfalls: [
+      "This modulates GAIN, not delay time -- do not route it through a delay line, that produces chorus/vibrato instead of tremolo.",
+      "Map the LFO to a gain multiplier, never to a dB offset applied additively -- an additive dB sweep does not bottom out predictably at Depth=1.",
+      "Mix defaults near 1.0: tremolo is conventionally the whole sound, not a subtle blend the way chorus/delay are.",
+    ],
+  },
+  {
+    // Phaser was previously routed to the same chorus/delay-line recipe --
+    // also structurally wrong. A phaser sweeps NOTCHES through the spectrum
+    // via cascaded all-pass stages; it has no delay buffer at all.
+    id: "phaser",
+    title: "Phaser (cascaded first-order all-pass stages, LFO-swept)",
+    match: /phaser|phase.?shift/i,
+    parameters: [
+      { id: "rate", name: "Rate", min: 0.05, max: 4, defaultValue: 0.5, unit: "Hz" },
+      { id: "depth", name: "Depth", min: 0, max: 1, defaultValue: 0.7, unit: "ratio" },
+      { id: "feedback", name: "Feedback", min: 0, max: 0.9, defaultValue: 0.3, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.ph = 0; state.ap1 = 0; state.ap2 = 0; state.ap3 = 0; state.ap4 = 0; state.fbOut = 0; state.init = true; }
+let rate = params.rate !== undefined ? params.rate : 0.5;
+let depth = params.depth !== undefined ? params.depth : 0.7;
+let feedback = Math.min(0.9, params.feedback !== undefined ? params.feedback : 0.3);
+let mix = params.mix !== undefined ? params.mix : 0.5;
+state.ph += 2 * Math.PI * rate / 44100;
+if (state.ph > 2 * Math.PI) state.ph -= 2 * Math.PI;
+// Sweep the all-pass break frequency; each stage's own phase response then
+// combines with the dry path to fold into a moving notch, not a fixed one.
+let freq = 300 + (Math.sin(state.ph) * 0.5 + 0.5) * 2000 * depth;
+let tanArg = Math.tan(Math.PI * Math.min(0.49, freq / 44100));
+let a = (tanArg - 1) / (tanArg + 1);
+// 4-stage cascade, transposed-direct-form-2 (one state var per stage).
+// Feedback taps the TRUE OUTPUT SAMPLE from one sample ago (state.fbOut,
+// set explicitly below) back into the input, deepening the notches into a
+// resonant "jet-plane" sweep. Deliberately NOT a stage's own internal TDF2
+// state variable (state.ap4) -- that carries different, less-bounded
+// dynamics than the actual delayed output and can diverge at high feedback
+// even though every individual all-pass stage alone is unity-gain and
+// stable. tanh soft-clips the fed-back signal as a second, physically-
+// reasonable safeguard (real analog phaser feedback paths saturate too),
+// not a substitute for feeding back the right signal in the first place.
+let x = inputSample + Math.tanh(state.fbOut * feedback);
+let y1 = a * x + state.ap1; state.ap1 = x - a * y1;
+let y2 = a * y1 + state.ap2; state.ap2 = y1 - a * y2;
+let y3 = a * y2 + state.ap3; state.ap3 = y2 - a * y3;
+let y4 = a * y3 + state.ap4; state.ap4 = y3 - a * y4;
+state.fbOut = y4;
+return inputSample * (1 - mix) + y4 * mix;`,
+    pitfalls: [
+      "This sweeps all-pass filters, not a delay line -- an all-pass shifts PHASE per frequency without changing magnitude on its own; the notches only appear once the shifted (wet) and unshifted (dry) paths are SUMMED, so mix must never be forced to 0 or 1.",
+      "Clamp the all-pass coefficient's tan() argument below pi/2 (frequency below Nyquist) or it diverges to +-Infinity.",
+      "Feed back the actual delayed OUTPUT sample (a dedicated state var set explicitly, e.g. state.fbOut = y4), never a stage's own internal TDF2 state variable -- that state carries different dynamics than the true output and can diverge at high feedback even though each all-pass stage alone is unity-gain and stable.",
     ],
   },
   {
@@ -719,7 +799,7 @@ const FAMILY_TO_RECIPES: Partial<Record<PluginFamily, string[]>> = {
   multiband_saturator: ["filter", "distortion"],
   delay: ["delay"],
   reverb: ["reverb"],
-  modulation: ["modulation"],
+  modulation: ["modulation", "tremolo", "phaser"],
   dynamics: ["dynamics"],
   // Amp sims are fundamentally gain-staged preamp drive + tone shaping --
   // the distortion recipe's structure is the right reference; the mandatory

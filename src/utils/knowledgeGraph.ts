@@ -51,6 +51,8 @@ const RECIPE_CONCEPTS: Record<string, { concept: string; related: string[] }> = 
   reverb: { concept: "reverb", related: ["comb-filter", "allpass", "damping", "early-reflections", "feedback-delay-network"] },
   delay: { concept: "delay", related: ["feedback-loop", "damping", "dry-wet-mix", "ring-buffer"] },
   modulation: { concept: "chorus", related: ["lfo", "fractional-delay", "interpolation", "vibrato"] },
+  tremolo: { concept: "tremolo", related: ["lfo", "amplitude-modulation", "gain-modulation"] },
+  phaser: { concept: "phaser", related: ["lfo", "allpass", "notch-filter", "phase-cancellation", "feedback-loop"] },
   dynamics: { concept: "compressor", related: ["envelope-detector", "gain-computer", "attack-release", "makeup-gain", "threshold", "ratio"] },
   eq: { concept: "equalizer", related: ["crossover", "band-splitting", "shelving", "parametric-mid"] },
   filter: { concept: "filter", related: ["state-variable-filter", "resonance", "cutoff-smoothing"] },

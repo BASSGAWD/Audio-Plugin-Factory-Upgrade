@@ -9,6 +9,7 @@
  *  - the report renders every section
  */
 import { runKnowledgeAudit, formatKnowledgeAudit, CURRICULUM, BENCHMARKS } from "../src/utils/knowledgeAudit";
+import { DSP_RECIPES } from "../src/utils/dspRecipes";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -19,7 +20,9 @@ function check(label: string, ok: boolean, detail = "") {
 const audit = runKnowledgeAudit();
 
 /* ---- inventory reflects the real banks ---- */
-check("inventory: 10 recipes", audit.inventory.recipes === 10, `${audit.inventory.recipes}`);
+// Was hardcoded to 10 -- stale as soon as the recipe bank grows (broke the
+// instant tremolo/phaser shipped, taking DSP_RECIPES from 10 to 12).
+check(`inventory: ${DSP_RECIPES.length} recipes`, audit.inventory.recipes === DSP_RECIPES.length, `${audit.inventory.recipes}`);
 check("inventory: 10 primitives", audit.inventory.primitives === 10, `${audit.inventory.primitives}`);
 check("inventory: >= 12 topologies", audit.inventory.topologies >= 12, `${audit.inventory.topologies}`);
 

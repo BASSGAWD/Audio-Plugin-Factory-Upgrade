@@ -18,6 +18,7 @@ import { runQualityGate } from "../src/utils/qualityGate";
 import { refinementScore, NEAR_TIE_MARGIN } from "../src/utils/refinementLoop";
 import { classifyPluginIntent, familyToCategory } from "../src/utils/pluginSpec";
 import { DSP_RECIPES } from "../src/utils/dspRecipes";
+import { DSP_PRIMITIVES } from "../src/utils/dspPrimitives";
 import { AudioPlugin } from "../src/types";
 
 let failures = 0;
@@ -155,7 +156,12 @@ buildOfflinePlugin("an underwater dream machine");
 check("well-served novel prompt is NOT a gap", !readPromptGaps().some((g) => g.prompt.includes("underwater")));
 
 /* ---- graph sanity ---- */
-check("graph covers every bank module", KNOWLEDGE_GRAPH.length === 10 + 10 + DSP_TOPOLOGIES.length, `${KNOWLEDGE_GRAPH.length} nodes`);
+// Was a hardcoded "10 + 10 + DSP_TOPOLOGIES.length" -- stale the moment the
+// recipe or primitive bank grows (broke the instant this session's tremolo
+// and phaser recipes shipped, taking DSP_RECIPES from 12 to 14). Derived
+// from the actual bank sizes so it can never silently drift again.
+const expectedGraphNodes = DSP_RECIPES.length + DSP_PRIMITIVES.length + DSP_TOPOLOGIES.length;
+check("graph covers every bank module", KNOWLEDGE_GRAPH.length === expectedGraphNodes, `${KNOWLEDGE_GRAPH.length} nodes (expected ${expectedGraphNodes} = ${DSP_RECIPES.length} recipes + ${DSP_PRIMITIVES.length} primitives + ${DSP_TOPOLOGIES.length} topologies)`);
 check("all graph nodes are tier-1 verified", KNOWLEDGE_GRAPH.every((n) => n.trust === 1));
 
 console.log(failures === 0 ? "\nTOPOLOGY/ENGINEERING-BRAIN: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);

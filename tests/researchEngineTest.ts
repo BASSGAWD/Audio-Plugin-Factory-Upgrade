@@ -55,32 +55,43 @@ const mem = new Map<string, string>();
   }
 
   /* ---- planner ---- */
-  const plan = planResearch("phaser");
+  const plan = planResearch("parallel compression");
   check("plan asks the engineering questions", plan.questions.length >= 3 && plan.acceptance.some((a) => /human approval/i.test(a)));
 
-  /* ---- research a real gap: phaser ---- */
+  // "phaser" used to be this test's gap-example -- it stopped being a gap the
+  // moment a real, gate-verified phaser recipe shipped (dspRecipes.ts), which
+  // is a GOOD outcome, not a break, but it also broke a SECOND assumption
+  // this test relied on: the "builder uses the approved researched module"
+  // check below fingerprints the researched build's own DSP body, and my new
+  // phaser recipe's detectRecipe match now pre-empts the research pathway
+  // for phaser-worded prompts entirely, so the SAME word can no longer
+  // exercise "build from an approved-but-not-built-in module" at all.
+  // "parallel-compression" is a genuine, still-pending corpus entry
+  // (researchCorpus.ts) with no matching recipe/primitive/topology -- swap
+  // to a different still-pending corpus concept if this collides too.
+  /* ---- research a real gap: parallel compression ---- */
   const before = knownConcepts();
-  check("phaser is a gap before research", !before.includes("phaser"));
+  check("parallel-compression is a gap before research", !before.includes("parallel-compression"));
 
-  const phaser = await runResearch("phaser");
-  check("phaser research yields cited claims", phaser.claims.length >= 2 && phaser.claims.every((c) => c.citation.authority > 0));
-  check("literature outranks lower tiers (sorted by authority)", phaser.claims[0].citation.authority >= phaser.claims[phaser.claims.length - 1].citation.authority);
-  check("phaser module was gate-verified in the pipeline", phaser.proposedModule?.verification.passes === true, `min=${phaser.proposedModule?.verification.minScore}`);
-  check("phaser is approvable", isApprovable(phaser));
-  check("pending research does NOT extend coverage", !knownConcepts().includes("phaser"));
-  check("pending research is NOT buildable", findApprovedModuleForPrompt("a swirling phaser") === null);
+  const parallelComp = await runResearch("parallel compression");
+  check("parallel-compression research yields cited claims", parallelComp.claims.length >= 2 && parallelComp.claims.every((c) => c.citation.authority > 0));
+  check("literature outranks lower tiers (sorted by authority)", parallelComp.claims[0].citation.authority >= parallelComp.claims[parallelComp.claims.length - 1].citation.authority);
+  check("parallel-compression module was gate-verified in the pipeline", parallelComp.proposedModule?.verification.passes === true, `min=${parallelComp.proposedModule?.verification.minScore}`);
+  check("parallel-compression is approvable", isApprovable(parallelComp));
+  check("pending research does NOT extend coverage", !knownConcepts().includes("parallel-compression"));
+  check("pending research is NOT buildable", findApprovedModuleForPrompt("a parallel compression bus") === null);
 
   /* ---- dedupe while pending ---- */
-  const again = await runResearch("phaser");
-  check("re-research while pending dedupes", again.id === phaser.id && readResearchQueue().filter((i) => i.concept === "phaser").length === 1);
+  const again = await runResearch("parallel compression");
+  check("re-research while pending dedupes", again.id === parallelComp.id && readResearchQueue().filter((i) => i.concept === "parallel-compression").length === 1);
 
   /* ---- the approval boundary ---- */
-  approveResearch(phaser.id);
-  check("approval extends known concepts", knownConcepts().includes("phaser"));
-  check("approval makes the module buildable", approvedModules().some((i) => i.concept === "phaser"));
+  approveResearch(parallelComp.id);
+  check("approval extends known concepts", knownConcepts().includes("parallel-compression"));
+  check("approval makes the module buildable", approvedModules().some((i) => i.concept === "parallel-compression"));
 
-  const build = buildOfflinePlugin("a swirling phaser pedal");
-  check("builder uses the approved researched module", /allpass/i.test(build.description) || build.dspFunction.includes("state.y4"), build.description.slice(0, 90));
+  const build = buildOfflinePlugin("a parallel compression bus");
+  check("builder uses the approved researched module", /blend|parallel/i.test(build.description) || build.dspFunction.includes("state.env"), build.description.slice(0, 90));
   check("build declares its research provenance", /research you approved/i.test(build.summary) || /research you approved/i.test(build.description));
 
   const gatedBuild = runQualityGate(
@@ -88,7 +99,7 @@ const mem = new Map<string, string>();
       id: "t", name: build.name, category: build.category, description: build.description,
       parameters: build.parameters, dspFunction: build.dspFunction, faustCode: "", cppJuceCode: "", createdAt: "",
     },
-    { family: build.family, prompt: "a swirling phaser pedal" }
+    { family: build.family, prompt: "a parallel compression bus" }
   );
   const gbMin = Math.min(gatedBuild.scores.looks, gatedBuild.scores.performance, gatedBuild.scores.latency, gatedBuild.scores.musicality);
   check("researched build still ships at the floor", gbMin >= 97, `min=${gbMin}`);
@@ -96,8 +107,8 @@ const mem = new Map<string, string>();
 
   /* ---- coverage audit reflects the approval ---- */
   const audit = runKnowledgeAudit({ withBenchmarks: false });
-  const modArea = audit.coverage.find((a) => a.area === "Modulation");
-  check("audit: phaser no longer missing in Modulation", !!modArea && !modArea.missing.some((m) => /phaser/i.test(m)), JSON.stringify(modArea?.missing));
+  const compArea = audit.coverage.find((a) => a.area === "Compressors");
+  check("audit: parallel-compression no longer missing in Compressors", !!compArea && !compArea.missing.some((m) => /parallel.?comp/i.test(m)), JSON.stringify(compArea?.missing));
 
   /* ---- rejection changes nothing ---- */
   const multitap = await runResearch("multi-tap");

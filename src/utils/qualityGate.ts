@@ -880,11 +880,25 @@ export function measureCharacterIndex(dspFunction: string, parameters: PluginPar
 
   // Combined via MAX, not average: a plugin only needs to be characterful on
   // ONE axis to earn full credit -- a filter/distortion via spectral shape, a
-  // delay/reverb via temporal structure. Averaging would unfairly drag down
-  // a plugin that legitimately excels at just one (a great delay's spectral
-  // term stays near zero by nature; that must not halve its character score).
+  // delay/reverb via temporal structure, a compressor via level-dependent
+  // gain. Averaging would unfairly drag down a plugin that legitimately
+  // excels at just one (a great delay's spectral term stays near zero by
+  // nature; that must not halve its character score).
+  //
+  // Short-circuit when spectral has already nearly saturated: MAX cannot be
+  // raised further by anything else, so the two extra renders below (a
+  // ~31k-sample tail probe, two ~22k-sample level probes) would be pure
+  // waste. This is called on every candidate the refinement loop and
+  // best-of-N produce, so avoiding unreachable work here compounds. Set
+  // near the ceiling deliberately -- most real builds (0.01-0.15 typical
+  // spectral range measured across this session's generated plugins) never
+  // approach it, so this only skips genuinely pathological/extreme cases,
+  // never a build that could actually benefit from the other axes.
+  if (spectralTerm > 0.95) return spectralTerm;
+
   const temporalTerm = temporalCharacterOnTail(dspFunc, defaults);
-  return Math.max(spectralTerm, temporalTerm);
+  const dynamicsTerm = dynamicsCharacterOnLevel(dspFunc, defaults);
+  return Math.max(spectralTerm, temporalTerm, dynamicsTerm);
 }
 
 /* ------------------------------------------------------------------ */
@@ -987,6 +1001,23 @@ function levelGainDelta(dspFunc: (i: number, p: any, s: any, r?: number) => numb
   const loud = gainAtLevel(dspFunc, params, 1.6);
   if (quiet === null || loud === null) return null;
   return quiet - loud;
+}
+
+/**
+ * DYNAMICS axis of character: does louder material get held down relative
+ * to quieter material? Neither the spectral nor temporal axis above can see
+ * this -- both compare a STATIONARY probe's shape, and a compressor vs. a
+ * passthrough render near-identically when the input level never varies
+ * (the exact reason fitnessDynamics needs the same two-level trick). Reuses
+ * levelGainDelta directly and the SAME 8dB reference point fitnessDynamics
+ * already uses for "definitively working compressor" -- one calibration
+ * constant for one underlying signal, not two independently-guessed numbers
+ * for the same thing.
+ */
+function dynamicsCharacterOnLevel(dspFunc: (i: number, p: any, s: any, r?: number) => number, defaults: Record<string, number>): number {
+  const delta = levelGainDelta(dspFunc, defaults);
+  if (delta === null) return 0; // not comparable on this axis, not "no character"
+  return Math.max(0, Math.min(1, delta / 8));
 }
 
 /** 2nd+3rd harmonic content on a clean tone -- distortion's defining trait,

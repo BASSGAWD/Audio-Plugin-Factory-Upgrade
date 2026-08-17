@@ -194,6 +194,31 @@ function gatedBuild(prompt: string, dspOverride?: string): { plugin: AudioPlugin
     Math.abs(measureCharacterIndex("return Math.tanh(inputSample * 40);", [{ id: "x", name: "X", min: 0, max: 1, defaultValue: 0, value: 0, unit: "" }]) - heavyDistortIdx) < 1e-9
   );
 
+  /* 5d. DYNAMICS axis: level-dependent gain (compression) that neither the
+   *     spectral nor temporal axis can see -- both compare a STATIONARY
+   *     probe's shape at one fixed level; gain that varies with input LEVEL,
+   *     not time or frequency, is invisible to either. A real generated
+   *     hard-knee compressor measured 0.042-0.045 -- near the "silence"
+   *     floor -- despite genuinely compressing. */
+  const companderIdx = measureCharacterIndex("return Math.sign(inputSample) * Math.pow(Math.abs(inputSample), 0.3);", []);
+  check(
+    "character index: a strong compander (level-dependent gain, no spectral or temporal shift) is credited",
+    companderIdx > 0.5,
+    `companderIdx=${companderIdx}`
+  );
+
+  // Regression bait: gainAtLevel measures a RATIO (out.rms / in.rms). A pure
+  // linear gain stage keeps that ratio IDENTICAL at every input level by
+  // construction -- 2x is 2x whether the input is quiet or loud -- so it
+  // must score near zero here. If this scored high, the axis would be
+  // rewarding volume, not dynamics.
+  const linearGainIdx = measureCharacterIndex("return inputSample * 2;", []);
+  check(
+    "character index: a pure linear gain stage is NOT credited by the dynamics axis (loud isn't the same as dynamic)",
+    linearGainIdx < 0.05,
+    `linearGainIdx=${linearGainIdx}`
+  );
+
   // Confirms the tie-breaker is real but bounded: two candidates with
   // identical gate scores but different characterIndex must rank by it,
   // and the gap it can create is small relative to the correctness terms.

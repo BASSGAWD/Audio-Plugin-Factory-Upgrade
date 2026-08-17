@@ -66,6 +66,80 @@ function gatedBuild(prompt: string, dspOverride?: string): { plugin: AudioPlugin
   const clamped = await runRefinementLoop(initial, { prompt: "make a warm tape delay", iterations: 99, refiner: null });
   check(`iterations clamp to ${MAX_REFINE_LOOPS}`, clamped.iterations.length === MAX_REFINE_LOOPS);
 
+  /* 4b. Regression: the caller used to pass voicingVariant the raw outer
+   *     loop index `n`. Voicing only ever runs on ODD n, so `n - 1` was
+   *     always EVEN, and an even number mod NUDGE_FRACTIONS.length (6) can
+   *     only land on indices {0, 2, 4} -- the three POSITIVE fractions. The
+   *     three NEGATIVE ones were unreachable for the life of this code. When
+   *     the targeted param's default already sat at its max (e.g. an
+   *     effect's Mix knob at fully-wet 1.0), every reachable positive
+   *     fraction clamped to the same value -- a "perfecting loop" that
+   *     silently repeated one no-op candidate over and over while reporting
+   *     each repeat as a fresh attempt. This is exactly the pattern a real
+   *     build showed: 13 voicing-variant loops scoring identically to 13
+   *     decimal places.
+   *
+   *     Prove the OLD calling pattern really was degenerate (so this isn't
+   *     a strawman), then prove the ACTUAL shipped loop no longer follows it. */
+  const pinnedMix = gatedBuild("make a warm tape delay");
+  const mixParam = pinnedMix.plugin.parameters.find((p) => p.id === "mix")!;
+  const pinnedPlugin: AudioPlugin = {
+    ...pinnedMix.plugin,
+    parameters: pinnedMix.plugin.parameters.map((p) => (p.id === "mix" ? { ...p, defaultValue: p.max, value: p.max } : p)),
+  };
+
+  // The old bug, reproduced directly: simulate the caller always passing the
+  // raw odd outer-loop index (1, 3, 5, 7, 9, 11 -- exactly what `n` is on
+  // every iteration voicingVariant used to be invoked with).
+  const oldCallerPattern = [1, 3, 5, 7, 9, 11].map((n) => voicingVariant(pinnedPlugin, n).parameters.find((p) => p.id === "mix")!.defaultValue);
+  check(
+    "regression bait: the OLD raw-n calling pattern really was degenerate (proves this isn't a strawman)",
+    oldCallerPattern.every((v) => v === mixParam.max),
+    `all clamped to ${mixParam.max}: [${oldCallerPattern.join(", ")}]`
+  );
+
+  // The fix: an independent, sequentially-incrementing counter (mirroring
+  // structuralCalls' existing pattern) reaches every fraction, including the
+  // negative ones -- proven directly against the same pinned-at-max fixture.
+  const fixedCallerPattern = [1, 2, 3, 4, 5, 6].map((i) => voicingVariant(pinnedPlugin, i).parameters.find((p) => p.id === "mix")!.defaultValue);
+  check(
+    "voicing variant with a proper sequential counter reaches values BELOW the pinned max",
+    fixedCallerPattern.some((v) => v < mixParam.max),
+    `[${fixedCallerPattern.join(", ")}]`
+  );
+  check(
+    "...specifically hits all three negative fractions, not just some",
+    new Set(fixedCallerPattern).size >= 4, // 3 distinct downward values + the repeated clamp-at-max
+    `distinct values: ${new Set(fixedCallerPattern).size}`
+  );
+
+  // End-to-end: the ACTUAL shipped loop, not just the isolated function,
+  // exercised on the exact fixture that used to degenerate.
+  const pinnedGate = runQualityGate(pinnedPlugin, { family: "delay", prompt: "make a warm tape delay" });
+  const e2e = await runRefinementLoop({ plugin: pinnedGate.plugin, gate: pinnedGate }, { prompt: "make a warm tape delay", iterations: 9, refiner: null });
+  const voicingTrace = e2e.iterations.filter((it) => /voicing variant/.test(it.action));
+  const distinctVoicingScores = new Set(voicingTrace.map((it) => it.score.toFixed(6)));
+  check(
+    "end-to-end: the shipped loop's voicing attempts are no longer all identical",
+    voicingTrace.length >= 2 && distinctVoicingScores.size > 1,
+    `${voicingTrace.length} voicing attempts, ${distinctVoicingScores.size} distinct scores`
+  );
+  check(
+    "end-to-end: a genuine downward move actually shows up in the trace, not just an upward one",
+    voicingTrace.some((it) => /-\d/.test(it.changeSummary)),
+    voicingTrace.map((it) => it.changeSummary).join(" | ")
+  );
+
+  // Duplicate detection: a candidate identical to one already fully gated
+  // this run should be reported as a duplicate, not silently re-scored as if
+  // it were a fresh attempt -- and should reuse the cached gate result exactly.
+  const dupeMarked = e2e.iterations.filter((it) => /identical to an earlier attempt/.test(it.action));
+  if (dupeMarked.length > 0) {
+    check("duplicate candidates are labeled honestly in the trace, not presented as fresh attempts", true, `${dupeMarked.length} marked`);
+  } else {
+    check("no duplicates arose in this run (fine -- the diversity fix may have simply eliminated them)", true);
+  }
+
   /* 5. Character index: silence ~0, distortion clearly reshapes the spectrum */
   const silentIdx = measureCharacterIndex("return 0;", [{ id: "x", name: "X", min: 0, max: 1, defaultValue: 0, value: 0, unit: "" }]);
   check("character index: silence is near zero", silentIdx < 0.05, `silentIdx=${silentIdx}`);

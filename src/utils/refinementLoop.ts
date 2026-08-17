@@ -143,7 +143,14 @@ export function refinementScore(gate: QualityGateResult): number {
 /* Deterministic voicing variants                                      */
 /* ------------------------------------------------------------------ */
 
-const INTENSITY_PARAM = /^(mix|drive|feedback|decay|depth|space|tone|cutoff|resonance|damp)$/;
+// Family-defining character knobs, not just the generic effect-level ones.
+// Without ratio/threshold/attack/release/knee/makeup here, a compressor's
+// ONLY match is "mix" -- so voicing search had nothing else to nudge and,
+// combined with the parity bug below, could degenerate to a complete no-op
+// for an entire plugin family. See NUDGE_FRACTIONS' comment for the other
+// half of that bug.
+const INTENSITY_PARAM =
+  /^(mix|drive|feedback|decay|depth|space|tone|cutoff|resonance|damp|ratio|threshold|attack|release|knee|makeup|rate|width|speed|wow|flutter|sensitivity|drift)$/;
 /** Seeded nudge pattern: alternating directions, growing amplitude. */
 const NUDGE_FRACTIONS = [0.12, -0.12, 0.2, -0.2, 0.3, -0.3];
 
@@ -354,12 +361,30 @@ export async function runRefinementLoop(
   const initialScore = refinementScore(initial.gate);
   let bestScore = initialScore;
   const trace: RefinementIteration[] = [];
+
+  // Two builds are "the same" when their DSP and rounded param defaults
+  // match. Used below to catch a degenerate rework BEFORE paying for a full
+  // gate pass (audio render + FFT measurements) on it, and to keep the final
+  // leaderboard free of identical clones.
+  const signature = (p: AudioPlugin) =>
+    p.dspFunction + "|" + p.parameters.map((q) => `${q.id}:${Math.round(q.defaultValue * 1000)}`).join(",");
+  const triedSignatures = new Map<string, { gate: QualityGateResult; score: number }>();
+  triedSignatures.set(signature(initial.plugin), { gate: initial.gate, score: initialScore });
   // Counts only the iterations that actually REACH structuralVariant (every
   // other loop iteration, see Strategy 2 below) -- kept independent of the
   // outer loop index `n` so structuralVariant's own append/prepend
   // alternation and primitive cycling aren't silently coupled to (and
   // cancelled out by) the outer schedule's parity.
   let structuralCalls = 0;
+  // Same principle, same bug class, and it WAS live: voicingVariant used to
+  // take the raw outer loop index `n` directly. Voicing only ever runs on
+  // ODD n (see Strategy 2 below), so `n - 1` was always EVEN, and an even
+  // number mod NUDGE_FRACTIONS.length (6) only ever lands on indices
+  // {0, 2, 4} -- the three POSITIVE fractions. The three NEGATIVE ones were
+  // mathematically unreachable for the entire life of this code: voicing
+  // search could only ever try to push a knob higher, never lower. Own
+  // counter, same fix as structuralCalls.
+  let voicingCalls = 0;
 
   // Every distinct gated version, kept for ranking + the blind listening test.
   interface Collected { label: string; plugin: AudioPlugin; gate: QualityGateResult; score: number; changeSummary: string; }
@@ -390,6 +415,7 @@ export async function runRefinementLoop(
     }
     seedTrace.push({ iteration: 0, action: `alternate build (${seed.changeSummary.slice(0, 90)})`, accepted, score, changeSummary: seed.changeSummary });
     collected.push({ label, plugin: seed.plugin, gate: seed.gate, score, changeSummary: seed.changeSummary });
+    triedSignatures.set(signature(seed.plugin), { gate: seed.gate, score });
     opts.onCandidate?.(0, iterations, { label, score, accepted, changeSummary: seed.changeSummary });
   }
 
@@ -453,15 +479,32 @@ export async function runRefinementLoop(
         action = action ? `${action}; tried structural variant instead` : `structural variant (${structural.changeSummary})`;
         changeSummary = structural.changeSummary;
       } else {
-        candidate = voicingVariant(best.plugin, n);
-        action = action ? `${action}; tried voicing variant instead` : `voicing variant (seeded nudge ${n})`;
+        candidate = voicingVariant(best.plugin, ++voicingCalls);
+        action = action ? `${action}; tried voicing variant instead` : `voicing variant (seeded nudge ${voicingCalls})`;
         const deltas = paramDeltas(best.plugin, candidate);
         changeSummary = deltas.length > 0 ? deltas.join(", ") : "voicing nudge (no audible change)";
       }
     }
 
-    const candidateGate = gateOf(candidate);
-    const score = refinementScore(candidateGate);
+    // A rework strategy can still land on a build byte-identical to one
+    // already fully resolved this run -- e.g. a voicing nudge that clamps to
+    // an already-tried extreme, or two different strategies converging on
+    // the same result. Reuse that prior gate result instead of paying for a
+    // full render + FFT pass to re-derive an answer already known, and say
+    // so plainly in the trace rather than silently reporting a duplicate as
+    // fresh work. The gate is a deterministic function of the plugin, so
+    // reusing a cached result for an identical input is exact, not an
+    // approximation.
+    const candSig = signature(candidate);
+    const cached = triedSignatures.get(candSig);
+    const candidateGate = cached ? cached.gate : gateOf(candidate);
+    const score = cached ? cached.score : refinementScore(candidateGate);
+    if (cached) {
+      action = `${action} -- identical to an earlier attempt this run, skipped re-scoring`;
+      changeSummary = `${changeSummary} (duplicate, not re-scored)`;
+    } else {
+      triedSignatures.set(candSig, { gate: candidateGate, score });
+    }
     const accepted = score > bestScore;
     const label = `v${n + 1}`;
     if (accepted) {
@@ -473,11 +516,9 @@ export async function runRefinementLoop(
     opts.onCandidate?.(n, iterations, { label, score, accepted, changeSummary });
   }
 
-  // Rank distinct versions best-first for the leaderboard and blind test. Two
-  // versions are "the same" when their DSP and rounded param defaults match, so
-  // the user never auditions identical clones.
-  const signature = (p: AudioPlugin) =>
-    p.dspFunction + "|" + p.parameters.map((q) => `${q.id}:${Math.round(q.defaultValue * 1000)}`).join(",");
+  // Rank distinct versions best-first for the leaderboard and blind test.
+  // `signature` (defined above) keeps the user from auditioning identical
+  // clones here too.
   const seen = new Set<string>();
   const unique: Collected[] = [];
   for (const c of collected) {

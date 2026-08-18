@@ -339,6 +339,33 @@ let mk = Math.pow(10, makeup / 20);
 return Math.tanh((low + high * Math.pow(10, -grDb / 20)) * mk);`,
     tags: { topology: "sidechain-filtered-deesser", character: ["transparent"], sources: ["vocals"], latency: "zero", cpu: "light" },
   },
+  {
+    id: "comp_parallel",
+    family: "dynamics",
+    title: "Parallel (New York) compressor (crushed wet path blended with pristine dry)",
+    rationale: "runs a fast, deep compressor (high ratio, low threshold) on a SEPARATE wet path and blends it back against the untouched dry signal -- the Blend knob, not the ratio, sets the effect intensity, adding density to quiet material while transients keep their original punch from the dry path",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: -12, defaultValue: -30, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 4, max: 20, defaultValue: 10, unit: ":1" },
+      { id: "blend", name: "Blend", min: 0, max: 1, defaultValue: 0.4, unit: "ratio" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 8, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -30;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 10);
+let blend = params.blend !== undefined ? params.blend : 0.4;
+let makeup = params.makeup !== undefined ? params.makeup : 8;
+let x = Math.abs(inputSample);
+state.env += (x > state.env ? 0.01 : 0.0008) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+// The DRY path never touches the gain computer -- only the wet path is
+// crushed, so transient punch survives blend even at high ratio.
+let wet = inputSample * Math.pow(10, (gainDb + makeup) / 20);
+return Math.tanh(inputSample * (1 - blend) + wet * blend);`,
+    tags: { topology: "parallel-ny-blend", character: ["aggressive"], sources: ["drums", "vocals", "mix_bus"], latency: "zero", cpu: "light" },
+  },
 
   /* ================================================================ */
   /* REVERB: three room designs                                        */

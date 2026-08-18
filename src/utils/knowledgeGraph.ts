@@ -84,6 +84,7 @@ const TOPOLOGY_CONCEPTS: Record<string, { concept: string; related: string[] }> 
   comp_fet_1176: { concept: "compressor", related: ["fet-model", "peak-detection", "transients"] },
   comp_multiband_2band: { concept: "compressor", related: ["multiband-compression", "crossover", "band-splitting"] },
   comp_deesser: { concept: "compressor", related: ["sidechain-filter", "de-essing", "sibilance"] },
+  comp_parallel: { concept: "compressor", related: ["parallel-topology", "wet-dry-blend", "upward-density", "new-york-style"] },
   reverb_schroeder: { concept: "reverb", related: ["comb-filter", "allpass", "damping"] },
   reverb_fdn_plate: { concept: "reverb", related: ["feedback-delay-network", "hadamard-matrix", "plate-reverb", "damping"] },
   reverb_room_er: { concept: "reverb", related: ["early-reflections", "room-simulation", "damping"] },

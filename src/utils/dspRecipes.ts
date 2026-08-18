@@ -234,6 +234,102 @@ return inputSample * (1 - mix) + y4 * mix;`,
     ],
   },
   {
+    // Positioned BEFORE "dynamics" deliberately: dynamics' own regex matches
+    // bare `gate\b` (a noise gate is a real, different dynamics effect), so
+    // "a spectral gate effect" would be shadowed by dynamics under
+    // first-match-wins if this recipe sat later in the array. This recipe's
+    // own regex requires "spectral"/"fft"/"frequency domain" to co-occur, so
+    // placing it earlier disambiguates correctly in both directions: "a
+    // spectral gate" matches here, a plain "noise gate" still falls through
+    // to dynamics untouched.
+    id: "spectral_gate",
+    title: "Spectral gate + tilt (streaming 256-pt STFT, Hann/50% overlap-add, inline radix-2 FFT)",
+    match: /spectral|\bfft\b|frequency.?domain|spectral\s*(?:gate|freeze|transient|tilt)/i,
+    parameters: [
+      { id: "threshold", name: "Threshold", min: 0, max: 0.5, defaultValue: 0.08, unit: "ratio" },
+      { id: "tilt", name: "Tilt", min: -1, max: 1, defaultValue: 0, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.7, unit: "ratio" },
+    ],
+    // A genuine streaming STFT inside the per-sample contract: input and an
+    // overlap-add accumulator are ring buffers; every hop (N/2) samples one
+    // frame is windowed, FFT'd, spectrally processed, inverse-FFT'd, and
+    // added back. Latency is one block (~5.8 ms). All buffers are allocated
+    // once (init guard); the FFT runs in place on pre-allocated arrays.
+    body: `if (!state.init) {
+  state.N = 256; state.H = 128;
+  state.inr = new Float32Array(256);
+  state.acc = new Float32Array(256);
+  state.re = new Float32Array(256);
+  state.im = new Float32Array(256);
+  state.win = new Float32Array(256);
+  for (let n = 0; n < 256; n++) state.win[n] = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / 256);
+  state.ip = 0; state.cnt = 0;
+  state.init = true;
+}
+let threshold = params.threshold !== undefined ? params.threshold : 0.08;
+let tilt = params.tilt !== undefined ? params.tilt : 0;
+let mix = params.mix !== undefined ? params.mix : 0.7;
+let N = 256, H = 128;
+state.inr[state.ip] = inputSample;
+let y = state.acc[state.ip];
+state.acc[state.ip] = 0;
+state.ip = (state.ip + 1) % N;
+state.cnt++;
+if (state.cnt >= H) {
+  state.cnt = 0;
+  let re = state.re, im = state.im;
+  for (let j = 0; j < N; j++) { re[j] = state.inr[(state.ip + j) % N] * state.win[j]; im[j] = 0; }
+  for (let i = 1, j = 0; i < N; i++) { let bit = N >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { let tr = re[i]; re[i] = re[j]; re[j] = tr; let ti = im[i]; im[i] = im[j]; im[j] = ti; } }
+  for (let len = 2; len <= N; len <<= 1) {
+    let ang = -2 * Math.PI / len; let wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < (len >> 1); k++) {
+        let ar = re[i + k], ai = im[i + k];
+        let brr = re[i + k + (len >> 1)] * cr - im[i + k + (len >> 1)] * ci;
+        let bii = re[i + k + (len >> 1)] * ci + im[i + k + (len >> 1)] * cr;
+        re[i + k] = ar + brr; im[i + k] = ai + bii;
+        re[i + k + (len >> 1)] = ar - brr; im[i + k + (len >> 1)] = ai - bii;
+        let ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+  let maxMag = 1e-9;
+  for (let b = 0; b <= (N >> 1); b++) { let mg = Math.sqrt(re[b] * re[b] + im[b] * im[b]); if (mg > maxMag) maxMag = mg; }
+  let gate = threshold * maxMag;
+  for (let b = 0; b <= (N >> 1); b++) {
+    let mg = Math.sqrt(re[b] * re[b] + im[b] * im[b]);
+    let g = mg < gate ? 0 : 1;
+    let t = 1 + tilt * (b / (N >> 1) - 0.5) * 2; if (t < 0) t = 0;
+    g *= t;
+    re[b] *= g; im[b] *= g;
+    if (b > 0 && b < (N >> 1)) { re[N - b] *= g; im[N - b] *= g; }
+  }
+  for (let i = 1, j = 0; i < N; i++) { let bit = N >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { let tr = re[i]; re[i] = re[j]; re[j] = tr; let ti = im[i]; im[i] = im[j]; im[j] = ti; } }
+  for (let len = 2; len <= N; len <<= 1) {
+    let ang = 2 * Math.PI / len; let wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < (len >> 1); k++) {
+        let ar = re[i + k], ai = im[i + k];
+        let brr = re[i + k + (len >> 1)] * cr - im[i + k + (len >> 1)] * ci;
+        let bii = re[i + k + (len >> 1)] * ci + im[i + k + (len >> 1)] * cr;
+        re[i + k] = ar + brr; im[i + k] = ai + bii;
+        re[i + k + (len >> 1)] = ar - brr; im[i + k + (len >> 1)] = ai - bii;
+        let ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+  for (let j = 0; j < N; j++) state.acc[(state.ip + j) % N] += re[j] / N;
+}
+return Math.tanh(inputSample * (1 - mix) + y * mix);`,
+    pitfalls: [
+      "This is a GENERATOR-FREE frequency-domain effect: a fixed hop (128 of 256) must elapse between FFTs, or the overlap-add reconstruction breaks -- do not run the transform every sample.",
+      "The analysis window (Hann) satisfies constant-overlap-add at 50% hop on its own -- do NOT also apply a synthesis window, or the identity case (threshold 0, tilt 0) stops reconstructing the input exactly.",
+      "Output lags input by one block (~5.8 ms at 256/44100) -- this is real signal-path latency, not a bug, and excludes this design from a live/zero-latency budget.",
+    ],
+  },
+  {
     id: "dynamics",
     title: "Feed-forward compressor (dB-domain envelope, attack/release, makeup)",
     match: /compress|limiter|dynamics|squash|punch|glue|expander|gate\b|sidechain|duck/i,
@@ -799,7 +895,7 @@ const FAMILY_TO_RECIPES: Partial<Record<PluginFamily, string[]>> = {
   multiband_saturator: ["filter", "distortion"],
   delay: ["delay"],
   reverb: ["reverb"],
-  modulation: ["modulation", "tremolo", "phaser"],
+  modulation: ["modulation", "tremolo", "phaser", "spectral_gate"],
   dynamics: ["dynamics"],
   // Amp sims are fundamentally gain-staged preamp drive + tone shaping --
   // the distortion recipe's structure is the right reference; the mandatory

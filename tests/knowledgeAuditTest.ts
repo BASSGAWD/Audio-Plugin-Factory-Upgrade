@@ -2,8 +2,9 @@
  * Milestone 1 contract — the Knowledge Auditor must be honest:
  *
  *  - coverage comes only from concepts the graph actually reaches
- *  - known-missing curriculum items (convolution, FFT, mid-side...) MUST
- *    show up in the gap report — an auditor that reports 100% is broken
+ *  - known-missing curriculum items (convolution, biquad, external
+ *    sidechain...) MUST show up in the gap report — an auditor that reports
+ *    100% is broken
  *  - demonstrated ability is measured by real gated builds, and every
  *    benchmark must ship at the >= 97 floor
  *  - the report renders every section
@@ -30,8 +31,16 @@ check("inventory: >= 12 topologies", audit.inventory.topologies >= 12, `${audit.
 check("overall coverage is a real percentage", audit.overallCoveragePct > 0 && audit.overallCoveragePct < 100, `${audit.overallCoveragePct}%`);
 const allMissing = audit.coverage.flatMap((a) => a.missing);
 check("known-missing: convolution reverb is reported", allMissing.some((m) => /convolution/i.test(m)));
-check("known-missing: FFT/spectral is reported", allMissing.some((m) => /FFT|spectral/i.test(m)));
-check("known-missing: stereo/mid-side is reported", allMissing.some((m) => /stereo|mid-side/i.test(m)));
+// FFT/spectral and stereo/mid-side used to be this test's known-missing
+// examples -- they stopped being gaps the moment spectral_gate (a real
+// recipe) and comp_midside (a real topology) shipped tonight, which is a
+// GOOD outcome, not a break (same pattern as the "10 recipes" hardcode
+// above). Swapped to biquad (still genuinely pending, no promoted
+// recipe/topology/primitive claims it) and the permanently-blocked
+// external-sidechain item, which can never accidentally close via a future
+// promotion the way a pending-research concept can.
+check("known-missing: biquad/RBJ forms is reported", allMissing.some((m) => /biquad/i.test(m)));
+check("known-missing: external sidechain (structurally blocked) is reported", allMissing.some((m) => /sidechain input/i.test(m)));
 check("covered: lookahead compression no longer a gap", !allMissing.some((m) => /lookahead/i.test(m)));
 check("covered: FDN no longer a gap", !allMissing.some((m) => /delay network/i.test(m)));
 check("every curriculum area is scored", audit.coverage.length >= 8, `${audit.coverage.length} areas`);

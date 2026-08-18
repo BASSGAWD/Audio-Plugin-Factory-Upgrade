@@ -53,6 +53,13 @@ const RECIPE_CONCEPTS: Record<string, { concept: string; related: string[] }> = 
   modulation: { concept: "chorus", related: ["lfo", "fractional-delay", "interpolation", "vibrato"] },
   tremolo: { concept: "tremolo", related: ["lfo", "amplitude-modulation", "gain-modulation"] },
   phaser: { concept: "phaser", related: ["lfo", "allpass", "notch-filter", "phase-cancellation", "feedback-loop"] },
+  // No test collision (same check already done for wavetable/fm-synthesis):
+  // researchEngineTest.ts and blockProcessingTest.ts both exercise
+  // "spectral-processing" via the research-approval path but never assert
+  // it's a gap BEFORE research, so closing knowledgeAudit.ts's real
+  // satisfiedBy: ["fft", "spectral-processing"] gap here is correct, not a
+  // collision risk.
+  spectral_gate: { concept: "spectral-processing", related: ["fft", "stft", "overlap-add", "frequency-domain"] },
   dynamics: { concept: "compressor", related: ["envelope-detector", "gain-computer", "attack-release", "makeup-gain", "threshold", "ratio"] },
   eq: { concept: "equalizer", related: ["crossover", "band-splitting", "shelving", "parametric-mid"] },
   filter: { concept: "filter", related: ["state-variable-filter", "resonance", "cutoff-smoothing"] },
@@ -85,11 +92,18 @@ const TOPOLOGY_CONCEPTS: Record<string, { concept: string; related: string[] }> 
   comp_multiband_2band: { concept: "compressor", related: ["multiband-compression", "crossover", "band-splitting"] },
   comp_deesser: { concept: "compressor", related: ["sidechain-filter", "de-essing", "sibilance"] },
   comp_parallel: { concept: "compressor", related: ["parallel-topology", "wet-dry-blend", "upward-density", "new-york-style"] },
+  // No test collision (same check already done for wavetable/fm-synthesis/
+  // spectral_gate above): stereoEngineTest.ts approves mid-side research
+  // before ever checking coverage, never checks it's a gap beforehand, so
+  // this correctly closes knowledgeAudit.ts's real
+  // satisfiedBy: ["stereo-linking", "mid-side"] gap.
+  comp_midside: { concept: "compressor", related: ["mid-side", "stereo-linking", "width-control"] },
   reverb_schroeder: { concept: "reverb", related: ["comb-filter", "allpass", "damping"] },
   reverb_fdn_plate: { concept: "reverb", related: ["feedback-delay-network", "hadamard-matrix", "plate-reverb", "damping"] },
   reverb_room_er: { concept: "reverb", related: ["early-reflections", "room-simulation", "damping"] },
   delay_tape: { concept: "delay", related: ["feedback-loop", "damping", "tape-emulation"] },
   delay_digital: { concept: "delay", related: ["feedback-loop", "ring-buffer", "transparency"] },
+  delay_pingpong: { concept: "delay", related: ["ping-pong", "cross-feed", "stereo-spread"] },
   dist_softclip: { concept: "distortion", related: ["waveshaping", "oversampling", "tone-filter"] },
   dist_tube_asym: { concept: "distortion", related: ["asymmetric-waveshaping", "even-harmonics", "tube-emulation", "oversampling"] },
   dist_fuzz: { concept: "distortion", related: ["softsign-curve", "fuzz", "oversampling", "tone-filter"] },

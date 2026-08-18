@@ -107,7 +107,13 @@ const FAMILY_SIGNALS: FamilySignal[] = [
   { family: "distortion", behavior: /dist|fuzz|overdrive|drive\b|clip|crunch|bitcrush|lo.?fi/i, uiMetaphor: "stompbox" },
   { family: "delay", behavior: /delay|echo|slapback|ping.?pong|dub\b/i, uiMetaphor: "tape_machine" },
   { family: "reverb", behavior: /reverb|room|hall|plate|shimmer|ambien|cathedral/i, uiMetaphor: "rack_unit" },
-  { family: "modulation", behavior: /chorus|flang|phaser|vibrato|tremolo|wobble|ensemble|rotary/i, uiMetaphor: "pedal" },
+  // "spectral"/"fft"/"frequency domain" added deliberately BEFORE dynamics
+  // in this array: dynamics' own behavior regex matches bare `gate\b` (a
+  // noise gate), so "a spectral gate effect" hits BOTH families -- the
+  // multi-hit fallback below picks hits[0] in array order with no UI
+  // marker present, and modulation sits earlier here, so "spectral" wins
+  // as intended rather than the coincidental "gate" overlap.
+  { family: "modulation", behavior: /chorus|flang|phaser|vibrato|tremolo|wobble|ensemble|rotary|spectral|\bfft\b|frequency.?domain/i, uiMetaphor: "pedal" },
   { family: "dynamics", behavior: /compress|limit|expand|gate\b|duck|squash|glue|punch/i, uiMetaphor: "channel_strip" },
   { family: "filter", behavior: /filter|cutoff|lowpass|highpass|bandpass|wah|resonan/i, uiMetaphor: "synth_panel" },
 ];

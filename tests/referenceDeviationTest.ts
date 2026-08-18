@@ -37,15 +37,16 @@ function check(label: string, ok: boolean, detail = "") {
   // This loop's premise only holds for a recipe that IS its family's
   // designated golden reference (REFERENCE_RECIPE_ID_FOR_FAMILY in
   // qualityGate.ts) -- id-as-family only works because, for those recipes,
-  // id and family happen to be the same string. tremolo and phaser are
-  // real DSP_RECIPES entries within the "modulation" family, but chorus
-  // (recipe id "modulation") remains the family's sole golden reference, so
-  // "tremolo" isn't a valid PluginFamily and comparing tremolo's body
-  // against ITSELF-as-"modulation" would actually compare it against
-  // chorus -- correctly nonzero deviation, not a bug. Covered instead by
+  // id and family happen to be the same string. tremolo, phaser, and
+  // spectral_gate are real DSP_RECIPES entries within the "modulation"
+  // family, but chorus (recipe id "modulation") remains the family's sole
+  // golden reference, so none of "tremolo"/"phaser"/"spectral_gate" is a
+  // valid PluginFamily and comparing e.g. tremolo's body against
+  // ITSELF-as-"modulation" would actually compare it against chorus --
+  // correctly nonzero deviation, not a bug. Covered instead by
   // recipeTest.ts (stability/audibility across the full param range) and
   // the tremolo-vs-chorus mechanism test there.
-  const notAFamilyGoldenReference = new Set(["tremolo", "phaser"]);
+  const notAFamilyGoldenReference = new Set(["tremolo", "phaser", "spectral_gate"]);
   for (const r of DSP_RECIPES) {
     if (notAFamilyGoldenReference.has(r.id)) continue;
     const family = r.id === "synth" ? "synthesizer" : (r.id as any);

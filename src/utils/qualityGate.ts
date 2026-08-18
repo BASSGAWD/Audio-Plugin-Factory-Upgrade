@@ -1078,6 +1078,24 @@ function tailPersistence(samples: Float32Array): number {
  *  amp_sim -> distortion routing rationale), so it shares the same axis. */
 const HARMONIC_DEFINED_FAMILIES = new Set<PluginFamily>(["distortion", "saturator", "amp_sim"]);
 
+/** Families whose candidates are GENERATORS, not processors -- they ignore
+ *  the probe signal entirely, so there is no shared input constraining their
+ *  spectral shape the way there is for every effects family (a reverb, a
+ *  compressor, a distortion all reshape the SAME broadband noise probe, so
+ *  "does it reshape a common input similarly" is a meaningful comparison).
+ *  A synth's entire spectral identity comes from its synthesis METHOD, and
+ *  multiple correct methods (subtractive, wavetable, FM, ...) are EXPECTED
+ *  to sound nothing alike spectrally -- that variety is the point of having
+ *  more than one. Measured directly: synth_wavetable (morph 0.5, tables up
+ *  to the 16th harmonic) scored spectral deviation 1.12, synth_fm (2.5 rad
+ *  index) scored 1.41 -- both past this function's own "shares essentially
+ *  nothing" ceiling of 1.0 -- against the golden reference's simple
+ *  3-harmonic detuned pad, despite both being correctly built, gate-verified
+ *  voices (fitnessSynth: 100 for both). The envelope-shape term still
+ *  applies -- a generator's own onset behavior is a real, comparable design
+ *  property -- only the spectral axis is excluded. */
+const GENERATOR_FAMILIES = new Set<PluginFamily>(["synthesizer"]);
+
 /**
  * Run a candidate and its family's GOLDEN RECIPE through the SAME probe
  * signals (each at its own default settings, since that is the plugin's
@@ -1170,10 +1188,14 @@ export function measureReferenceDeviation(
     };
   }
 
-  const candDist = spectralBandDistribution(candSpec.samples, SAMPLE_RATE);
-  const refDist = spectralBandDistribution(refSpec.samples, SAMPLE_RATE);
-  let spectralL1 = 0;
-  for (let i = 0; i < candDist.length; i++) spectralL1 += Math.abs(candDist[i] - refDist[i]);
+  const measureSpectral = !family || !GENERATOR_FAMILIES.has(family);
+  let spectralL1: number | null = null;
+  if (measureSpectral) {
+    const candDist = spectralBandDistribution(candSpec.samples, SAMPLE_RATE);
+    const refDist = spectralBandDistribution(refSpec.samples, SAMPLE_RATE);
+    spectralL1 = 0;
+    for (let i = 0; i < candDist.length; i++) spectralL1 += Math.abs(candDist[i] - refDist[i]);
+  }
 
   const candShape = envelopeShape(candEnv.samples);
   const refShape = envelopeShape(refEnv.samples);
@@ -1216,7 +1238,7 @@ export function measureReferenceDeviation(
       : null;
 
   const terms = [
-    spectralL1,
+    ...(spectralL1 !== null ? [spectralL1] : []),
     envelopeL1,
     ...(levelDev !== null ? [levelDev] : []),
     ...(harmDev !== null ? [harmDev] : []),
@@ -1230,8 +1252,8 @@ export function measureReferenceDeviation(
     deviation: Math.round(deviation * 1000) / 1000,
     score,
     evidence:
-      `response shape (spectrum + envelope-over-time${extraLabels.length ? " + " + extraLabels.join(" + ") : ""}) differs from the family's "${golden.id}" reference by ${deviation.toFixed(2)} ` +
-      `(0 = matches, ${REF_DEVIATION_CEIL}+ = shares essentially nothing; spectral ${spectralL1.toFixed(2)}, envelope ${envelopeL1.toFixed(2)}` +
+      `response shape (${spectralL1 !== null ? "spectrum + " : ""}envelope-over-time${extraLabels.length ? " + " + extraLabels.join(" + ") : ""}) differs from the family's "${golden.id}" reference by ${deviation.toFixed(2)} ` +
+      `(0 = matches, ${REF_DEVIATION_CEIL}+ = shares essentially nothing; ${spectralL1 !== null ? `spectral ${spectralL1.toFixed(2)}, ` : ""}envelope ${envelopeL1.toFixed(2)}` +
       `${levelDev !== null ? `, level-gain ${levelDev.toFixed(2)}` : ""}${harmDev !== null ? `, harmonic ${harmDev.toFixed(2)}` : ""}${tailDev !== null ? `, tail ${tailDev.toFixed(2)}` : ""})`,
   };
 }

@@ -93,6 +93,15 @@ const TOPOLOGY_CONCEPTS: Record<string, { concept: string; related: string[] }> 
   dist_softclip: { concept: "distortion", related: ["waveshaping", "oversampling", "tone-filter"] },
   dist_tube_asym: { concept: "distortion", related: ["asymmetric-waveshaping", "even-harmonics", "tube-emulation", "oversampling"] },
   dist_fuzz: { concept: "distortion", related: ["softsign-curve", "fuzz", "oversampling", "tone-filter"] },
+  synth_pad: { concept: "synthesizer", related: ["oscillator", "detune", "state-variable-filter", "envelope-generator"] },
+  // No test collision to guard against here (unlike comp_parallel) --
+  // researchEngineTest.ts never uses "wavetable" or "fm-synthesis" as a
+  // gap-before-research worked example, so these correctly close the real
+  // curriculum gaps (knowledgeAudit.ts's satisfiedBy: ["wavetable"] /
+  // ["fm-synthesis"]) the moment the topology ships, same as opto-model/
+  // fet-model/multiband-compression/sidechain-filter already do.
+  synth_wavetable: { concept: "synthesizer", related: ["wavetable", "band-limiting", "table-morphing", "phase-accumulator"] },
+  synth_fm: { concept: "synthesizer", related: ["fm-synthesis", "phase-modulation", "operator-ratio", "sidebands"] },
 };
 
 export const KNOWLEDGE_GRAPH: KnowledgeNode[] = [

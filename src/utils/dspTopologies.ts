@@ -570,6 +570,99 @@ wet = state.lp;
 return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
     tags: { topology: "softsign-fuzz", character: ["aggressive", "lofi"], sources: ["guitar", "drums", "synth"], latency: "zero", cpu: "light" },
   },
+
+  /* ================================================================ */
+  /* SYNTHESIZER: two voice-generation designs beyond subtractive       */
+  /* ================================================================ */
+  {
+    id: "synth_pad",
+    family: "synthesizer",
+    title: golden("synth").title,
+    rationale: "the proven default — two detuned oscillators through a state-variable lowpass, warm and simple",
+    parameters: golden("synth").parameters,
+    body: golden("synth").body,
+    tags: { topology: "detuned-2osc-svf", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "synth_wavetable",
+    family: "synthesizer",
+    title: "Morphing wavetable oscillator (4 band-limited tables, interpolated scan, airy noise layer)",
+    rationale: "reads a stored single-cycle waveform with a phase accumulator and interpolated lookup, then crossfades between adjacent band-limited tables to sweep timbre continuously -- from a pure sine to a bright sawtooth-ish stack -- without the aliasing a naive high-partial lookup would add at low pitches",
+    parameters: [
+      { id: "pitch", name: "Pitch", min: 55, max: 880, defaultValue: 220, unit: "Hz" },
+      { id: "morph", name: "Morph", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "cutoff", name: "Cutoff", min: 800, max: 12000, defaultValue: 4000, unit: "Hz" },
+      { id: "level", name: "Level", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+    ],
+    body: `if (!state.init) {
+  state.tables = [];
+  for (let t = 0; t < 4; t++) {
+    let tab = new Float32Array(2048);
+    for (let i = 0; i < 2048; i++) {
+      let ph = 2 * Math.PI * i / 2048;
+      let v = 0;
+      if (t === 0) v = Math.sin(ph);
+      else if (t === 1) { for (let k = 1; k <= 5; k += 2) v += Math.sin(k * ph) / (k * k); v *= 1.2; }
+      else if (t === 2) { for (let k = 1; k <= 16; k++) v += Math.sin(k * ph) / k; v *= 0.55; }
+      else { for (let k = 1; k <= 9; k += 2) v += Math.sin(k * ph) / k; v *= 0.75; }
+      tab[i] = v;
+    }
+    state.tables.push(tab);
+  }
+  state.ph = 0; state.lp = 0; state.smP = 220; state.rng = 12345; state.init = true;
+}
+let pitch = params.pitch !== undefined ? params.pitch : 220;
+let morph = Math.min(1, Math.max(0, params.morph !== undefined ? params.morph : 0.5));
+let cutoff = params.cutoff !== undefined ? params.cutoff : 4000;
+let level = params.level !== undefined ? params.level : 0.5;
+state.smP += 0.002 * (pitch - state.smP);
+state.ph += state.smP * 2048 / 44100;
+if (state.ph >= 2048) state.ph -= 2048;
+let pos = morph * 3;
+let ti = Math.min(2, Math.floor(pos));
+let frac = pos - ti;
+let i0 = Math.floor(state.ph);
+let i1 = (i0 + 1) % 2048;
+let sf = state.ph - i0;
+let ta = state.tables[ti];
+let tb = state.tables[ti + 1];
+let va = ta[i0] * (1 - sf) + ta[i1] * sf;
+let vb = tb[i0] * (1 - sf) + tb[i1] * sf;
+let osc = va * (1 - frac) + vb * frac;
+state.rng = (state.rng * 1664525 + 1013904223) | 0;
+let air = (state.rng / 2147483648) * 0.05;
+let a = 1 - Math.exp(-2 * Math.PI * cutoff / 44100);
+state.lp += a * (osc + air - state.lp);
+return Math.tanh(state.lp * level * 0.8);`,
+    tags: { topology: "morphing-wavetable", character: ["colored"], sources: ["synth" as SourceMaterial], latency: "zero", cpu: "medium" },
+  },
+  {
+    id: "synth_fm",
+    family: "synthesizer",
+    title: "2-operator FM voice (phase-modulated carrier, ratio + index timbre control)",
+    rationale: "a modulator oscillator at ratio*frequency phase-modulates the carrier -- Chowning's founding FM result: integer carrier:modulator ratios give harmonic spectra, non-integer ratios give bells and metallic inharmonics, all from two sine calls and one multiply, no lookup tables or filters needed",
+    parameters: [
+      { id: "pitch", name: "Pitch", min: 55, max: 880, defaultValue: 220, unit: "Hz" },
+      { id: "opRatio", name: "Op Ratio", min: 0.5, max: 8, defaultValue: 2, unit: "x" },
+      { id: "fmAmount", name: "FM Amount", min: 0, max: 8, defaultValue: 2.5, unit: "rad" },
+      { id: "level", name: "Level", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.phC = 0; state.phM = 0; state.smP = 220; state.smI = 2.5; state.init = true; }
+let pitch = params.pitch !== undefined ? params.pitch : 220;
+let opRatio = Math.max(0.1, params.opRatio !== undefined ? params.opRatio : 2);
+let fmAmount = params.fmAmount !== undefined ? params.fmAmount : 2.5;
+let level = params.level !== undefined ? params.level : 0.5;
+state.smP += 0.002 * (pitch - state.smP);
+state.smI += 0.002 * (fmAmount - state.smI);
+state.phM += 2 * Math.PI * state.smP * opRatio / 44100;
+if (state.phM > 2 * Math.PI) state.phM -= 2 * Math.PI;
+state.phC += 2 * Math.PI * state.smP / 44100;
+if (state.phC > 2 * Math.PI) state.phC -= 2 * Math.PI;
+let osc = Math.sin(state.phC + state.smI * Math.sin(state.phM));
+return Math.tanh(osc * level * 0.8);`,
+    tags: { topology: "2op-fm", character: ["colored"], sources: ["synth" as SourceMaterial], latency: "zero", cpu: "light" },
+  },
 ];
 
 export function topologiesForFamily(family: PluginFamily): DspTopology[] {

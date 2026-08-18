@@ -1398,14 +1398,32 @@ const CALIBRATE_RATE_ERR = 0.25;
 /** Oscillator pitch, in octave-folded semitones off the Pitch knob. */
 const CALIBRATE_PITCH_SEMIS = 0.6;
 
-/** Render the arp scaled to a target peak, returning output/input gain in dB. */
+/**
+ * Render a probe scaled to a target peak, returning output/input gain in dB.
+ *
+ * Uses noiseProbeAt, NOT arpAt -- deliberately. arpAt is built entirely from
+ * Math.sin() fundamentals capped at 784 Hz with no harmonics, so it has
+ * essentially zero energy anywhere near a sidechain-filtered detector's
+ * passband (a de-esser listens ~1.5-8 kHz). Measured directly: comp_deesser
+ * showed only 0.30 dB of quiet-vs-loud gain change on arpAt (reading as
+ * "barely compressing," nearly indistinguishable from a broken passthrough)
+ * vs. 4.84 dB on noiseProbeAt's flat broadband spectrum -- the same probe
+ * this function's own spectral-deviation sibling term already uses, so a
+ * legitimate narrowband compressor is finally visible to the ONE axis whose
+ * entire job is proving level-dependent gain exists. Every broadband topology
+ * (comp_ff_rms, comp_opto, comp_fet_1176, comp_lookahead_master, ...) shifts
+ * by only 2-12% under the swap -- comfortably inside every existing
+ * threshold -- while an inert passthrough still reads exactly 0 dB on either
+ * probe, since "never compresses" doesn't depend on what the probe sounds
+ * like.
+ */
 function gainAtLevel(
   dspFunc: (i: number, p: any, s: any, r?: number) => number,
   params: Record<string, number>,
   scale: number
 ): number | null {
   const N = 22050;
-  const sig = (i: number) => arpAt(i) * scale;
+  const sig = (i: number) => noiseProbeAt(i) * scale;
   let inSq = 0;
   for (let i = 0; i < N; i++) inSq += sig(i) * sig(i);
   const inRms = Math.sqrt(inSq / N);

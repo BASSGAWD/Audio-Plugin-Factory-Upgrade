@@ -40,6 +40,7 @@ import {
 import { AudioPlugin, PluginParameter } from "../types";
 import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
 import { ArchetypeId, ARCHETYPE_LABELS, BUILTIN_ARCHETYPES, applyArchetype } from "../utils/guiArchetypes";
+import { KNOB_RECIPES, toCssKnobStyle, resolveKnobStyle, KnobRenderStyle } from "../utils/uiRenderPatterns";
 
 interface UIDesignerProps {
   plugin: AudioPlugin;
@@ -99,14 +100,13 @@ interface KnobProps {
   themeStyle: string;
 }
 
-function CustomKnob({ param, onChange, onDblClick, themeStyle }: KnobProps) {
+export function CustomKnob({ param, onChange, onDblClick, themeStyle }: KnobProps) {
   const [isDragging, setIsDragging] = useState(false);
   const startYRef = useRef(0);
   const startValRef = useRef(0);
 
   const range = param.max - param.min;
   const normalized = (param.value - param.min) / (range || 1);
-  const angle = -135 + normalized * 270;
 
   const handleMouseDown = (e: React.MouseEvent) => {
     setIsDragging(true);
@@ -147,61 +147,71 @@ function CustomKnob({ param, onChange, onDblClick, themeStyle }: KnobProps) {
     };
   }, [isDragging, param.min, param.max, range, onChange]);
 
-  const getKnobClasses = () => {
-    switch (themeStyle) {
-      case "vintage-analog":
-        return {
-          ring: isDragging ? "border-[#5c4a37] ring-2 ring-[#a88258]/30 shadow-[#a88258]/10 scale-102" : "border-[#8a7b68] hover:border-[#5c4a37]",
-          body: "bg-gradient-to-b from-[#e8e4d8] to-[#cac2ae]",
-          core: "bg-[#4a3f35]",
-          needle: "bg-amber-800",
-          needleShadow: "0 0 6px rgba(180, 83, 9, 0.6)"
-        };
-      case "cyberpunk-neon":
-        return {
-          ring: isDragging ? "border-[#00ffff] ring-2 ring-[#ea00d9]/50 shadow-[#00ffff]/20 scale-102" : "border-[#711c91] hover:border-[#ea00d9]",
-          body: "bg-gradient-to-b from-black to-[#0d0214]",
-          core: "bg-[#ea00d9]/10 border border-[#ea00d9]/50",
-          needle: "bg-[#00ffff]",
-          needleShadow: "0 0 8px rgba(0, 255, 255, 0.9)"
-        };
-      case "modular-synth":
-        return {
-          ring: isDragging ? "border-orange-500 ring-2 ring-orange-950/80 shadow-orange-500/10 scale-102" : "border-neutral-700 hover:border-neutral-500",
-          body: "bg-gradient-to-b from-neutral-800 to-neutral-900",
-          core: "bg-neutral-950 border border-neutral-850",
-          needle: "bg-orange-500",
-          needleShadow: "0 0 8px rgba(249, 115, 22, 0.8)"
-        };
-      default: // aero-slate
-        return {
-          ring: isDragging ? "border-indigo-400 ring-2 ring-indigo-950/80 shadow-indigo-500/10 scale-102" : "border-neutral-700 hover:border-neutral-500",
-          body: "bg-gradient-to-b from-neutral-800 to-neutral-900",
-          core: "bg-neutral-950 border border-neutral-800",
-          needle: "bg-indigo-400",
-          needleShadow: "0 0 8px rgba(129, 140, 248, 0.8)"
-        };
-    }
+  // Legacy theme-preset names ("vintage-analog"/"cyberpunk-neon"/
+  // "modular-synth"/default) map onto the SAME shared knob-render
+  // vocabulary the amp/cab widget uses (uiRenderPatterns.ts) -- same 4
+  // presets, same picker UX, but now drawing from real gradient/indicator
+  // RECIPES instead of hand-rolled Tailwind classes that had no equivalent
+  // outside the browser. This is the fix for "ordinary knobs on every
+  // non-amp plugin always render as one generic style" -- they now share
+  // the exact recipe table a compiled C++ plugin's LookAndFeel reads too
+  // (see nativeBuild.ts's generateLookAndFeelCpp).
+  const legacyThemeToStyle: Record<string, KnobRenderStyle> = {
+    "vintage-analog": "vintage_amber",
+    "cyberpunk-neon": "neonring",
+    "modular-synth": "chickenhead",
   };
-
-  const style = getKnobClasses();
+  const resolvedStyle = legacyThemeToStyle[themeStyle] || "modern_pointer";
+  const recipe = KNOB_RECIPES[resolvedStyle];
+  const css = toCssKnobStyle(recipe, param.accentColor || "#d4af37");
+  const knobAngle = css.indicatorAngleDeg(normalized);
 
   return (
     <div className="flex flex-col items-center justify-center space-y-1 select-none group">
-      <div 
+      <div
         onMouseDown={handleMouseDown}
         onDoubleClick={onDblClick}
-        className={`relative w-12 h-12 rounded-full border-2 cursor-ns-resize shadow-md flex items-center justify-center transition-all ${style.ring} ${style.body}`}
+        className={`relative w-12 h-12 rounded-full cursor-ns-resize shadow-md flex items-center justify-center transition-all ${isDragging ? "scale-105" : ""}`}
+        style={{ background: css.bodyBackground, border: css.rimBorderCss }}
       >
-        <div 
-          className={`absolute w-0.5 h-4 rounded-full origin-bottom ${style.needle}`}
-          style={{ 
-            transform: `rotate(${angle}deg)`, 
-            top: "6px",
-            boxShadow: style.needleShadow
-          }}
-        />
-        <div className={`w-6 h-6 rounded-full flex items-center justify-center pointer-events-none ${style.core}`}>
+        {css.indicatorKind === "dashring" ? (
+          <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 48 48">
+            <circle cx="24" cy="24" r="19" stroke="#171717" strokeWidth="2" fill="none" />
+            <circle
+              cx="24" cy="24" r="19"
+              stroke={css.indicatorColor} strokeWidth="2" fill="none"
+              strokeDasharray={119.4}
+              strokeDashoffset={119.4 - normalized * 119.4}
+              style={{ filter: `drop-shadow(0 0 2px ${css.indicatorColor})` }}
+            />
+          </svg>
+        ) : (
+          <div
+            className="absolute rounded-full"
+            style={
+              css.indicatorKind === "dot"
+                ? {
+                    width: "6px",
+                    height: "6px",
+                    top: "21px",
+                    left: "21px",
+                    background: css.indicatorColor,
+                    transform: `rotate(${knobAngle}deg) translateY(-14px)`,
+                    boxShadow: `0 0 6px ${css.indicatorColor}99`,
+                  }
+                : {
+                    width: "2px",
+                    height: `${Math.round(css.indicatorLengthFraction * 48)}px`,
+                    top: "6px",
+                    background: css.indicatorColor,
+                    transform: `rotate(${knobAngle}deg)`,
+                    transformOrigin: "bottom center",
+                    boxShadow: `0 0 6px ${css.indicatorColor}99`,
+                  }
+            }
+          />
+        )}
+        <div className="w-6 h-6 rounded-full flex items-center justify-center pointer-events-none bg-black/25">
           <div className="w-1 h-1 rounded-full bg-neutral-600/40" />
         </div>
 
@@ -2582,12 +2592,18 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                                           window.addEventListener("mouseup", onMouseUp);
                                         }}
                                       >
-                                        {/* Custom Knob Rendering */}
+                                        {/* Custom Knob Rendering -- chickenhead keeps its bespoke
+                                            hand-drawn rooster-comb shape (a genuinely unique silhouette
+                                            no gradient+indicator recipe reproduces faithfully); every
+                                            other style renders from the SAME shared recipe table
+                                            (uiRenderPatterns.ts) the compiled C++ plugin's LookAndFeel
+                                            reads too, so ordinary knobs and this amp widget stop being
+                                            two independently-drifting rendering systems. */}
                                         {(() => {
                                           const knobStyle = param.ampKnobStyle || "pointer";
                                           if (knobStyle === "chickenhead") {
                                             return (
-                                              <div 
+                                              <div
                                                 style={{ transform: `rotate(${angleOffset}deg)` }}
                                                 className="w-7 h-7 relative flex items-center justify-center transition-transform"
                                               >
@@ -2598,70 +2614,47 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                                               </div>
                                             );
                                           }
-                                          if (knobStyle === "silvercap") {
-                                            return (
-                                              <div className="w-7 h-7 rounded-full bg-neutral-900 border border-neutral-950 relative shadow-md flex items-center justify-center">
-                                                <div className="w-5.5 h-5.5 rounded-full bg-gradient-to-tr from-neutral-400 via-neutral-100 to-neutral-500 flex items-center justify-center shadow-inner relative">
-                                                  <div 
-                                                    style={{ transform: `rotate(${angleOffset}deg)` }}
-                                                    className="absolute inset-0 flex justify-center"
-                                                  >
-                                                    <div className="w-[1.5px] h-1.5 bg-neutral-950 rounded-b-sm" />
-                                                  </div>
-                                                </div>
-                                              </div>
-                                            );
-                                          }
-                                          if (knobStyle === "neonring") {
-                                            return (
-                                              <div className="w-7 h-7 rounded-full bg-neutral-950 border border-neutral-900 relative shadow-md flex items-center justify-center">
+                                          const resolvedStyle = resolveKnobStyle(knobStyle);
+                                          const css = toCssKnobStyle(KNOB_RECIPES[resolvedStyle], param.accentColor || "#d4af37");
+                                          const normalized01 = param.value / 10; // amp knobs use a fixed 0-10 range
+                                          const knobAngle = css.indicatorAngleDeg(normalized01);
+                                          return (
+                                            <div
+                                              className="w-7 h-7 rounded-full relative shadow-md flex items-center justify-center"
+                                              style={{ background: css.bodyBackground, border: css.rimBorderCss }}
+                                            >
+                                              {css.indicatorKind === "dashring" ? (
                                                 <svg className="absolute inset-0 w-full h-full -rotate-90">
-                                                  <circle 
-                                                    cx="14" cy="14" r="11" 
-                                                    stroke="#171717" strokeWidth="1.5" fill="none" 
-                                                  />
-                                                  <circle 
-                                                    cx="14" cy="14" r="11" 
-                                                    stroke={param.accentColor || "#10b981"} strokeWidth="1.5" fill="none"
+                                                  <circle cx="14" cy="14" r="11" stroke="#171717" strokeWidth="1.5" fill="none" />
+                                                  <circle
+                                                    cx="14" cy="14" r="11"
+                                                    stroke={css.indicatorColor} strokeWidth="1.5" fill="none"
                                                     strokeDasharray="69"
-                                                    strokeDashoffset={69 - (param.value / 10) * 69}
-                                                    style={{ filter: `drop-shadow(0 0 2px ${param.accentColor || "#10b981"})` }}
+                                                    strokeDashoffset={69 - normalized01 * 69}
+                                                    style={{ filter: `drop-shadow(0 0 2px ${css.indicatorColor})` }}
                                                   />
                                                 </svg>
-                                                <div className="w-4 h-4 rounded-full bg-neutral-900 border border-neutral-800" />
-                                              </div>
-                                            );
-                                          }
-                                          if (knobStyle === "vintage") {
-                                            return (
-                                              <div className="w-7 h-7 rounded-full bg-gradient-to-b from-amber-900 to-amber-950 border border-neutral-900 relative shadow-md flex items-center justify-center">
-                                                <div className="absolute inset-0.5 rounded-full border border-amber-800/20" />
-                                                <div 
-                                                  style={{ transform: `rotate(${angleOffset}deg)` }}
+                                              ) : (
+                                                <div
+                                                  style={{ transform: `rotate(${knobAngle}deg)` }}
                                                   className="absolute inset-0 flex justify-center pt-0.5"
                                                 >
-                                                  <div className="w-0.5 h-1.5 bg-yellow-100 rounded-full" />
+                                                  <div
+                                                    style={{
+                                                      background: css.indicatorColor,
+                                                      width: css.indicatorKind === "dot" ? "3px" : "1.5px",
+                                                      height: css.indicatorKind === "dot" ? "3px" : "6px",
+                                                    }}
+                                                    className="rounded-full"
+                                                  />
                                                 </div>
-                                              </div>
-                                            );
-                                          }
-                                          // Classic Pointer (Default)
-                                          return (
-                                            <div className="w-7 h-7 rounded-full bg-gradient-to-b from-neutral-600 to-neutral-850 border border-neutral-900 relative cursor-ns-resize shadow-md flex items-center justify-center">
-                                              <div 
-                                                style={{ transform: `rotate(${angleOffset}deg)` }}
-                                                className="absolute inset-0 flex justify-center pt-1"
-                                              >
-                                                <div 
-                                                  style={{ backgroundColor: param.accentColor || "#d4af37" }}
-                                                  className="w-[1.5px] h-2 rounded-full" 
-                                                />
-                                              </div>
+                                              )}
+                                              <div className="w-4 h-4 rounded-full bg-black/20 pointer-events-none" />
                                             </div>
                                           );
                                         })()}
                                       </div>
-                                      <span 
+                                      <span
                                         style={{ color: param.textColor ? param.textColor + "99" : "#a3a3a3" }}
                                         className="text-[6px] font-mono font-bold mt-1"
                                       >

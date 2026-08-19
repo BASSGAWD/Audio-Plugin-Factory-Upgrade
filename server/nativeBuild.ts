@@ -5,6 +5,15 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { auditCppRealtimeSafety, formatCppAudit, auditCppIdioms, formatCppIdiomAudit } from "../src/utils/cppAudit";
 import { buildCppPatternContext, buildCppErrorPatternContext } from "../src/utils/cppPatterns";
+import {
+  KnobRenderStyle,
+  PanelTextureStyle,
+  KNOB_RECIPES,
+  PANEL_TEXTURE_RECIPES,
+  resolveKnobStyle,
+  toJuceKnobPaintCode,
+  toJucePanelPaintCode,
+} from "../src/utils/uiRenderPatterns";
 
 // ---------------------------------------------------------------------------
 // Real native VST3 build pipeline: turns an AudioPlugin JSON blob into an
@@ -21,6 +30,16 @@ export interface NativeParameter {
   max: number;
   defaultValue: number;
   unit?: string;
+  /** Styling data the client already sends on every request (see
+   *  NativeBuildPanel.tsx posting the full PluginParameter[] array) but the
+   *  server previously dropped at the type level -- generatePluginEditorCpp
+   *  now reads these to select a real knob style / panel texture instead of
+   *  rendering every control as one identical generic slider on a flat
+   *  fill, regardless of what the web preview actually looks like. */
+  controlType?: string;
+  ampKnobStyle?: string;
+  ampTolexPattern?: string;
+  cabGrillStyle?: string;
 }
 
 export interface NativePlugin {
@@ -229,6 +248,7 @@ juce_generate_juce_header(${projectName})
 target_sources(${projectName} PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/LookAndFeel.cpp
 )
 
 target_compile_definitions(${projectName} PRIVATE
@@ -476,22 +496,117 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
   return { cpp, bufferWriteSite };
 }
 
-function generatePluginEditorHeader(projectName: string): string {
+// Coarse category -> a coherent DEFAULT knob/panel style for ordinary
+// parameters (no explicit ampKnobStyle set). Deliberately one style per
+// plugin, not one per knob -- matches the existing GUI philosophy rule
+// ("one dominant accentColor, not a rainbow of per-knob colors") extended
+// to knob CRAFT, not just color. Original style-family choices, not
+// modeled on any specific commercial product's actual visual identity.
+const CATEGORY_DEFAULT_KNOB_STYLE: Record<string, KnobRenderStyle> = {
+  distortion: "chickenhead",
+  delay: "vintage_amber",
+  filter: "modern_pointer",
+  synthesizer: "neonring",
+  dynamics: "silvercap",
+  modulation: "vintage_amber",
+  reverb: "silvercap",
+};
+const CATEGORY_DEFAULT_PANEL_STYLE: Record<string, PanelTextureStyle> = {
+  distortion: "carbon_weave",
+  delay: "tweed_weave",
+  filter: "matte_poly",
+  synthesizer: "brushed_metal",
+  dynamics: "brushed_metal",
+  modulation: "leather_grain",
+  reverb: "matte_poly",
+};
+
+export function resolvePanelStyle(category: string | undefined): PanelTextureStyle {
+  return (category && CATEGORY_DEFAULT_PANEL_STYLE[category]) || "matte_poly";
+}
+
+/** ampKnobStyle (when the parameter carries one -- amp/cab widgets, or any
+ *  control the model/UI explicitly styled) wins; otherwise every ordinary
+ *  knob on the plugin shares one category-appropriate default, same
+ *  "one dominant style" principle as the panel texture above. */
+export function resolveParamKnobStyle(param: NativeParameter, category: string | undefined): KnobRenderStyle {
+  if (param.ampKnobStyle) return resolveKnobStyle(param.ampKnobStyle);
+  return (category && CATEGORY_DEFAULT_KNOB_STYLE[category]) || "modern_pointer";
+}
+
+export function generateLookAndFeelHeader(): string {
+  return `#pragma once
+#include <JuceHeader.h>
+
+// Draws every rotary slider from the SAME numeric recipes uiRenderPatterns.ts
+// (the factory's shared knob-render knowledge base) uses to draw the web
+// preview -- a per-instance property ("knobStyle", set on each juce::Slider
+// via getProperties()) selects which recipe applies, JUCE's standard
+// per-instance style-hint mechanism.
+class StyledLookAndFeel : public juce::LookAndFeel_V4
+{
+public:
+    explicit StyledLookAndFeel (juce::Colour accent);
+
+    void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                            float sliderPosProportional, float rotaryStartAngle, float rotaryEndAngle,
+                            juce::Slider& slider) override;
+
+private:
+    juce::Colour accentColour;
+};
+`;
+}
+
+/** One generated class regardless of how many distinct knob styles a
+ *  plugin actually uses -- keeps the compile-repair loop's job simpler
+ *  (constant file/class count) versus one LookAndFeel subclass per style. */
+export function generateLookAndFeelCpp(stylesInUse: KnobRenderStyle[], accentColorHex: string): string {
+  // "modern_pointer" is always included as the safety-net fallback branch:
+  // resolveParamKnobStyle only ever returns an unrecognized style if a
+  // future style name is added to the type without a matching CATEGORY_
+  // DEFAULT_KNOB_STYLE entry -- this branch means drawRotarySlider still
+  // renders SOMETHING recognizable rather than an invisible slider.
+  const unique = [...new Set<KnobRenderStyle>([...stylesInUse, "modern_pointer"])];
+  const branches = unique.map((s) => toJuceKnobPaintCode(KNOB_RECIPES[s], s)).join("\n");
+  return `#include "LookAndFeel.h"
+
+StyledLookAndFeel::StyledLookAndFeel (juce::Colour accent) : accentColour (accent) {}
+
+void StyledLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                                          float sliderPosProportional, float, float,
+                                          juce::Slider& slider)
+{
+    const juce::String style = slider.getProperties().getWithDefault ("knobStyle", "modern_pointer").toString();
+${branches}
+    if (style != "${unique.join(`" && style != "`)}")
+    {
+        // Unrecognized style tag -- fall back to the base LookAndFeel_V4
+        // rotary slider rather than rendering nothing.
+        juce::LookAndFeel_V4::drawRotarySlider (g, x, y, width, height, sliderPosProportional, rotaryStartAngle, rotaryEndAngle, slider);
+    }
+}
+`;
+}
+
+export function generatePluginEditorHeader(projectName: string): string {
   return `#pragma once
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
+#include "LookAndFeel.h"
 
 class ${projectName}AudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
     explicit ${projectName}AudioProcessorEditor (${projectName}AudioProcessor&);
-    ~${projectName}AudioProcessorEditor() override = default;
+    ~${projectName}AudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
     ${projectName}AudioProcessor& processorRef;
+    StyledLookAndFeel styledLookAndFeel;
 
     juce::OwnedArray<juce::Slider> sliders;
     juce::OwnedArray<juce::Label> labels;
@@ -502,25 +617,30 @@ private:
 `;
 }
 
-function generatePluginEditorCpp(
+export function generatePluginEditorCpp(
   projectName: string,
   parameters: NativeParameter[],
-  customSkin?: NativePlugin["customSkin"]
+  customSkin?: NativePlugin["customSkin"],
+  category?: string
 ): string {
   const bgColor = customSkin?.bgColor || "#12161D";
   const accentColor = customSkin?.accentColor || "#7C5CFF";
   const textColor = customSkin?.textColor || "#F4F7FB";
+  const panelRecipe = PANEL_TEXTURE_RECIPES[resolvePanelStyle(category)];
+
+  const paramStyles = parameters.map((p) => resolveParamKnobStyle(p, category));
 
   const columns = Math.max(1, Math.min(4, parameters.length));
   const buildSliders = parameters
     .map(
-      (p) => `    {
+      (p, i) => `    {
         auto* label = labels.add (new juce::Label ({}, "${p.name}"));
         label->setJustificationType (juce::Justification::centred);
         label->setColour (juce::Label::textColourId, juce::Colour::fromString ("ff${textColor.replace("#", "")}"));
         addAndMakeVisible (label);
 
         auto* slider = sliders.add (new juce::Slider (juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow));
+        slider->getProperties().set ("knobStyle", "${paramStyles[i]}");
         slider->setColour (juce::Slider::rotarySliderFillColourId, juce::Colour::fromString ("ff${accentColor.replace("#", "")}"));
         slider->setTextValueSuffix (" ${p.unit || ""}");
         addAndMakeVisible (slider);
@@ -533,16 +653,24 @@ function generatePluginEditorCpp(
   return `#include "PluginEditor.h"
 
 ${projectName}AudioProcessorEditor::${projectName}AudioProcessorEditor (${projectName}AudioProcessor& p)
-    : AudioProcessorEditor (&p), processorRef (p)
+    : AudioProcessorEditor (&p), processorRef (p),
+      styledLookAndFeel (juce::Colour::fromString ("ff${accentColor.replace("#", "")}"))
 {
+    setLookAndFeel (&styledLookAndFeel);
+
 ${buildSliders}
 
     setSize (${Math.max(360, columns * 160)}, ${Math.max(220, Math.ceil(parameters.length / columns) * 160 + 60)});
 }
 
+${projectName}AudioProcessorEditor::~${projectName}AudioProcessorEditor()
+{
+    setLookAndFeel (nullptr);
+}
+
 void ${projectName}AudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colour::fromString ("ff${bgColor.replace("#", "")}"));
+${toJucePanelPaintCode(panelRecipe, bgColor)}
 }
 
 void ${projectName}AudioProcessorEditor::resized()
@@ -663,10 +791,18 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
   );
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.h"), generatePluginProcessorHeader(projectName));
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.cpp"), processorCpp.cpp);
+  fs.writeFileSync(path.join(projectDir, "Source", "LookAndFeel.h"), generateLookAndFeelHeader());
+  fs.writeFileSync(
+    path.join(projectDir, "Source", "LookAndFeel.cpp"),
+    generateLookAndFeelCpp(
+      plugin.parameters.map((p) => resolveParamKnobStyle(p, plugin.category)),
+      plugin.customSkin?.accentColor || "#7C5CFF"
+    )
+  );
   fs.writeFileSync(path.join(projectDir, "Source", "PluginEditor.h"), generatePluginEditorHeader(projectName));
   fs.writeFileSync(
     path.join(projectDir, "Source", "PluginEditor.cpp"),
-    generatePluginEditorCpp(projectName, plugin.parameters, plugin.customSkin)
+    generatePluginEditorCpp(projectName, plugin.parameters, plugin.customSkin, plugin.category)
   );
   // Manifest lets the compile-repair loop (and any later tooling) know the
   // parameter ids and project identity without re-parsing generated C++.

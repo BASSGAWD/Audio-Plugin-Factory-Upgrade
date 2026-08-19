@@ -4,8 +4,10 @@ const check = (label: string, ok: boolean, detail?: string) => { if (!ok) failur
 import { renderToStaticMarkup } from "react-dom/server";
 import GenerativeFaceplate, { evaluateMover } from "../src/components/GenerativeFaceplate";
 import RefineControl from "../src/components/RefineControl";
+import { CustomKnob } from "../src/components/UIDesigner";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { runQualityGate } from "../src/utils/qualityGate";
+import { PluginParameter } from "../src/types";
 
 const b = buildOfflinePlugin("make a dreamy shimmer reverb");
 const gate = runQualityGate({ id: "p1", name: b.name, category: b.category, description: b.description, parameters: b.parameters, dspFunction: b.dspFunction, faustCode: "", cppJuceCode: "", createdAt: "" }, { family: b.family, prompt: "make a dreamy shimmer reverb" });
@@ -44,6 +46,45 @@ const on = renderToStaticMarkup(<RefineControl loops={4} onChange={() => {}} />)
 check("refine off: no number input", !off.includes("type=\"number\""));
 check("refine on: number input with value", on.includes("type=\"number\"") && on.includes("value=\"4\""));
 check("refine toggle accessible", on.includes("role=\"switch\"") && on.includes("aria-checked=\"true\""));
+
+/* ---- CustomKnob: ordinary (non-amp) knobs now draw from the shared      */
+/* uiRenderPatterns.ts recipe table instead of a fixed 4-bucket Tailwind   */
+/* switch -- prove the generalization actually took effect in the         */
+/* browser, not just that it compiles.                                    */
+function knobParam(overrides: Partial<PluginParameter> = {}): PluginParameter {
+  return { id: "cutoff", name: "Cutoff", min: 0, max: 100, value: 50, unit: "Hz", ...overrides } as PluginParameter;
+}
+{
+  const themes = ["vintage-analog", "cyberpunk-neon", "modular-synth", "aero-slate"];
+  const rendered = themes.map((theme) =>
+    renderToStaticMarkup(<CustomKnob param={knobParam()} onChange={() => {}} onDblClick={() => {}} themeStyle={theme} />)
+  );
+  const distinct = new Set(rendered);
+  check("CustomKnob: every legacy theme preset renders distinct output", distinct.size === themes.length, `${distinct.size}/${themes.length} distinct`);
+  for (const html of rendered) check("CustomKnob: renders a real gradient background (not a flat Tailwind class)", /background:\s*linear-gradient|background:\s*radial-gradient/.test(html));
+}
+{
+  // Unknown/unset theme falls back to the default style rather than
+  // crashing or rendering nothing.
+  const html = renderToStaticMarkup(<CustomKnob param={knobParam()} onChange={() => {}} onDblClick={() => {}} themeStyle="something-unrecognized" />);
+  check("CustomKnob: unrecognized theme falls back safely (renders something)", html.length > 100);
+}
+{
+  // Two different plugin CATEGORIES sharing the same explicit theme should
+  // still be distinguishable by accentColor flowing into accent-driven
+  // styles (neonring's ring color) -- proves per-plugin accent actually
+  // reaches the shared renderer, not just the style bucket.
+  const red = renderToStaticMarkup(<CustomKnob param={knobParam({ accentColor: "#ff0000" } as Partial<PluginParameter>)} onChange={() => {}} onDblClick={() => {}} themeStyle="cyberpunk-neon" />);
+  const green = renderToStaticMarkup(<CustomKnob param={knobParam({ accentColor: "#00ff00" } as Partial<PluginParameter>)} onChange={() => {}} onDblClick={() => {}} themeStyle="cyberpunk-neon" />);
+  check("CustomKnob: accentColor reaches the shared renderer (neonring)", red !== green);
+}
+{
+  // Different knob VALUES must rotate the indicator differently -- the
+  // recipe's sweep math is actually wired to param.value, not a static angle.
+  const low = renderToStaticMarkup(<CustomKnob param={knobParam({ value: 0 })} onChange={() => {}} onDblClick={() => {}} themeStyle="aero-slate" />);
+  const high = renderToStaticMarkup(<CustomKnob param={knobParam({ value: 100 })} onChange={() => {}} onDblClick={() => {}} themeStyle="aero-slate" />);
+  check("CustomKnob: indicator rotation responds to param.value", low !== high);
+}
 
 console.log(failures === 0 ? "UI RENDER: ALL CHECKS PASS" : failures + " FAILURE(S)");
 process.exit(failures === 0 ? 0 : 1);

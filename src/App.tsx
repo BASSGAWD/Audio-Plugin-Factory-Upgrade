@@ -3274,9 +3274,12 @@ Return ONLY a JSON object with this exact shape, no other text:
             the workspace fills the rest. */}
         <section className="flex-grow flex flex-row h-full bg-neutral-950 overflow-hidden">
 
-          {/* Workspace navigation -- one column, grouped, never wraps. */}
+          {/* Workspace navigation -- one column, grouped, never wraps.
+              The header (collapse toggle + "Workspace" label) is OUTSIDE the
+              scrolling region so it's pinned in view at all times, even when
+              the tab-group list below it overflows and scrolls. */}
           <nav
-            className={`shrink-0 border-r border-neutral-900 bg-neutral-950 flex flex-col overflow-y-auto scrollbar-thin select-none transition-[width] duration-200 ${
+            className={`shrink-0 border-r border-neutral-900 bg-neutral-950 flex flex-col select-none transition-[width] duration-200 ${
               navCollapsed ? "w-[52px]" : "w-[184px]"
             }`}
             aria-label="Workspace sections"
@@ -3286,45 +3289,47 @@ Return ONLY a JSON object with this exact shape, no other text:
               onClick={toggleNav}
               title={navCollapsed ? "Expand navigation" : "Collapse navigation"}
               aria-label={navCollapsed ? "Expand navigation" : "Collapse navigation"}
-              className="flex items-center gap-2 px-3 py-2.5 text-neutral-500 hover:text-neutral-200 transition-colors shrink-0"
+              className="flex items-center gap-2 px-3 py-2.5 text-neutral-500 hover:text-neutral-200 transition-colors shrink-0 border-b border-neutral-900 bg-neutral-950 z-10"
             >
               {navCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
               {!navCollapsed && <span className="text-[10px] font-mono font-bold uppercase tracking-wider">Workspace</span>}
             </button>
 
-            {WORKSPACE_TAB_GROUPS.map((group) => (
-              <div key={group.label} className="pb-1">
-                {!navCollapsed && (
-                  <div className="px-3 pt-2 pb-1 text-[8.5px] font-mono font-black uppercase tracking-widest text-neutral-600">
-                    {group.label}
-                  </div>
-                )}
-                {navCollapsed && <div className="mx-3 my-1.5 border-t border-neutral-900" />}
-                {group.tabs.map((tab) => {
-                  const Icon = tab.icon;
-                  const isActive = companionTab === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => setCompanionTab(tab.id)}
-                      title={navCollapsed ? tab.label : undefined}
-                      aria-current={isActive ? "page" : undefined}
-                      className={`w-full flex items-center gap-2.5 pr-2 py-2 text-[11px] font-mono font-bold transition-colors border-l-2 ${
-                        navCollapsed ? "justify-center pl-2" : "pl-[10px]"
-                      } ${
-                        isActive
-                          ? `${tab.accent === "orange" ? "border-orange-500 bg-orange-950/25 text-orange-200" : "border-indigo-500 bg-indigo-950/25 text-indigo-200"}`
-                          : "border-transparent text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900/50"
-                      }`}
-                    >
-                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? "" : tab.iconColor}`} />
-                      {!navCollapsed && <span className="truncate">{tab.label}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
+            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
+              {WORKSPACE_TAB_GROUPS.map((group) => (
+                <div key={group.label} className="pb-1">
+                  {!navCollapsed && (
+                    <div className="px-3 pt-2 pb-1 text-[8.5px] font-mono font-black uppercase tracking-widest text-neutral-600">
+                      {group.label}
+                    </div>
+                  )}
+                  {navCollapsed && <div className="mx-3 my-1.5 border-t border-neutral-900" />}
+                  {group.tabs.map((tab) => {
+                    const Icon = tab.icon;
+                    const isActive = companionTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setCompanionTab(tab.id)}
+                        title={navCollapsed ? tab.label : undefined}
+                        aria-current={isActive ? "page" : undefined}
+                        className={`w-full flex items-center gap-2.5 pr-2 py-2 text-[11px] font-mono font-bold transition-colors border-l-2 ${
+                          navCollapsed ? "justify-center pl-2" : "pl-[10px]"
+                        } ${
+                          isActive
+                            ? `${tab.accent === "orange" ? "border-orange-500 bg-orange-950/25 text-orange-200" : "border-indigo-500 bg-indigo-950/25 text-indigo-200"}`
+                            : "border-transparent text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900/50"
+                        }`}
+                      >
+                        <Icon className={`w-4 h-4 shrink-0 ${isActive ? "" : tab.iconColor}`} />
+                        {!navCollapsed && <span className="truncate">{tab.label}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
           </nav>
 
           {/* D. Scrolling Active Workspace Content Area */}

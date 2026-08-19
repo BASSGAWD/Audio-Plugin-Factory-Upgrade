@@ -107,6 +107,7 @@ const TOPOLOGY_CONCEPTS: Record<string, { concept: string; related: string[] }> 
   dist_softclip: { concept: "distortion", related: ["waveshaping", "oversampling", "tone-filter"] },
   dist_tube_asym: { concept: "distortion", related: ["asymmetric-waveshaping", "even-harmonics", "tube-emulation", "oversampling"] },
   dist_fuzz: { concept: "distortion", related: ["softsign-curve", "fuzz", "oversampling", "tone-filter"] },
+  dist_dynamic_sat: { concept: "distortion", related: ["dynamic-saturation", "envelope-follower", "level-dependent-drive"] },
   synth_pad: { concept: "synthesizer", related: ["oscillator", "detune", "state-variable-filter", "envelope-generator"] },
   // No test collision to guard against here (unlike comp_parallel) --
   // researchEngineTest.ts never uses "wavetable" or "fm-synthesis" as a
@@ -116,6 +117,8 @@ const TOPOLOGY_CONCEPTS: Record<string, { concept: string; related: string[] }> 
   // fet-model/multiband-compression/sidechain-filter already do.
   synth_wavetable: { concept: "synthesizer", related: ["wavetable", "band-limiting", "table-morphing", "phase-accumulator"] },
   synth_fm: { concept: "synthesizer", related: ["fm-synthesis", "phase-modulation", "operator-ratio", "sidebands"] },
+  eq_3band: { concept: "equalizer", related: ["crossover", "band-splitting", "shelving", "parametric-mid"] },
+  eq_biquad_bell: { concept: "equalizer", related: ["biquad", "rbj-cookbook", "peaking-filter"] },
 };
 
 export const KNOWLEDGE_GRAPH: KnowledgeNode[] = [

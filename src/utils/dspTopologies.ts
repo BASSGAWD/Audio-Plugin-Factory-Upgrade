@@ -556,7 +556,7 @@ return Math.tanh(inputSample * (1 - mix) + wl * mix * 1.3);`,
   },
 
   /* ================================================================ */
-  /* DISTORTION: three drive designs                                   */
+  /* DISTORTION: four drive designs                                    */
   /* ================================================================ */
   {
     id: "dist_softclip",
@@ -632,6 +632,37 @@ state.lp += a * (wet - state.lp);
 wet = state.lp;
 return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
     tags: { topology: "softsign-fuzz", character: ["aggressive", "lofi"], sources: ["guitar", "drums", "synth"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "dist_dynamic_sat",
+    family: "distortion",
+    title: "Dynamic saturator (envelope-tracked drive, 2x oversampled, tone filter)",
+    rationale: "tracks the input envelope and increases waveshaper drive on louder material -- how an analog stage distorts progressively rather than uniformly, so quiet passages stay clean while peaks push into real saturation",
+    parameters: [
+      { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 10, unit: "dB" },
+      { id: "response", name: "Response", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4200, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.env = 0; state.smDrive = 10; state.prevIn = 0; state.init = true; }
+let drive = params.drive !== undefined ? params.drive : 10;
+let response = params.response !== undefined ? params.response : 0.5;
+let tone = params.tone !== undefined ? params.tone : 4200;
+let mix = params.mix !== undefined ? params.mix : 1;
+state.smDrive += 0.002 * (drive - state.smDrive);
+let x = Math.abs(inputSample);
+state.env += (x > state.env ? 0.008 : 0.0009) * (x - state.env);
+let envNorm = Math.min(1, state.env * 3.5);
+let dynDb = state.smDrive * (1 - response * 0.6 + response * envNorm);
+let g = Math.pow(10, dynDb / 20);
+let midIn = 0.5 * (state.prevIn + inputSample);
+let wet = 0.5 * (Math.tanh(midIn * g) + Math.tanh(inputSample * g)) / Math.pow(g, 0.65);
+state.prevIn = inputSample;
+let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+state.lp += a * (wet - state.lp);
+wet = state.lp;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "envelope-tracked-drive", character: ["colored"], sources: ["vocals", "guitar", "bass"], latency: "zero", cpu: "light" },
   },
 
   /* ================================================================ */
@@ -725,6 +756,51 @@ if (state.phC > 2 * Math.PI) state.phC -= 2 * Math.PI;
 let osc = Math.sin(state.phC + state.smI * Math.sin(state.phM));
 return Math.tanh(osc * level * 0.8);`,
     tags: { topology: "2op-fm", character: ["colored"], sources: ["synth" as SourceMaterial], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* EQ: two band-shaping designs                                      */
+  /* ================================================================ */
+  {
+    id: "eq_3band",
+    family: "eq",
+    title: golden("eq").title,
+    rationale: "the proven default — three real crossover-split bands with per-band gain, correct for broad tonal shaping",
+    parameters: golden("eq").parameters,
+    body: golden("eq").body,
+    tags: { topology: "3band-crossover-shelf", character: ["transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "eq_biquad_bell",
+    family: "eq",
+    title: "RBJ peaking bell EQ (cookbook biquad, smoothed sweepable center)",
+    rationale: "a single surgical bell -- the RBJ cookbook biquad (A/alpha/cos-w0 coefficient derivation) targets ONE frequency with a real Q-controlled bandwidth, instead of three fixed crossover-split bands, for a scoop/boost a broad 3-band EQ can't reach precisely",
+    parameters: [
+      { id: "freq", name: "Center Freq", min: 200, max: 8000, defaultValue: 1000, unit: "Hz" },
+      { id: "boost", name: "Boost", min: -12, max: 12, defaultValue: 6, unit: "dB" },
+      { id: "q", name: "Q", min: 0.4, max: 4, defaultValue: 1, unit: "Q" },
+    ],
+    body: `if (!state.init) { state.x1 = 0; state.x2 = 0; state.yy1 = 0; state.yy2 = 0; state.smF = 1000; state.init = true; }
+let freq = params.freq !== undefined ? params.freq : 1000;
+let boost = params.boost !== undefined ? params.boost : 6;
+let q = Math.max(0.4, params.q !== undefined ? params.q : 1);
+state.smF += 0.002 * (freq - state.smF);
+let A = Math.pow(10, boost / 40);
+let w0 = 2 * Math.PI * Math.min(16000, state.smF) / 44100;
+let alpha = Math.sin(w0) / (2 * q);
+let cosw = Math.cos(w0);
+let a0 = 1 + alpha / A;
+let b0 = (1 + alpha * A) / a0;
+let b1 = -2 * cosw / a0;
+let b2 = (1 - alpha * A) / a0;
+let a1 = -2 * cosw / a0;
+let a2 = (1 - alpha / A) / a0;
+let y = b0 * inputSample + b1 * state.x1 + b2 * state.x2 - a1 * state.yy1 - a2 * state.yy2;
+state.x2 = state.x1; state.x1 = inputSample;
+state.yy2 = state.yy1; state.yy1 = y;
+return Math.tanh(y);`,
+    tags: { topology: "rbj-peaking-biquad", character: ["transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
   },
 ];
 

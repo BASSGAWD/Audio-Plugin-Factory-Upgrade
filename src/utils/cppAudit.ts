@@ -130,3 +130,113 @@ export function formatCppAudit(report: CppAuditReport): string {
   const worst = report.findings[0];
   return `C++ real-time safety: ${report.score}/100${report.realtimeSafe ? "" : " — NOT real-time-safe"} (${report.findings.length} finding${report.findings.length === 1 ? "" : "s"}; top: ${worst.message})`;
 }
+
+/* ------------------------------------------------------------------ */
+/* Positive-idiom auditor -- presence of correct patterns, not just    */
+/* absence of hazards. Mirrors codeAudit.ts's smoothing/numerical      */
+/* dimensions on the JS side, translated to C++ syntax: params.<id>    */
+/* access is IDENTICAL between the two languages (the translation      */
+/* prompt requires it), and JS's `state.smX` becomes a bare member name */
+/* with no "state." prefix (the prompt requires that too), so these    */
+/* checks are close ports, not new heuristics invented from scratch.   */
+/* ------------------------------------------------------------------ */
+
+type CppAuditParam = { id: string; name: string };
+
+export interface CppIdiomFinding {
+  dimension: "smoothing" | "numerical-idiom";
+  severity: CppSeverity;
+  message: string;
+}
+
+export interface CppIdiomReport {
+  /** 0-100, informational only -- like codeAudit.ts's codeHealth, this
+   *  never gates shipping, it only feeds the build report and refinement
+   *  tie-breaks. */
+  idiomHealth: number;
+  findings: CppIdiomFinding[];
+}
+
+const IDIOM_COST: Record<CppSeverity, number> = { critical: 30, warning: 12, advisory: 4 };
+
+function auditCppSmoothing(code: string, params: CppAuditParam[], findings: CppIdiomFinding[]): void {
+  for (const p of params) {
+    const isCoeffParam = /cutoff|freq|frequency|tone|center|corner/i.test(p.id) || /cutoff|freq|frequency|tone|center/i.test(p.name);
+    if (!isCoeffParam) continue;
+    const usedInCoeff = new RegExp(
+      `(std::(exp|sin|tan|cos)[^;]*params\\.${p.id}|params\\.${p.id}[^;]*(std::(exp|sin|tan)|/\\s*44100|/\\s*sampleRate))`
+    ).test(code);
+    // Smoothed if: a juce::SmoothedValue call site is present, OR a bare
+    // member ramp assignment feeds this param (state.smX += ... in the JS
+    // becomes a bare `smX +=` member ramp in C++, no "state." prefix).
+    const smoothed =
+      /getNextValue\s*\(\s*\)|setTargetValue\s*\(/.test(code) ||
+      new RegExp(`\\w+\\s*\\+=[^;]*params\\.${p.id}`).test(code);
+    if (usedInCoeff && !smoothed) {
+      findings.push({
+        dimension: "smoothing",
+        severity: "advisory",
+        message: `"${p.id}" drives a filter/coefficient expression without per-sample smoothing — automating it will zipper; use juce::SmoothedValue (see cppPatterns.ts's smoothed_value_param) or a member ramp toward the target`,
+      });
+    }
+  }
+}
+
+function auditCppNumericalIdiom(code: string, findings: CppIdiomFinding[]): void {
+  // Logs: same amplitude/energy-term heuristic as the JS auditor -- log() of
+  // a literal or a bounded-positive frequency ratio is conventionally safe
+  // and must not be flagged.
+  const AMPLITUDE = /\b(env|rms|mag|magnitude|amp|amplitude|level|energy|power|gr|gain)\w*\b/i;
+  const logRe = /std::(log10|log2|log)\s*\(\s*([^)]*)/g;
+  let unguarded = 0;
+  let m: RegExpExecArray | null;
+  while ((m = logRe.exec(code))) {
+    const arg = m[2];
+    if (/^\s*[\d.]+f?\s*$/.test(arg)) continue; // log of a literal — safe
+    if (/std::max\s*\(/.test(arg) || /std::abs\s*\(/.test(arg)) continue;
+    if (AMPLITUDE.test(arg)) unguarded++;
+  }
+  if (unguarded > 0) {
+    findings.push({
+      dimension: "numerical-idiom",
+      severity: "critical",
+      message: `${unguarded} unguarded std::log(...) of an amplitude/energy term — log of 0 is -Infinity and poisons the signal; wrap the argument in std::max(1e-6f, ...)`,
+    });
+  }
+
+  // Division by a bare params.<id> member, not literal- or std::max-guarded.
+  const divRe = /\/\s*(params\.\w+)\b/g;
+  const bareDivs = new Set<string>();
+  while ((m = divRe.exec(code))) bareDivs.add(m[1]);
+  if (bareDivs.size > 0) {
+    findings.push({
+      dimension: "numerical-idiom",
+      severity: "warning",
+      message: `divides by a raw parameter value (${[...bareDivs].join(", ")}) that can reach 0 — guard the divisor with std::max(1e-6f, ...)`,
+    });
+  }
+}
+
+/**
+ * Audit generated JUCE C++ for idiomatic-pattern PRESENCE (parameter
+ * smoothing, guarded division/log), complementing auditCppRealtimeSafety's
+ * hazard-ABSENCE checks above. Informational only, mirrors codeAudit.ts's
+ * relationship to the four headline scores exactly: this never gates
+ * shipping, it only surfaces evidence.
+ */
+export function auditCppIdioms(cpp: string, params: CppAuditParam[]): CppIdiomReport {
+  const code = stripCpp(cpp);
+  const findings: CppIdiomFinding[] = [];
+  auditCppSmoothing(code, params, findings);
+  auditCppNumericalIdiom(code, findings);
+  const cost = findings.reduce((s, f) => s + IDIOM_COST[f.severity], 0);
+  const idiomHealth = Math.max(0, 100 - cost);
+  return { idiomHealth, findings };
+}
+
+/** One-line summary for the native-build log. */
+export function formatCppIdiomAudit(report: CppIdiomReport): string {
+  if (report.findings.length === 0) return "C++ idiom check: clean (100/100) — parameters are smoothed and numerical guards are present.";
+  const worst = [...report.findings].sort((a, b) => IDIOM_COST[b.severity] - IDIOM_COST[a.severity])[0];
+  return `C++ idiom check: ${report.idiomHealth}/100 (${report.findings.length} finding${report.findings.length === 1 ? "" : "s"}; top: ${worst.message})`;
+}

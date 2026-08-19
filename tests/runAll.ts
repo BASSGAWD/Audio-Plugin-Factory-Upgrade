@@ -41,6 +41,8 @@ const TEST_FILES = [
   "blockProcessingTest.ts",
   "codeAuditTest.ts",
   "cppAuditTest.ts",
+  "cppKnowledgeTest.ts",
+  "cppIdiomAuditTest.ts",
   "researchWebTest.ts",
   "researchIndexTest.ts",
   "fusionTest.ts",

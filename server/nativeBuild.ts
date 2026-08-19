@@ -3,7 +3,8 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { auditCppRealtimeSafety, formatCppAudit } from "../src/utils/cppAudit";
+import { auditCppRealtimeSafety, formatCppAudit, auditCppIdioms, formatCppIdiomAudit } from "../src/utils/cppAudit";
+import { buildCppPatternContext, buildCppErrorPatternContext } from "../src/utils/cppPatterns";
 
 // ---------------------------------------------------------------------------
 // Real native VST3 build pipeline: turns an AudioPlugin JSON blob into an
@@ -573,6 +574,12 @@ export interface ScaffoldResult {
   cppRealtimeScore?: number;
   /** Concrete real-time-safety findings on the generated core. */
   cppAuditFindings?: string[];
+  /** Idiom-presence score (0-100, informational) -- parameter smoothing,
+   *  guarded division/log. Complements cppRealtimeScore's hazard-absence
+   *  check; never gates shipping. */
+  cppIdiomScore?: number;
+  /** Concrete idiom findings on the generated core. */
+  cppIdiomFindings?: string[];
 }
 
 export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: LocalLLMConfig): Promise<ScaffoldResult> {
@@ -595,7 +602,8 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
     const raw = await callLocalLLMServerSide(
       llmConfig,
       DSP_TRANSLATION_SYSTEM_PROMPT,
-      `Parameter ids (Params struct members): ${JSON.stringify(paramIds)}\n\nJS DSP function body:\n${plugin.dspFunction}`
+      `Parameter ids (Params struct members): ${JSON.stringify(paramIds)}\n\nJS DSP function body:\n${plugin.dspFunction}` +
+        buildCppPatternContext(plugin.category, plugin.dspFunction)
     );
     translation = parseTranslation(raw);
     if (!translation.methodBody) throw new Error("Empty translation body returned by local model.");
@@ -612,6 +620,13 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
   // original never had. Reviewer-grade findings are written next to the code
   // and surfaced in the scaffold result; a non-safe core is flagged loudly.
   const coreAudit = auditCppRealtimeSafety(translation.methodBody, "core");
+
+  // Positive-idiom check: presence of correct patterns (smoothing, guarded
+  // division/log), not just absence of hazards. Informational only -- never
+  // affects dspTranslated/warning the way the safety audit does.
+  const idiomAudit = auditCppIdioms(translation.methodBody, plugin.parameters);
+  const cppIdiomFindings = idiomAudit.findings.map((f) => `[core] [${f.severity}] [${f.dimension}] ${f.message}`);
+  console.log(`[native-build] core idiom: ${formatCppIdiomAudit(idiomAudit)}`);
 
   // Second, independent check: the assembled PluginProcessor.cpp buffer-write
   // site MUST carry the NaN/Inf/denormal safety-net guard (see
@@ -643,7 +658,8 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
   fs.writeFileSync(path.join(projectDir, "Source", "dsp", "ProcessorCore.h"), generateProcessorCoreHeader(translation));
   fs.writeFileSync(
     path.join(projectDir, "Source", "dsp", "REALTIME_AUDIT.txt"),
-    `${formatCppAudit(coreAudit)}\n\n${cppAuditFindings.length ? cppAuditFindings.join("\n") : "No heap allocation, locks, IO, or logging found in the audio path, and the NaN/Inf/denormal safety-net guard is present at the buffer write."}\n`
+    `${formatCppAudit(coreAudit)}\n\n${cppAuditFindings.length ? cppAuditFindings.join("\n") : "No heap allocation, locks, IO, or logging found in the audio path, and the NaN/Inf/denormal safety-net guard is present at the buffer write."}\n\n` +
+      `${formatCppIdiomAudit(idiomAudit)}\n\n${cppIdiomFindings.length ? cppIdiomFindings.join("\n") : "Parameters that drive filter coefficients are smoothed, and log/division are guarded."}\n`
   );
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.h"), generatePluginProcessorHeader(projectName));
   fs.writeFileSync(path.join(projectDir, "Source", "PluginProcessor.cpp"), processorCpp.cpp);
@@ -659,7 +675,17 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
     JSON.stringify({ projectName, slug, paramIds, dspTranslated }, null, 2)
   );
 
-  return { projectDir, slug, projectName, dspTranslated, warning, cppRealtimeScore: coreAudit.score, cppAuditFindings };
+  return {
+    projectDir,
+    slug,
+    projectName,
+    dspTranslated,
+    warning,
+    cppRealtimeScore: coreAudit.score,
+    cppAuditFindings,
+    cppIdiomScore: idiomAudit.idiomHealth,
+    cppIdiomFindings,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -742,7 +768,7 @@ async function repairProcessorCore(
   const raw = await callLocalLLMServerSide(
     llmConfig,
     CPP_REPAIR_SYSTEM_PROMPT,
-    `Compiler errors:\n${errors.join("\n")}\n\nCurrent ProcessorCore.h:\n${current}`
+    `Compiler errors:\n${errors.join("\n")}\n\nCurrent ProcessorCore.h:\n${current}` + buildCppErrorPatternContext(errors)
   );
   const translation = parseTranslation(raw);
   if (!translation.methodBody || translation.methodBody.length < 10) return null;

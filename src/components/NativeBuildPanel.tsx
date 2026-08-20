@@ -84,6 +84,7 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
           plugin: {
             name: plugin.name,
             category: plugin.category,
+            attributes: plugin.buildReport?.attributes,
             parameters: plugin.parameters,
             dspFunction: plugin.dspFunction,
             customSkin: plugin.customSkin,

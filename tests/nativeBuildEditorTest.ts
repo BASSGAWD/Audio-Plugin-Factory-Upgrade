@@ -57,6 +57,41 @@ function braceParenBalance(s: string): { bracesOk: boolean; parensOk: boolean } 
   check("resolvePanelStyle: undefined category falls back to matte_poly", resolvePanelStyle(undefined) === "matte_poly");
 }
 
+/* ---- attribute-driven skeuomorphism: research-informed refinement of the
+   category default (buildReport.attributes -- vintage/futuristic/etc. --
+   the same vocabulary GenerativeFaceplate.tsx's ATTRIBUTE_PATTERN uses) ---- */
+{
+  const noExplicit: NativeParameter = { id: "cutoff", name: "Cutoff", min: 20, max: 20000, defaultValue: 1000 };
+  check(
+    "vintage attribute overrides filter's plain modern_pointer default",
+    resolveParamKnobStyle(noExplicit, "filter", ["vintage"]) === "vintage_amber"
+  );
+  check(
+    "vintage attribute overrides filter's plain matte_poly panel default",
+    resolvePanelStyle("filter", ["vintage"]) === "wood_grain"
+  );
+  check(
+    "futuristic attribute pushes toward neonring regardless of category",
+    resolveParamKnobStyle(noExplicit, "dynamics", ["futuristic"]) === "neonring"
+  );
+  check(
+    "no attributes: category default applies unchanged",
+    resolveParamKnobStyle(noExplicit, "filter", undefined) === "modern_pointer"
+  );
+  check(
+    "attributes present but none match a nudge entry: category default applies unchanged",
+    resolveParamKnobStyle(noExplicit, "filter", ["dreamy"]) === "modern_pointer"
+  );
+  check(
+    "ampKnobStyle still wins over an attribute nudge",
+    resolveParamKnobStyle({ id: "a", name: "A", min: 0, max: 1, defaultValue: 0, ampKnobStyle: "silvercap" }, "filter", ["vintage"]) === "silvercap"
+  );
+  check(
+    "first matching attribute in the array wins when several are present",
+    resolveParamKnobStyle(noExplicit, "filter", ["nonsense-attr", "industrial", "futuristic"]) === "chickenhead"
+  );
+}
+
 /* ---- generateLookAndFeelHeader ---- */
 {
   const h = generateLookAndFeelHeader();
@@ -120,6 +155,13 @@ const skin = { bgColor: "#12161D", accentColor: "#f97316", textColor: "#F4F7FB" 
   check("PluginEditor.cpp: paint() fills with the plugin's actual customSkin.bgColor", /g\.fillAll \(juce::Colour::fromString \("ff12161D"\)\)/.test(cpp));
   check("PluginEditor.cpp: paint() does NOT also fill with the panel recipe's own unrelated base color", (cpp.match(/g\.fillAll/g) || []).length === 1, `fillAll count=${(cpp.match(/g\.fillAll/g) || []).length}`);
   check("PluginEditor.cpp: panel texture overlay is present (carbon_weave diagonal weave)", /drawLine/.test(cpp));
+  // Keyboard-modifier interaction grammar (research-informed): the native
+  // slider should get real JUCE interaction behavior, not just paint/color
+  // config -- double-click-to-reset, velocity-based fine/coarse drag, and a
+  // floating value popup while dragging/hovering.
+  check("PluginEditor.cpp: wires setDoubleClickReturnValue with the param's own default", /setDoubleClickReturnValue \(true, 10\)/.test(cpp));
+  check("PluginEditor.cpp: enables velocity-based mode for fast/slow-drag sensitivity", /setVelocityBasedMode \(true\)/.test(cpp));
+  check("PluginEditor.cpp: enables a popup value display", /setPopupDisplayEnabled \(true, true, this\)/.test(cpp));
 }
 {
   // Different categories with NO explicit ampKnobStyle must resolve to

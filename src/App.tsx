@@ -82,6 +82,7 @@ import { runPlannedBuild } from "./utils/buildPlanner";
 import { runRefinementLoop, refinementScore, isNearTie, MAX_REFINE_LOOPS, RankedCandidate } from "./utils/refinementLoop";
 import { classifyEditIntent } from "./utils/editIntent";
 import { runEditPass, ElementNote } from "./utils/editPass";
+import { SPECTRUM_ANALYZER_RECIPE } from "./utils/uiRenderPatterns";
 
 export function sanitizeDspCode(codeString: string): string {
   let sanitizedCode = codeString;
@@ -1019,7 +1020,7 @@ export default function App() {
       audioCtxRef.current = activeCtx;
 
       const analyser = activeCtx.createAnalyser();
-      analyser.fftSize = 512;
+      analyser.fftSize = SPECTRUM_ANALYZER_RECIPE.defaultFftSize;
       analyserNodeRef.current = analyser;
 
       timeIndexRef.current = 0;

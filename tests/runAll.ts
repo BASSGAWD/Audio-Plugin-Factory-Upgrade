@@ -58,6 +58,8 @@ const TEST_FILES = [
   "antiAliasingTest.ts",
   "cppSafetyNetTest.ts",
   "safetyNetTest.ts",
+  "controlInteractionTest.ts",
+  "accentNormalizationTest.ts",
 ];
 
 let failed = 0;

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { Activity } from "lucide-react";
+import { SPECTRUM_ANALYZER_RECIPE, spectrumBinToHz, byteMagnitudeToDisplayHeight01 } from "../utils/uiRenderPatterns";
 
 interface VisualizerProps {
   analyserNode: AnalyserNode | null;
@@ -90,9 +91,16 @@ export default function Visualizer({ analyserNode, isPlaying, aspectSquare }: Vi
         
         const barWidth = width / bufferLength;
         let barX = 0;
-        
+        const sampleRate = analyserNode.context.sampleRate;
+
         for (let i = 0; i < bufferLength; i++) {
-          const barHeight = (dataArray[i] / 255) * height * 0.76;
+          // dB-converted + tilt-compensated (not raw linear magnitude) so a
+          // flat-spectrum signal reads visually flat instead of sloping down
+          // at high frequencies -- a standard analyzer convention, not any
+          // product's proprietary curve.
+          const hz = spectrumBinToHz(i, bufferLength, sampleRate);
+          const h01 = byteMagnitudeToDisplayHeight01(dataArray[i], hz, SPECTRUM_ANALYZER_RECIPE);
+          const barHeight = h01 * height * 0.76;
           ctx.lineTo(barX, height - barHeight);
           barX += barWidth;
         }

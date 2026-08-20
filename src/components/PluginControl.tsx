@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AudioPlugin, PluginParameter } from "../types";
 import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
+import { applyFineAdjust, wheelStepDelta, wheelDirection, clampToRange } from "../utils/controlInteraction";
+import { METER_BALLISTICS, MeterBallistics, ballisticsStep } from "../utils/uiRenderPatterns";
+import { useNonPassiveWheel } from "../hooks/useNonPassiveWheel";
 
 /**
  * Playback-time control rendering shared by Simple Mode. Mirrors the visual
@@ -24,17 +27,27 @@ const ACCENT_FALLBACK = "#f97316";
 
 /**
  * Polls an AnalyserNode's time-domain buffer on a throttled animation-frame
- * loop and returns a 0..1 RMS level. Throttled to ~12 updates/sec so meter
- * widgets react to real audio without re-rendering the whole control grid
- * at full frame rate.
+ * loop and returns a 0..1 RMS level, attack/release-smoothed via the given
+ * meter ballistics (default: led_segment_peak -- fast attack so transients
+ * register immediately, slow release for a readable peak-hold feel, matching
+ * MeterControl's continuous gradient-bar rendering). Throttled to ~12
+ * updates/sec so meter widgets react to real audio without re-rendering the
+ * whole control grid at full frame rate. This is pure client-side smoothing
+ * of an already-polled value -- no audio-thread/engine change involved.
  */
-function useSignalLevel(analyserNode: AnalyserNode | null | undefined, isPlaying: boolean | undefined): number | null {
+function useSignalLevel(
+  analyserNode: AnalyserNode | null | undefined,
+  isPlaying: boolean | undefined,
+  ballistics: MeterBallistics = METER_BALLISTICS.led_segment_peak
+): number | null {
   const [level, setLevel] = useState<number | null>(null);
   const dataRef = useRef<Uint8Array | null>(null);
+  const smoothedRef = useRef(0);
 
   useEffect(() => {
     if (!analyserNode || !isPlaying) {
       setLevel(null);
+      smoothedRef.current = 0;
       return;
     }
     if (!dataRef.current || dataRef.current.length !== analyserNode.fftSize) {
@@ -48,6 +61,7 @@ function useSignalLevel(analyserNode: AnalyserNode | null | undefined, isPlaying
       if (cancelled) return;
       raf = requestAnimationFrame(tick);
       if (t - lastUpdate < 80) return;
+      const dtMs = lastUpdate === 0 ? 80 : t - lastUpdate;
       lastUpdate = t;
       const data = dataRef.current!;
       analyserNode.getByteTimeDomainData(data);
@@ -56,14 +70,16 @@ function useSignalLevel(analyserNode: AnalyserNode | null | undefined, isPlaying
         const v = (data[i] - 128) / 128;
         sumSq += v * v;
       }
-      setLevel(Math.min(1, Math.sqrt(sumSq / data.length) * 1.8));
+      const raw = Math.min(1, Math.sqrt(sumSq / data.length) * 1.8);
+      smoothedRef.current = ballisticsStep(smoothedRef.current, raw, dtMs, ballistics);
+      setLevel(smoothedRef.current);
     };
     raf = requestAnimationFrame(tick);
     return () => {
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [analyserNode, isPlaying]);
+  }, [analyserNode, isPlaying, ballistics]);
 
   return level;
 }
@@ -89,6 +105,8 @@ function KnobControl({ param, onChange }: ControlProps) {
   const range = param.max - param.min || 1;
   const pct = Math.max(0, Math.min(1, (param.value - param.min) / range));
   const accent = param.accentColor || ACCENT_FALLBACK;
+  const [isEditingValue, setIsEditingValue] = useState(false);
+  const dragRef = useRef<HTMLDivElement | null>(null);
   const CX = 50;
   const CY = 50;
   const TRACK_R = 44;
@@ -114,8 +132,11 @@ function KnobControl({ param, onChange }: ControlProps) {
     const startVal = param.value;
     const onMove = (ev: MouseEvent) => {
       const dy = startY - ev.clientY;
-      const delta = (dy / 140) * range;
-      const next = Math.max(param.min, Math.min(param.max, startVal + delta));
+      // Shift = fine adjustment: same drag distance covers a smaller slice
+      // of the range, matching the "hold shift to be precise" convention
+      // used across professional plugin UIs.
+      const delta = (applyFineAdjust(dy, ev.shiftKey) / 140) * range;
+      const next = clampToRange(startVal + delta, param.min, param.max);
       onChange(param.id, parseFloat(next.toFixed(4)));
     };
     const onUp = () => {
@@ -126,9 +147,24 @@ function KnobControl({ param, onChange }: ControlProps) {
     window.addEventListener("mouseup", onUp);
   };
 
+  const handleWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    const step = wheelStepDelta(range, e.shiftKey) * wheelDirection(e.deltaY);
+    onChange(param.id, parseFloat(clampToRange(param.value + step, param.min, param.max).toFixed(4)));
+  };
+  useNonPassiveWheel(dragRef, handleWheel);
+
+  const handleReset = () => onChange(param.id, param.defaultValue);
+
   return (
     <div className="flex flex-col items-center gap-1.5 select-none">
-      <div className="relative w-16 h-16 cursor-ns-resize" onMouseDown={handleDrag} title="Drag up/down">
+      <div
+        ref={dragRef}
+        className="relative w-16 h-16 cursor-ns-resize"
+        onMouseDown={handleDrag}
+        onDoubleClick={handleReset}
+        title="Drag up/down (shift = fine, wheel = step, double-click = reset)"
+      >
         <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible">
           <defs>
             {/* Domed brushed-metal cap: light from top-left. */}
@@ -179,9 +215,34 @@ function KnobControl({ param, onChange }: ControlProps) {
         </svg>
       </div>
       <span className="text-[10px] font-semibold text-neutral-200 truncate max-w-[76px] text-center leading-tight tracking-tight">{param.name}</span>
-      <span className="text-[9px] font-mono text-neutral-400 tabular-nums bg-neutral-900/60 border border-neutral-800/80 rounded px-1.5 py-0.5">
-        {Number(param.value.toFixed(2))} {param.unit}
-      </span>
+      {isEditingValue ? (
+        <input
+          type="number"
+          defaultValue={param.value}
+          min={param.min}
+          max={param.max}
+          autoFocus
+          onFocus={(e) => e.currentTarget.select()}
+          onBlur={(e) => {
+            const parsed = parseFloat(e.currentTarget.value);
+            if (!Number.isNaN(parsed)) onChange(param.id, clampToRange(parsed, param.min, param.max));
+            setIsEditingValue(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+            if (e.key === "Escape") setIsEditingValue(false);
+          }}
+          className="w-16 text-[9px] font-mono text-neutral-100 tabular-nums bg-neutral-900 border border-indigo-500 rounded px-1.5 py-0.5 outline-none text-center"
+        />
+      ) : (
+        <span
+          onClick={() => setIsEditingValue(true)}
+          title="Click to enter an exact value"
+          className="text-[9px] font-mono text-neutral-400 tabular-nums bg-neutral-900/60 border border-neutral-800/80 rounded px-1.5 py-0.5 cursor-text hover:border-neutral-600 hover:text-neutral-200 transition-colors"
+        >
+          {Number(param.value.toFixed(2))} {param.unit}
+        </span>
+      )}
     </div>
   );
 }
@@ -340,6 +401,7 @@ function MicPositionControl({ param, onChange }: ControlProps) {
   // real and draggable, just one axis instead of two.
   const range = param.max - param.min || 1;
   const pct = Math.max(0, Math.min(1, (param.value - param.min) / range));
+  const dragRef = useRef<HTMLDivElement | null>(null);
 
   const handleDrag = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -358,6 +420,13 @@ function MicPositionControl({ param, onChange }: ControlProps) {
     window.addEventListener("mouseup", onUp);
   };
 
+  const handleWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    const step = wheelStepDelta(range, e.shiftKey) * wheelDirection(e.deltaY);
+    onChange(param.id, Math.round(clampToRange(param.value + step, param.min, param.max)));
+  };
+  useNonPassiveWheel(dragRef, handleWheel);
+
   return (
     <div className="w-full rounded-xl border-2 border-neutral-800 bg-neutral-950 p-2 select-none">
       <div className="flex justify-between items-baseline mb-1.5 px-0.5">
@@ -366,7 +435,13 @@ function MicPositionControl({ param, onChange }: ControlProps) {
           {Number(param.value.toFixed(0))} {param.unit}
         </span>
       </div>
-      <div className="relative w-full h-6 rounded-lg bg-neutral-900 border border-neutral-850 cursor-ew-resize overflow-hidden" onMouseDown={handleDrag}>
+      <div
+        ref={dragRef}
+        className="relative w-full h-6 rounded-lg bg-neutral-900 border border-neutral-850 cursor-ew-resize overflow-hidden"
+        onMouseDown={handleDrag}
+        onDoubleClick={() => onChange(param.id, param.defaultValue)}
+        title="Drag (wheel = step, double-click = reset)"
+      >
         <div className="absolute inset-y-0 left-0 opacity-25" style={{ width: `${pct * 100}%`, backgroundColor: param.accentColor || "#f97316" }} />
         <div
           className="absolute top-1/2 w-2.5 h-2.5 rounded-full border-2 border-white -translate-x-1/2 -translate-y-1/2"
@@ -401,16 +476,23 @@ function EqCurveControl({ param, allParams, onChange }: ControlProps) {
       const svg = (e.currentTarget.closest("svg") as SVGSVGElement) || null;
       const bound = svg?.getBoundingClientRect();
       if (!bound) return;
-      const update = (clientX: number, clientY: number) => {
+      // Shift = fine adjustment on the GAIN axis only (frequency stays at
+      // normal sensitivity -- a node's vertical position is the harder one
+      // to place precisely by ear). Position-based drag, so "fine" blends
+      // toward the dB value the drag started at, same approach as the
+      // slider's ratio-blend above.
+      const startDb = yPixelToDb(((e.clientY - bound.top) / bound.height) * height, height);
+      const update = (clientX: number, clientY: number, shiftHeld: boolean) => {
         if (freqParamId) {
           const hz = xPixelToHz(((clientX - bound.left) / bound.width) * width, width);
           onChange(freqParamId, Math.round(Math.max(freqMin!, Math.min(freqMax!, hz))));
         }
-        const db = yPixelToDb(((clientY - bound.top) / bound.height) * height, height);
+        const rawDb = yPixelToDb(((clientY - bound.top) / bound.height) * height, height);
+        const db = shiftHeld ? startDb + applyFineAdjust(rawDb - startDb, true) : rawDb;
         onChange(gainParamId, Math.max(gainMin, Math.min(gainMax, Math.round(db * 10) / 10)));
       };
-      update(e.clientX, e.clientY);
-      const onMove = (ev: MouseEvent) => update(ev.clientX, ev.clientY);
+      update(e.clientX, e.clientY, e.shiftKey);
+      const onMove = (ev: MouseEvent) => update(ev.clientX, ev.clientY, ev.shiftKey);
       const onUp = () => {
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
@@ -521,16 +603,26 @@ function SliderControl({ param, onChange }: ControlProps) {
   const range = param.max - param.min || 1;
   const pct = Math.max(0, Math.min(1, (param.value - param.min) / range));
   const accent = param.accentColor || ACCENT_FALLBACK;
+  const [isEditingValue, setIsEditingValue] = useState(false);
+  const dragRef = useRef<HTMLDivElement | null>(null);
 
   const handleDrag = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
     const bound = e.currentTarget.getBoundingClientRect();
-    const update = (clientX: number) => {
-      const ratio = Math.max(0, Math.min(1, (clientX - bound.left) / bound.width));
+    // Shift = fine adjustment. This is a position-absolute (not delta-based)
+    // drag, so "fine" means blending toward the ratio the drag STARTED at --
+    // the same physical mouse travel then only moves the value a fraction as
+    // far, instead of jumping straight to the cursor's raw position.
+    const dragStartRatio = pct;
+    const update = (clientX: number, shiftHeld: boolean) => {
+      const rawRatio = clampToRange((clientX - bound.left) / bound.width, 0, 1);
+      const ratio = shiftHeld
+        ? clampToRange(dragStartRatio + applyFineAdjust(rawRatio - dragStartRatio, true), 0, 1)
+        : rawRatio;
       onChange(param.id, parseFloat((param.min + ratio * range).toFixed(4)));
     };
-    update(e.clientX);
-    const onMove = (ev: MouseEvent) => update(ev.clientX);
+    update(e.clientX, e.shiftKey);
+    const onMove = (ev: MouseEvent) => update(ev.clientX, ev.shiftKey);
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
@@ -539,23 +631,58 @@ function SliderControl({ param, onChange }: ControlProps) {
     window.addEventListener("mouseup", onUp);
   };
 
+  const handleWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    const step = wheelStepDelta(range, e.shiftKey) * wheelDirection(e.deltaY);
+    onChange(param.id, parseFloat(clampToRange(param.value + step, param.min, param.max).toFixed(4)));
+  };
+  useNonPassiveWheel(dragRef, handleWheel);
+
   return (
     <div className="block select-none">
       <div className="flex items-baseline justify-between mb-1.5">
         <span className="text-[11px] font-semibold text-neutral-200 truncate pr-2 tracking-tight">{param.name}</span>
-        <span className="text-[10px] font-mono text-neutral-400 tabular-nums shrink-0 bg-neutral-900/60 border border-neutral-800/80 rounded px-1.5 py-0.5">
-          {Number(param.value.toFixed(2))} {param.unit}
-        </span>
+        {isEditingValue ? (
+          <input
+            type="number"
+            defaultValue={param.value}
+            min={param.min}
+            max={param.max}
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={(e) => {
+              const parsed = parseFloat(e.currentTarget.value);
+              if (!Number.isNaN(parsed)) onChange(param.id, clampToRange(parsed, param.min, param.max));
+              setIsEditingValue(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") setIsEditingValue(false);
+            }}
+            className="w-16 text-[10px] font-mono text-neutral-100 tabular-nums shrink-0 bg-neutral-900 border border-indigo-500 rounded px-1.5 py-0.5 outline-none text-center"
+          />
+        ) : (
+          <span
+            onClick={() => setIsEditingValue(true)}
+            title="Click to enter an exact value"
+            className="text-[10px] font-mono text-neutral-400 tabular-nums shrink-0 bg-neutral-900/60 border border-neutral-800/80 rounded px-1.5 py-0.5 cursor-text hover:border-neutral-600 hover:text-neutral-200 transition-colors"
+          >
+            {Number(param.value.toFixed(2))} {param.unit}
+          </span>
+        )}
       </div>
       {/* Recessed track with inner shadow, glowing accent fill, metallic grip */}
       <div
+        ref={dragRef}
         className="relative h-6 flex items-center cursor-ew-resize group"
         onMouseDown={handleDrag}
+        onDoubleClick={() => onChange(param.id, param.defaultValue)}
         role="slider"
         aria-valuemin={param.min}
         aria-valuemax={param.max}
         aria-valuenow={param.value}
         aria-label={param.name}
+        title="Drag left/right (shift = fine, wheel = step, double-click = reset)"
       >
         <div
           className="absolute inset-x-0 h-2 rounded-full bg-neutral-950 border border-black/60"

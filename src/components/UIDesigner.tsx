@@ -45,6 +45,8 @@ import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb
 import { ArchetypeId, ARCHETYPE_LABELS, BUILTIN_ARCHETYPES, applyArchetype } from "../utils/guiArchetypes";
 import { KNOB_RECIPES, toCssKnobStyle, resolveKnobStyle, KnobRenderStyle } from "../utils/uiRenderPatterns";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
+import { applyFineAdjust, wheelStepDelta, wheelDirection, clampToRange } from "../utils/controlInteraction";
+import { useNonPassiveWheel } from "../hooks/useNonPassiveWheel";
 
 interface UIDesignerProps {
   plugin: AudioPlugin;
@@ -108,6 +110,7 @@ export function CustomKnob({ param, onChange, onDblClick, themeStyle }: KnobProp
   const [isDragging, setIsDragging] = useState(false);
   const startYRef = useRef(0);
   const startValRef = useRef(0);
+  const dragRef = useRef<HTMLDivElement | null>(null);
 
   const range = param.max - param.min;
   const normalized = (param.value - param.min) / (range || 1);
@@ -119,15 +122,28 @@ export function CustomKnob({ param, onChange, onDblClick, themeStyle }: KnobProp
     e.preventDefault();
   };
 
+  // React's JSX onWheel is passive by default, so a plain onWheel prop's
+  // e.preventDefault() would silently fail to stop the canvas from
+  // scrolling underneath the knob while it's being spun -- confirmed live
+  // during this feature's verification. useNonPassiveWheel attaches a real
+  // { passive: false } listener instead.
+  const handleWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    const step = wheelStepDelta(range || 1, e.shiftKey) * wheelDirection(e.deltaY);
+    onChange(clampToRange(param.value + step, param.min, param.max));
+  };
+  useNonPassiveWheel(dragRef, handleWheel);
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isDragging) return;
       const deltaY = startYRef.current - e.clientY;
       const sensitivity = 0.005;
-      
-      let nextUnclamped = startValRef.current + (deltaY * range * sensitivity);
+      // Shift = fine adjustment: same convention as PluginControl.tsx's
+      // playback-time knob, for consistency across both surfaces.
+      let nextUnclamped = startValRef.current + (applyFineAdjust(deltaY, e.shiftKey) * range * sensitivity);
       let rounded = Math.max(param.min, Math.min(param.max, nextUnclamped));
-      
+
       if (range > 1) {
         rounded = Math.round(rounded * 100) / 100;
       } else {
@@ -173,8 +189,10 @@ export function CustomKnob({ param, onChange, onDblClick, themeStyle }: KnobProp
   return (
     <div className="flex flex-col items-center justify-center space-y-1 select-none group">
       <div
+        ref={dragRef}
         onMouseDown={handleMouseDown}
         onDoubleClick={onDblClick}
+        title="Drag (shift = fine, wheel = step, double-click = reset)"
         className={`relative w-12 h-12 rounded-full cursor-ns-resize shadow-md flex items-center justify-center transition-all ${isDragging ? "scale-105" : ""}`}
         style={{ background: css.bodyBackground, border: css.rimBorderCss }}
       >

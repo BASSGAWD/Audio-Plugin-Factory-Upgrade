@@ -2559,11 +2559,33 @@ export function polishPluginVisuals(
 
   // Amp/cab/mic/pad showpiece widgets never get a font override (matches
   // the pre-archetype behavior exactly); every control gets an accent.
+  //
+  // isFirstPolish reuses this function's own existing "have I touched this
+  // plugin before" signal (customSkin is only ever set once, below) to gate
+  // a HARD accentColor overwrite -- not just a backfill of missing values --
+  // on every non-showpiece param. Research into professional plugin UI
+  // design converged on "one dominant accent color, not a rainbow of
+  // per-knob colors" as one of the clearest markers of a polished vs.
+  // unfinished-looking plugin; GUI_DESIGN_PHILOSOPHY (dspPromptKit.ts) has
+  // always asked the LLM for this, but nothing enforced it -- a model that
+  // emitted divergent per-parameter colors anyway sailed straight through.
+  // Gating on isFirstPolish (rather than always overwriting) is what keeps
+  // this from clobbering a color a user later hand-picks via the Element
+  // Inspector: this function DOES get re-invoked on already-generated
+  // plugins (template swaps, preset loads), but by then customSkin is
+  // already set, so the gate is already closed by the time any user edit
+  // could exist.
+  const isFirstPolish = !plugin.customSkin;
   const themedParams = layout.parameters.map((p) => {
     const isShowpieceOrPad = p.controlType === "amp" || p.controlType === "cab" || p.controlType === "mic" || p.controlType === "pad";
+    const accentColor = isShowpieceOrPad
+      ? (p.accentColor ?? theme.accent)
+      : isFirstPolish
+        ? theme.accent
+        : (p.accentColor ?? theme.accent);
     return {
       ...p,
-      accentColor: p.accentColor ?? theme.accent,
+      accentColor,
       fontStyle: isShowpieceOrPad ? p.fontStyle : p.fontStyle ?? theme.font,
     };
   });
@@ -2583,6 +2605,7 @@ export function polishPluginVisuals(
   };
 
   if (!plugin.customSkin) changes.push(`applied a ${plugin.category}-themed faceplate skin`);
+  if (isFirstPolish) changes.push(`normalized every control to one dominant accent color (${theme.accent})`);
   if (styledCount > 0) changes.push(`assigned control types to ${styledCount} parameter(s)`);
   if (layout.laidOutCount > 0) changes.push(`auto-laid-out ${layout.laidOutCount} control(s) on the designer grid`);
 

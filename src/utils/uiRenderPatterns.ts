@@ -144,15 +144,17 @@ export const PANEL_TEXTURE_RECIPES: Record<PanelTextureStyle, PanelTextureRecipe
 };
 
 /* ------------------------------------------------------------------ */
-/* Meter ballistics (constants only this phase -- see METER_BALLISTICS   */
-/* doc comment for what's deferred and why)                             */
+/* Meter ballistics                                                      */
 /* ------------------------------------------------------------------ */
 
 /** Original ballistics constants (not copied from any hardware spec sheet).
- *  Defined and unit-tested now because they're cheap, self-contained data;
- *  wiring them into a LIVE, animated meter (a thread-safe level value from
- *  processBlock + a repaint timer) is a materially larger real-time
- *  data-flow feature, deliberately deferred -- see the project plan. */
+ *  Now wired into the BROWSER preview meter's client-side level smoothing
+ *  (ballisticsStep() below, consumed by PluginControl.tsx's useSignalLevel)
+ *  -- pure JS math on an already-polled AnalyserNode value, no audio-thread
+ *  change needed. Wiring ballistics into the COMPILED NATIVE plugin (a
+ *  thread-safe level value from processBlock + a repaint timer) remains a
+ *  materially larger real-time data-flow feature and is still deliberately
+ *  deferred -- see the project plan. */
 export interface MeterBallistics {
   attackMs: number;
   releaseMs: number;
@@ -165,6 +167,79 @@ export const METER_BALLISTICS: Record<"vu_needle" | "led_segment_peak", MeterBal
   vu_needle: { attackMs: 300, releaseMs: 300, overshootDamping: 0.35 },
   led_segment_peak: { attackMs: 3, releaseMs: 800, overshootDamping: 0 },
 };
+
+/** One exponential attack/release smoothing step: moves `current` toward
+ *  `target` at a rate set by whichever of attackMs/releaseMs applies (attack
+ *  when the target is rising, release when falling) for the elapsed `dtMs`.
+ *  Pure function -- no timers, no DOM -- so a caller's animation-frame loop
+ *  supplies dtMs and current/target each tick. overshootDamping is not
+ *  consumed here (it models spring/settle motion for a needle-style meter;
+ *  no needle widget exists in this codebase yet to render it) -- left
+ *  defined and tested but intentionally unconsumed until one does. */
+export function ballisticsStep(current: number, target: number, dtMs: number, ballistics: MeterBallistics): number {
+  const tauMs = target > current ? ballistics.attackMs : ballistics.releaseMs;
+  const coeff = 1 - Math.exp(-dtMs / Math.max(1, tauMs));
+  return current + coeff * (target - current);
+}
+
+/* ------------------------------------------------------------------ */
+/* Spectrum analyzer (browser-preview only -- Visualizer.tsx has no native/ */
+/* JUCE counterpart today, so this recipe stays JS-only data, unlike the   */
+/* knob/panel recipes above which emit both CSS and C++)                  */
+/* ------------------------------------------------------------------ */
+
+export type SpectrumFftSize = 1024 | 2048 | 4096 | 8192;
+export type SpectrumDbRange = 60 | 90 | 120;
+
+export interface SpectrumAnalyzerRecipe {
+  fftSizes: SpectrumFftSize[];
+  defaultFftSize: SpectrumFftSize;
+  dbRanges: SpectrumDbRange[];
+  defaultDbRange: SpectrumDbRange;
+  /** dB added/removed per octave around tiltPivotHz -- a standard analyzer
+   *  "pink tilt" (generic engineering convention, not any product's
+   *  proprietary curve) so a flat-spectrum signal reads visually flat
+   *  instead of sloping down at high frequencies. */
+  tiltDbPerOctave: number;
+  tiltPivotHz: number;
+}
+
+export const SPECTRUM_ANALYZER_RECIPE: SpectrumAnalyzerRecipe = {
+  fftSizes: [1024, 2048, 4096, 8192],
+  defaultFftSize: 2048,
+  dbRanges: [60, 90, 120],
+  defaultDbRange: 90,
+  tiltDbPerOctave: 4.5,
+  tiltPivotHz: 1000,
+};
+
+export function spectrumBinToHz(binIndex: number, binCount: number, sampleRate: number): number {
+  return (binIndex / binCount) * (sampleRate / 2);
+}
+
+export function tiltGainDb(hz: number, recipe: SpectrumAnalyzerRecipe = SPECTRUM_ANALYZER_RECIPE): number {
+  if (hz <= 0) return 0;
+  return Math.log2(hz / recipe.tiltPivotHz) * recipe.tiltDbPerOctave;
+}
+
+/** AnalyserNode.getByteFrequencyData bytes are linearly mapped from
+ *  [minDecibels, maxDecibels] -- the Web Audio spec defaults (-100, -30),
+ *  which this project never overrides. Converts a raw byte back to dB,
+ *  applies the tilt, then normalizes against dbRange to a 0..1 display
+ *  height. */
+export function byteMagnitudeToDisplayHeight01(
+  byteVal: number,
+  hz: number,
+  recipe: SpectrumAnalyzerRecipe = SPECTRUM_ANALYZER_RECIPE,
+  dbRange: number = recipe.defaultDbRange
+): number {
+  if (byteVal <= 0) return 0;
+  const MIN_DB = -100, MAX_DB = -30; // AnalyserNode defaults, unconfigured in this project
+  const db = MIN_DB + (byteVal / 255) * (MAX_DB - MIN_DB);
+  const tilted = db + tiltGainDb(hz, recipe);
+  const floor = -dbRange;
+  return Math.max(0, Math.min(1, (tilted - floor) / -floor));
+}
 
 /* ------------------------------------------------------------------ */
 /* Converters                                                           */

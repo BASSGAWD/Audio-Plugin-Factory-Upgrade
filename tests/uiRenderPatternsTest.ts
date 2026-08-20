@@ -13,7 +13,22 @@
  *  - resolveKnobStyle's backward-compatible aliasing (the legacy
  *    "pointer"/"vintage" ampKnobStyle strings) still resolves correctly
  */
-import { KNOB_RECIPES, PANEL_TEXTURE_RECIPES, METER_BALLISTICS, toCssKnobStyle, toJuceKnobPaintCode, toJucePanelPaintCode, resolveKnobStyle, KnobRenderStyle, PanelTextureStyle } from "../src/utils/uiRenderPatterns";
+import {
+  KNOB_RECIPES,
+  PANEL_TEXTURE_RECIPES,
+  METER_BALLISTICS,
+  ballisticsStep,
+  SPECTRUM_ANALYZER_RECIPE,
+  spectrumBinToHz,
+  tiltGainDb,
+  byteMagnitudeToDisplayHeight01,
+  toCssKnobStyle,
+  toJuceKnobPaintCode,
+  toJucePanelPaintCode,
+  resolveKnobStyle,
+  KnobRenderStyle,
+  PanelTextureStyle,
+} from "../src/utils/uiRenderPatterns";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -51,10 +66,68 @@ for (const style of panelStyles) {
   check(`${style}: microStructure scalePx is positive`, r.microStructure.scalePx > 0);
 }
 
-/* ---- meter ballistics (constants only this phase) ---- */
+/* ---- meter ballistics ---- */
 check("vu_needle ballistics defined", METER_BALLISTICS.vu_needle.attackMs > 0 && METER_BALLISTICS.vu_needle.releaseMs > 0);
 check("led_segment_peak ballistics defined", METER_BALLISTICS.led_segment_peak.attackMs > 0 && METER_BALLISTICS.led_segment_peak.releaseMs > 0);
 check("LED peak attack is much faster than release (peak-hold character)", METER_BALLISTICS.led_segment_peak.attackMs < METER_BALLISTICS.led_segment_peak.releaseMs / 10);
+
+/* ---- ballisticsStep: now wired into PluginControl.tsx's useSignalLevel ---- */
+{
+  const b = METER_BALLISTICS.led_segment_peak;
+  // Rising target (attack, 3ms tau): should reach very close to target within
+  // a handful of milliseconds.
+  let level = 0;
+  for (let i = 0; i < 20; i++) level = ballisticsStep(level, 1, 5, b);
+  check("attack: rises toward a higher target", level > 0.9, `${level}`);
+
+  // Falling target (release, 800ms tau): after the SAME elapsed time, should
+  // have moved much LESS than the attack case did -- proves attack/release
+  // are actually asymmetric, not just one shared time-constant.
+  let falling = 1;
+  for (let i = 0; i < 20; i++) falling = ballisticsStep(falling, 0, 5, b);
+  const roseBy = level; // started at 0, target 1
+  const fellBy = 1 - falling; // started at 1, target 0
+  check("release is decisively slower than attack for the same dtMs", fellBy < roseBy, `rose by ${roseBy}, fell by ${fellBy}`);
+
+  check("never overshoots past the target when rising", ballisticsStep(0, 1, 1e6, b) <= 1);
+  check("never undershoots past the target when falling", ballisticsStep(1, 0, 1e6, b) >= 0);
+  check("dtMs=0 leaves current unchanged", ballisticsStep(0.4, 1, 0, b) === 0.4);
+  check("already at target stays at target", ballisticsStep(0.5, 0.5, 50, b) === 0.5);
+}
+
+/* ---- spectrum analyzer recipe ---- */
+{
+  check("FFT-size ladder has 4 steps", SPECTRUM_ANALYZER_RECIPE.fftSizes.length === 4);
+  check("FFT sizes are ascending powers of two", SPECTRUM_ANALYZER_RECIPE.fftSizes.every((v, i, arr) => i === 0 || v > arr[i - 1]));
+  check("default FFT size is a member of the ladder", SPECTRUM_ANALYZER_RECIPE.fftSizes.includes(SPECTRUM_ANALYZER_RECIPE.defaultFftSize));
+  check("dB-range ladder has 3 steps", SPECTRUM_ANALYZER_RECIPE.dbRanges.length === 3);
+  check("default dB range is a member of the ladder", SPECTRUM_ANALYZER_RECIPE.dbRanges.includes(SPECTRUM_ANALYZER_RECIPE.defaultDbRange));
+  check("tilt is a positive dB/octave slope", SPECTRUM_ANALYZER_RECIPE.tiltDbPerOctave > 0);
+  check("tilt pivot sits in the audible mid-range", SPECTRUM_ANALYZER_RECIPE.tiltPivotHz > 200 && SPECTRUM_ANALYZER_RECIPE.tiltPivotHz < 5000);
+
+  check("spectrumBinToHz(0, ...) is 0 Hz (DC bin)", spectrumBinToHz(0, 512, 44100) === 0);
+  check("spectrumBinToHz(binCount, ...) reaches Nyquist", spectrumBinToHz(512, 512, 44100) === 22050);
+  check("spectrumBinToHz is monotonically increasing with bin index", spectrumBinToHz(100, 512, 44100) < spectrumBinToHz(200, 512, 44100));
+
+  check("tiltGainDb(0) is a no-op (guarded against -Infinity)", tiltGainDb(0) === 0);
+  check("tiltGainDb at the pivot frequency is 0 dB", Math.abs(tiltGainDb(SPECTRUM_ANALYZER_RECIPE.tiltPivotHz)) < 1e-9);
+  check("tiltGainDb rises above the pivot", tiltGainDb(SPECTRUM_ANALYZER_RECIPE.tiltPivotHz * 4) > 0);
+  check("tiltGainDb falls below the pivot", tiltGainDb(SPECTRUM_ANALYZER_RECIPE.tiltPivotHz / 4) < 0);
+  check("tiltGainDb is monotonic across octaves", tiltGainDb(8000) > tiltGainDb(4000) && tiltGainDb(4000) > tiltGainDb(2000));
+
+  check("byteMagnitudeToDisplayHeight01(0, ...) is exactly 0", byteMagnitudeToDisplayHeight01(0, 1000) === 0);
+  check("byteMagnitudeToDisplayHeight01 stays within [0,1] across the full byte range", (() => {
+    for (let b = 0; b <= 255; b += 5) {
+      for (const hz of [50, 1000, 15000]) {
+        const h = byteMagnitudeToDisplayHeight01(b, hz);
+        if (h < 0 || h > 1) return false;
+      }
+    }
+    return true;
+  })());
+  check("a louder byte value produces a taller (or equal) bar than a quieter one", byteMagnitudeToDisplayHeight01(200, 1000) >= byteMagnitudeToDisplayHeight01(100, 1000));
+  check("a tighter dB range (60) clips a quiet signal harder than a wider range (120)", byteMagnitudeToDisplayHeight01(60, 1000, SPECTRUM_ANALYZER_RECIPE, 60) <= byteMagnitudeToDisplayHeight01(60, 1000, SPECTRUM_ANALYZER_RECIPE, 120));
+}
 
 /* ---- CSS converter ---- */
 {

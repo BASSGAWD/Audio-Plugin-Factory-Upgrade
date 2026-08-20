@@ -45,6 +45,12 @@ export interface NativeParameter {
 export interface NativePlugin {
   name: string;
   category?: string;
+  /** Design attributes from the plugin's buildReport (e.g. "vintage",
+   *  "futuristic", "clinical") -- lets knob/panel style resolution refine
+   *  the category default toward how strongly this specific plugin claims
+   *  to emulate real hardware vs. being an original modern algorithm. See
+   *  ATTRIBUTE_KNOB_NUDGE / ATTRIBUTE_PANEL_NUDGE below. */
+  attributes?: string[];
   parameters: NativeParameter[];
   dspFunction: string;
   customSkin?: {
@@ -521,17 +527,53 @@ const CATEGORY_DEFAULT_PANEL_STYLE: Record<string, PanelTextureStyle> = {
   reverb: "matte_poly",
 };
 
-export function resolvePanelStyle(category: string | undefined): PanelTextureStyle {
-  return (category && CATEGORY_DEFAULT_PANEL_STYLE[category]) || "matte_poly";
+// Research into professional plugin UI design converged on "skeuomorphism
+// should scale with how strongly a plugin claims to emulate real hardware,
+// independent of its DSP category" -- a "vintage tape echo" and a "modern
+// digital delay algorithm" shouldn't automatically get the same knob/panel
+// treatment just because both are category "delay". plugin.buildReport
+// .attributes (dreamy/aggressive/vintage/futuristic/clinical/minimal/
+// industrial/luxurious -- the SAME vocabulary GenerativeFaceplate.tsx's
+// ATTRIBUTE_PATTERN already keys its generative-art pattern off) is an
+// existing, already-populated signal that captures exactly this. Each
+// category maps to exactly one plausible style today (confirmed: no small
+// family of options to pick within), so an attribute match here is a real
+// override of the category default, not a subtle nudge -- deliberate: it's
+// what the underlying design principle actually calls for.
+const ATTRIBUTE_KNOB_NUDGE: Partial<Record<string, KnobRenderStyle>> = {
+  vintage: "vintage_amber",
+  industrial: "chickenhead",
+  futuristic: "neonring",
+  clinical: "modern_pointer",
+  minimal: "modern_pointer",
+  luxurious: "silvercap",
+};
+const ATTRIBUTE_PANEL_NUDGE: Partial<Record<string, PanelTextureStyle>> = {
+  vintage: "wood_grain",
+  industrial: "carbon_weave",
+  futuristic: "matte_poly",
+  clinical: "matte_poly",
+  minimal: "matte_poly",
+  luxurious: "leather_grain",
+};
+
+export function resolvePanelStyle(category: string | undefined, attributes?: string[]): PanelTextureStyle {
+  const categoryDefault = (category && CATEGORY_DEFAULT_PANEL_STYLE[category]) || "matte_poly";
+  const nudge = attributes?.map((a) => ATTRIBUTE_PANEL_NUDGE[a]).find((s): s is PanelTextureStyle => Boolean(s));
+  return nudge ?? categoryDefault;
 }
 
-/** ampKnobStyle (when the parameter carries one -- amp/cab widgets, or any
- *  control the model/UI explicitly styled) wins; otherwise every ordinary
- *  knob on the plugin shares one category-appropriate default, same
- *  "one dominant style" principle as the panel texture above. */
-export function resolveParamKnobStyle(param: NativeParameter, category: string | undefined): KnobRenderStyle {
+/** ampKnobStyle (an explicit choice -- amp/cab widgets, or any control the
+ *  model/UI explicitly styled) always wins. Otherwise: an attribute match
+ *  overrides the plain category default (see ATTRIBUTE_KNOB_NUDGE doc
+ *  above); with neither, every ordinary knob on the plugin shares one
+ *  category-appropriate default, same "one dominant style" principle as the
+ *  panel texture above. */
+export function resolveParamKnobStyle(param: NativeParameter, category: string | undefined, attributes?: string[]): KnobRenderStyle {
   if (param.ampKnobStyle) return resolveKnobStyle(param.ampKnobStyle);
-  return (category && CATEGORY_DEFAULT_KNOB_STYLE[category]) || "modern_pointer";
+  const categoryDefault = (category && CATEGORY_DEFAULT_KNOB_STYLE[category]) || "modern_pointer";
+  const nudge = attributes?.map((a) => ATTRIBUTE_KNOB_NUDGE[a]).find((s): s is KnobRenderStyle => Boolean(s));
+  return nudge ?? categoryDefault;
 }
 
 export function generateLookAndFeelHeader(): string {
@@ -621,14 +663,15 @@ export function generatePluginEditorCpp(
   projectName: string,
   parameters: NativeParameter[],
   customSkin?: NativePlugin["customSkin"],
-  category?: string
+  category?: string,
+  attributes?: string[]
 ): string {
   const bgColor = customSkin?.bgColor || "#12161D";
   const accentColor = customSkin?.accentColor || "#7C5CFF";
   const textColor = customSkin?.textColor || "#F4F7FB";
-  const panelRecipe = PANEL_TEXTURE_RECIPES[resolvePanelStyle(category)];
+  const panelRecipe = PANEL_TEXTURE_RECIPES[resolvePanelStyle(category, attributes)];
 
-  const paramStyles = parameters.map((p) => resolveParamKnobStyle(p, category));
+  const paramStyles = parameters.map((p) => resolveParamKnobStyle(p, category, attributes));
 
   const columns = Math.max(1, Math.min(4, parameters.length));
   const buildSliders = parameters
@@ -643,6 +686,9 @@ export function generatePluginEditorCpp(
         slider->getProperties().set ("knobStyle", "${paramStyles[i]}");
         slider->setColour (juce::Slider::rotarySliderFillColourId, juce::Colour::fromString ("ff${accentColor.replace("#", "")}"));
         slider->setTextValueSuffix (" ${p.unit || ""}");
+        slider->setDoubleClickReturnValue (true, ${p.defaultValue});
+        slider->setVelocityBasedMode (true);
+        slider->setPopupDisplayEnabled (true, true, this);
         addAndMakeVisible (slider);
 
         attachments.add (new juce::AudioProcessorValueTreeState::SliderAttachment (processorRef.apvts, "${p.id}", *slider));
@@ -795,14 +841,14 @@ export async function scaffoldNativeProject(plugin: NativePlugin, llmConfig: Loc
   fs.writeFileSync(
     path.join(projectDir, "Source", "LookAndFeel.cpp"),
     generateLookAndFeelCpp(
-      plugin.parameters.map((p) => resolveParamKnobStyle(p, plugin.category)),
+      plugin.parameters.map((p) => resolveParamKnobStyle(p, plugin.category, plugin.attributes)),
       plugin.customSkin?.accentColor || "#7C5CFF"
     )
   );
   fs.writeFileSync(path.join(projectDir, "Source", "PluginEditor.h"), generatePluginEditorHeader(projectName));
   fs.writeFileSync(
     path.join(projectDir, "Source", "PluginEditor.cpp"),
-    generatePluginEditorCpp(projectName, plugin.parameters, plugin.customSkin, plugin.category)
+    generatePluginEditorCpp(projectName, plugin.parameters, plugin.customSkin, plugin.category, plugin.attributes)
   );
   // Manifest lets the compile-repair loop (and any later tooling) know the
   // parameter ids and project identity without re-parsing generated C++.

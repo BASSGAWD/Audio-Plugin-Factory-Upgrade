@@ -162,7 +162,7 @@ Also, provide highly structured "faustCode" and "cppJuceCode" so developers can 
 // 3. Chat with specialised DSP Agent Roles with code context
 app.post("/api/plugins/chat", async (req, res) => {
   try {
-    const { prompt, history, systemInstruction, temperature, activeCode, activeParams } = req.body;
+    const { prompt, history, systemInstruction, temperature, activeCode, activeParams, discoveryContext } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required." });
@@ -196,9 +196,17 @@ app.post("/api/plugins/chat", async (req, res) => {
     }
 
     // Embed current code configuration to give agents supreme awareness
-    const contextStr = activeCode
-      ? `\n\n[CONTEXT: The user is currently editing a plugin DSP script. Here is the active code:\n\`\`\`javascript\n${activeCode}\n\`\`\`\nParameters available in this scope: ${JSON.stringify(activeParams || [])}]`
-      : "";
+    const contextStr =
+      (activeCode
+        ? `\n\n[CONTEXT: The user is currently editing a plugin DSP script. Here is the active code:\n\`\`\`javascript\n${activeCode}\n\`\`\`\nParameters available in this scope: ${JSON.stringify(activeParams || [])}]`
+        : "") +
+      // Ephemeral, best-effort live-web reference (see gatherLiveBuildContext,
+      // src/utils/researchEngine.ts) -- this is the only path this string
+      // reaches the Gemini cloud provider, since buildRecipeContext/
+      // dspRecipes.ts is never imported into this server file at all.
+      (discoveryContext
+        ? `\n\n[LIVE WEB REFERENCE (background only -- do not copy verbatim, do not brand the plugin after a real product):\n${discoveryContext}]`
+        : "");
 
     contents.push({
       role: "user",

@@ -60,6 +60,7 @@ const TEST_FILES = [
   "safetyNetTest.ts",
   "controlInteractionTest.ts",
   "accentNormalizationTest.ts",
+  "liveBuildDiscoveryTest.ts",
 ];
 
 let failed = 0;

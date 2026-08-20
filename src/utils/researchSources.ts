@@ -11,6 +11,8 @@
  * a page is ever acted on.
  */
 
+import { corpusEntriesFor } from "./researchCorpus";
+
 export interface WebSource {
   url: string;
   title: string;
@@ -51,10 +53,123 @@ export const WEB_SOURCES: Record<string, WebSource[]> = {
   biquad: [
     { url: "https://www.w3.org/TR/audio-eq-cookbook/", title: "Audio EQ Cookbook", source: "W3C / R. Bristow-Johnson", authority: 98, keywords: ["biquad", "coefficient", "peaking", "alpha", "cutoff"] },
   ],
+
+  // ---- Live-build discovery additions --------------------------------
+  // Same authoritative, non-promotional sourcing discipline as the original
+  // 8: Wikipedia/CCRMA/W3C only, never a commercial blog. "opto-model" and
+  // "fet-model" reuse the EXACT citation URLs researchCorpus.ts already uses
+  // for those concepts (LA-2A / 1176) -- same real hardware, cited the same
+  // way, principle extracted and generalized rather than the plugin ever
+  // being branded after the real product.
+  "opto-model": [
+    { url: "https://en.wikipedia.org/wiki/LA-2A_Leveling_Amplifier", title: "LA-2A Leveling Amplifier", source: "Wikipedia", authority: 75, keywords: ["opto", "photocell", "program-dependent", "release", "peak reduction"] },
+  ],
+  "fet-model": [
+    { url: "https://en.wikipedia.org/wiki/1176_Peak_Limiter", title: "1176 Peak Limiter", source: "Wikipedia", authority: 75, keywords: ["fet", "attack", "all-buttons", "limiter", "1176"] },
+  ],
+  crossover: [
+    { url: "https://en.wikipedia.org/wiki/Audio_crossover", title: "Audio crossover", source: "Wikipedia", authority: 75, keywords: ["crossover", "band-split", "low-pass", "high-pass", "linkwitz"] },
+  ],
+  "state-variable-filter": [
+    { url: "https://en.wikipedia.org/wiki/State_variable_filter", title: "State variable filter", source: "Wikipedia", authority: 75, keywords: ["state variable", "svf", "lowpass", "highpass", "bandpass", "resonance"] },
+  ],
+  chorus: [
+    { url: "https://en.wikipedia.org/wiki/Chorus_effect", title: "Chorus effect", source: "Wikipedia", authority: 75, keywords: ["chorus", "detune", "lfo", "modulated delay", "ensemble"] },
+  ],
+  tremolo: [
+    { url: "https://en.wikipedia.org/wiki/Tremolo", title: "Tremolo", source: "Wikipedia", authority: 75, keywords: ["tremolo", "amplitude modulation", "lfo", "rate", "depth"] },
+  ],
+  "ring-modulation": [
+    { url: "https://en.wikipedia.org/wiki/Ring_modulation", title: "Ring modulation", source: "Wikipedia", authority: 75, keywords: ["ring modulation", "carrier", "sideband", "multiplier", "metallic"] },
+  ],
+  "pitch-detection": [
+    { url: "https://en.wikipedia.org/wiki/Pitch_detection_algorithm", title: "Pitch detection algorithm", source: "Wikipedia", authority: 75, keywords: ["pitch detection", "autocorrelation", "fundamental frequency", "f0"] },
+  ],
+  "granular-synthesis": [
+    { url: "https://en.wikipedia.org/wiki/Granular_synthesis", title: "Granular synthesis", source: "Wikipedia", authority: 75, keywords: ["grain", "granular", "window", "overlap", "pitch shift"] },
+  ],
+  "spectral-processing": [
+    { url: "https://en.wikipedia.org/wiki/Short-time_Fourier_transform", title: "Short-time Fourier transform", source: "Wikipedia", authority: 75, keywords: ["stft", "fft", "spectral", "window", "overlap-add"] },
+  ],
+  oscillator: [
+    { url: "https://en.wikipedia.org/wiki/Voltage-controlled_oscillator", title: "Voltage-controlled oscillator", source: "Wikipedia", authority: 75, keywords: ["oscillator", "vco", "waveform", "pitch", "tuning"] },
+  ],
+  sibilance: [
+    { url: "https://en.wikipedia.org/wiki/Sibilant", title: "Sibilant", source: "Wikipedia", authority: 70, keywords: ["sibilance", "de-esser", "high frequency", "consonant"] },
+  ],
+  oversampling: [
+    { url: "https://en.wikipedia.org/wiki/Oversampling", title: "Oversampling", source: "Wikipedia", authority: 75, keywords: ["oversampling", "aliasing", "nyquist", "upsample", "decimation"] },
+  ],
+  "bit-reduction": [
+    { url: "https://en.wikipedia.org/wiki/Bitcrusher", title: "Bitcrusher", source: "Wikipedia", authority: 75, keywords: ["bitcrush", "bit depth", "sample rate reduction", "quantization"] },
+  ],
+  wavefolding: [
+    { url: "https://en.wikipedia.org/wiki/Waveshaper", title: "Waveshaper", source: "Wikipedia", authority: 75, keywords: ["wavefold", "waveshaper", "transfer function", "fold", "harmonics"] },
+  ],
+  "tape-delay": [
+    { url: "https://en.wikipedia.org/wiki/Roland_Space_Echo", title: "Roland Space Echo", source: "Wikipedia", authority: 72, keywords: ["tape delay", "tape echo", "wow and flutter", "feedback", "multi-head"] },
+  ],
+  "envelope-generator": [
+    { url: "https://en.wikipedia.org/wiki/Envelope_(music)", title: "Envelope (music)", source: "Wikipedia", authority: 75, keywords: ["envelope", "attack", "decay", "sustain", "release", "adsr"] },
+  ],
+  "voice-allocation": [
+    { url: "https://en.wikipedia.org/wiki/Polyphony_and_monophony_in_instruments", title: "Polyphony and monophony in instruments", source: "Wikipedia", authority: 75, keywords: ["polyphony", "monophony", "voice allocation", "voice stealing"] },
+  ],
+  "feedback-delay-network": [
+    { url: "https://ccrma.stanford.edu/~jos/pasp/FDN_Reverberation.html", title: "FDN Reverberation", source: "J.O. Smith, Physical Audio Signal Processing (CCRMA)", authority: 95, keywords: ["feedback delay network", "fdn", "matrix", "reverberation"] },
+  ],
 };
 
 export function webSourcesFor(concept: string): WebSource[] {
   return WEB_SOURCES[concept] ?? [];
+}
+
+/**
+ * Regex fallback for WEB_SOURCES concepts that have no researchCorpus.ts
+ * entry (so resolveWebSourceConcept's primary corpusEntriesFor() pass can't
+ * find them). Copied verbatim from the matching family regex in
+ * dspRecipes.ts wherever one already exists, rather than reinvented, so
+ * detection stays consistent with how the rest of the factory already
+ * recognizes these concepts from a prompt. Concepts already resolvable via
+ * corpusEntriesFor (opto-model, fet-model, spectral-processing, mid-side)
+ * are deliberately absent here -- they don't need a fallback.
+ */
+const WEB_SOURCE_ONLY_MATCH: Record<string, RegExp> = {
+  crossover: /crossover|band.?split|linkwitz.?riley/i,
+  "state-variable-filter": /state.?variable|\bsvf\b/i,
+  chorus: /chorus|flang|ensemble|leslie|rotary/i, // dspRecipes.ts "modulation" family regex
+  tremolo: /tremolo|\btrem\b/i, // dspRecipes.ts "tremolo" regex, verbatim
+  "ring-modulation": /ring.?mod|ring.?modulat/i,
+  "pitch-detection": /pitch.?detect|autocorrelat|fundamental\s*frequency|\bf0\b/i,
+  "granular-synthesis": /granular|grain\b/i,
+  oscillator: /oscillator|\bvco\b|voltage.?controlled/i,
+  sibilance: /sibilan|de.?ess/i,
+  oversampling: /oversampl|anti.?alias/i,
+  "bit-reduction": /bitcrush|bit.?reduc|bit.?depth|sample.?rate.?reduc/i,
+  wavefolding: /wavefold|wave.?fold/i,
+  "tape-delay": /tape.?delay|tape.?echo|space\s*echo/i,
+  "envelope-generator": /envelope|\badsr\b|attack.?decay.?sustain.?release/i,
+  "voice-allocation": /voice.?alloc|voice.?steal|polyphon|monophon/i,
+  "feedback-delay-network": /feedback\s*delay\s*network|\bfdn\b/i,
+};
+
+/**
+ * Resolve a build prompt (or a bare concept slug) to the best-matching
+ * WEB_SOURCES key. Reuses the SAME fuzzy resolution runResearch already
+ * relies on (corpusEntriesFor's regex/substring match against
+ * RESEARCH_CORPUS) as the primary pass -- so a concept with real research
+ * corpus coverage is recognized the identical way the rest of the pipeline
+ * already recognizes it -- then falls back to WEB_SOURCE_ONLY_MATCH for
+ * concepts that have web coverage but no corpus entry. Returns null on no
+ * match; callers must treat that as a silent no-op, never an error.
+ */
+export function resolveWebSourceConcept(prompt: string): string | null {
+  const corpusHit = corpusEntriesFor(prompt)[0]?.concept;
+  if (corpusHit && WEB_SOURCES[corpusHit]) return corpusHit;
+  for (const [concept, match] of Object.entries(WEB_SOURCE_ONLY_MATCH)) {
+    if (match.test(prompt)) return concept;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */

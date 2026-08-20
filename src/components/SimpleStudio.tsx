@@ -30,14 +30,21 @@ interface SimpleStudioProps {
   dspError: string | null;
   isPlaying: boolean;
   bypass: boolean;
-  sourceType: "synth" | "sine" | "noise";
+  sourceType: "synth" | "sine" | "noise" | "live_input";
   analyserNode: AnalyserNode | null;
   onSend: (prompt: string) => void;
   onStop: () => void;
   onClearChat: () => void;
   onTogglePlay: () => void;
   onToggleBypass: () => void;
-  onSourceTypeChange: (source: "synth" | "sine" | "noise") => void;
+  onSourceTypeChange: (source: "synth" | "sine" | "noise" | "live_input") => void;
+  /** Real input devices (only populated, with real labels, after the user has
+   *  granted mic/line permission at least once — see App.tsx's
+   *  refreshAudioDeviceList). Optional: absent/empty just means "use the
+   *  OS default input," which is a perfectly valid choice. */
+  audioInputDevices?: MediaDeviceInfo[];
+  selectedInputDeviceId?: string | null;
+  onSelectInputDevice?: (deviceId: string | null) => void;
   onSliderChange: (paramId: string, value: number) => void;
   onOpenPro: (tab?: string) => void;
   /** Opens the Factory Canvas: the spatial multi-plugin workspace. */
@@ -189,6 +196,9 @@ export default function SimpleStudio({
   onTogglePlay,
   onToggleBypass,
   onSourceTypeChange,
+  audioInputDevices = [],
+  selectedInputDeviceId = null,
+  onSelectInputDevice,
   onSliderChange,
   onOpenPro,
   onOpenCanvas,
@@ -729,6 +739,32 @@ export default function SimpleStudio({
                       {s === "synth" ? "Melody" : s === "sine" ? "Tone" : "Noise"}
                     </button>
                   ))}
+                  <button
+                    onClick={() => onSourceTypeChange("live_input")}
+                    className={`text-[10px] px-2.5 py-1 rounded-full border transition-colors cursor-pointer ${
+                      sourceType === "live_input"
+                        ? "bg-orange-600/20 border-orange-700 text-orange-300"
+                        : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200"
+                    }`}
+                    title="Play a real instrument/mic through your audio interface, instead of a built-in test tone"
+                  >
+                    🎤 Live In
+                  </button>
+                  {sourceType === "live_input" && audioInputDevices.length > 1 && (
+                    <select
+                      value={selectedInputDeviceId ?? ""}
+                      onChange={(e) => onSelectInputDevice?.(e.target.value || null)}
+                      className="text-[10px] bg-neutral-900 border border-neutral-800 text-neutral-300 rounded-full px-2 py-1 outline-none cursor-pointer"
+                      title="Which input device to capture from"
+                    >
+                      <option value="">System default</option>
+                      {audioInputDevices.map((d) => (
+                        <option key={d.deviceId} value={d.deviceId}>
+                          {d.label || `Input ${d.deviceId.slice(0, 6)}`}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     onClick={onToggleBypass}
                     className={`text-[10px] px-2.5 py-1 rounded-full border transition-colors cursor-pointer ${

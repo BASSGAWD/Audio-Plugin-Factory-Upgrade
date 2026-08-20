@@ -83,6 +83,7 @@ import { runRefinementLoop, refinementScore, isNearTie, MAX_REFINE_LOOPS, Ranked
 import { classifyEditIntent } from "./utils/editIntent";
 import { runEditPass, ElementNote } from "./utils/editPass";
 import { SPECTRUM_ANALYZER_RECIPE } from "./utils/uiRenderPatterns";
+import { gatherLiveBuildContext, createProxyWebFetcher } from "./utils/researchEngine";
 
 export function sanitizeDspCode(codeString: string): string {
   let sanitizedCode = codeString;
@@ -632,9 +633,28 @@ export default function App() {
 
   // Web Audio engine state
   const [isPlaying, setIsPlaying] = useState(false);
-  const [sourceType, setSourceType] = useState<"synth" | "sine" | "noise">("synth");
+  const [sourceType, setSourceType] = useState<"synth" | "sine" | "noise" | "live_input">("synth");
   const [bypass, setBypass] = useState(false);
   const [dspError, setDspError] = useState<string | null>(null);
+
+  // Real audio-interface I/O: which physical input/output device to use for
+  // "live_input" testing. null = browser/OS default. Labels are only real
+  // (the interface's actual driver name) once getUserMedia permission has
+  // been granted at least once -- see refreshAudioDeviceList().
+  const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [audioOutputDevices, setAudioOutputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedInputDeviceId, setSelectedInputDeviceId] = useState<string | null>(null);
+  const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState<string | null>(null);
+  const liveInputWarningShownRef = useRef(false);
+  // Mirror sourceType/isPlaying in refs so changeSourceType's live-input
+  // restart path (stopAudioEngine() -> togglePlaySimulation()) sees the NEW
+  // values immediately -- both calls happen inside the same synchronous
+  // handler, before React has re-rendered with the state update, so the
+  // closed-over state alone would still read the OLD values.
+  const sourceTypeRef = useRef(sourceType);
+  const isPlayingRef = useRef(isPlaying);
+  useEffect(() => { sourceTypeRef.current = sourceType; }, [sourceType]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   // Toast status Toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -706,6 +726,13 @@ export default function App() {
   const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const analyserNodeRef = useRef<AnalyserNode | null>(null);
+  // Live audio-interface input/output routing (real mic/line-in through the
+  // generated plugin, and optional output-device selection). All null unless
+  // a "live_input" test source or a non-default output device is active.
+  const liveInputStreamRef = useRef<MediaStream | null>(null);
+  const liveInputSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const mediaStreamDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const outputAudioElRef = useRef<HTMLAudioElement | null>(null);
   const activeParamsRef = useRef<Record<string, number>>({});
   const outputTrimRef = useRef<number>(1.0);
   const dcBlockRef = useRef<boolean>(false);
@@ -1003,9 +1030,44 @@ export default function App() {
     savePluginState(updatedPlugin);
   };
 
+  // Re-enumerates real audio devices. Device `label`s are empty/generic
+  // until getUserMedia permission has been granted at least once -- after a
+  // successful acquireLiveInputStream() call, this will show the interface's
+  // real driver-reported name (e.g. a real Focusrite/MOTU unit), not a
+  // generic "Microphone" placeholder.
+  const refreshAudioDeviceList = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setAudioInputDevices(devices.filter((d) => d.kind === "audioinput"));
+      setAudioOutputDevices(devices.filter((d) => d.kind === "audiooutput"));
+    } catch {
+      // enumerateDevices itself failing (very old browser) just leaves the
+      // picker empty -- "live_input" still works against the OS default.
+    }
+  };
+
+  // Captures a real mic/line-in stream for "live_input" testing. Disabling
+  // echoCancellation/noiseSuppression/autoGainControl is deliberate: the
+  // browser's default speech-oriented pipeline audibly colors a clean
+  // instrument/line signal before the plugin's own DSP ever sees it.
+  const acquireLiveInputStream = async (deviceId: string | null): Promise<MediaStream> => {
+    const constraints: MediaStreamConstraints = {
+      audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 2,
+      },
+    };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    await refreshAudioDeviceList(); // permission just granted -- labels are now real
+    return stream;
+  };
+
   // ---- 4. Playback Simulation Audio Context Engine ----
   const togglePlaySimulation = async () => {
-    if (isPlaying) {
+    if (isPlayingRef.current) {
       stopAudioEngine();
       return;
     }
@@ -1024,7 +1086,35 @@ export default function App() {
       analyserNodeRef.current = analyser;
 
       timeIndexRef.current = 0;
-      dspStateRef.current = {}; 
+      dspStateRef.current = {};
+
+      // Real audio-interface input: acquire the stream BEFORE building the
+      // worklet, so a denied/failed permission aborts cleanly with the
+      // engine never half-started. Reads sourceTypeRef (not the closed-over
+      // sourceType state) so a same-tick restart from changeSourceType sees
+      // the value it just set, not a stale one from before React re-rendered.
+      if (sourceTypeRef.current === "live_input") {
+        try {
+          const stream = await acquireLiveInputStream(selectedInputDeviceId);
+          liveInputStreamRef.current = stream;
+          if (!liveInputWarningShownRef.current) {
+            liveInputWarningShownRef.current = true;
+            triggerToast("Live input active — if your interface has direct hardware monitoring on, turn it off or use headphones to avoid a feedback loop.");
+          }
+        } catch (mediaErr: any) {
+          try { await activeCtx.close(); } catch { /* already closing/closed */ }
+          audioCtxRef.current = null;
+          sourceTypeRef.current = "synth";
+          setSourceType("synth");
+          const denied = mediaErr?.name === "NotAllowedError" || mediaErr?.name === "PermissionDeniedError";
+          triggerToast(
+            denied
+              ? "Microphone/line access was denied — check your browser's site permissions to use a real audio interface."
+              : `Couldn't access an audio input device: ${mediaErr?.message || mediaErr}`
+          );
+          return;
+        }
+      }
 
       // Anti-alias smoother state for the ScriptProcessor fallback's precision mode
       let aa1 = 0.0;
@@ -1182,9 +1272,22 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     const outputRight = output.length > 1 ? output[1] : null;
     const len = outputChannel.length;
 
+    // Real audio-interface input: read from the worklet's actual audio
+    // input (connected via a MediaStreamAudioSourceNode on the main thread)
+    // instead of the synthetic sourceAt() generator. Everything downstream
+    // (bypass, dspFunc call, sanitize, DC-block, oversampling, clamp) is
+    // unchanged -- only the SOURCE of srcL/srcR differs for this one branch.
+    const liveIn = this.sourceType === "live_input" && inputs[0] && inputs[0][0] && inputs[0][0].length > 0;
+
     for (let i = 0; i < len; i++) {
-      const srcL = this.sourceAt(this.timeIndex);
-      const srcR = this.sourceAt(this.timeIndex + 97);
+      let srcL, srcR;
+      if (liveIn) {
+        srcL = sanitizeSample(inputs[0][0][i] ?? 0);
+        srcR = sanitizeSample((inputs[0][1] ? inputs[0][1][i] : inputs[0][0][i]) ?? 0);
+      } else {
+        srcL = this.sourceAt(this.timeIndex);
+        srcR = this.sourceAt(this.timeIndex + 97);
+      }
       this.timeIndex++;
 
       if (this.bypass) {
@@ -1267,17 +1370,32 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
       if (useWorklet) {
         // outputChannelCount [2]: a source-style worklet defaults to ONE
         // output channel, which would silently fold the stereo path to mono.
+        // channelCount/channelCountMode/channelInterpretation pin the INPUT
+        // side to a real discrete stereo pair too, so a stereo mic stream
+        // isn't silently downmixed to mono before process() ever sees it.
         const workletNode = new AudioWorkletNode(activeCtx, "dynamic-dsp-processor", {
           outputChannelCount: [2],
+          channelCount: 2,
+          channelCountMode: "explicit",
+          channelInterpretation: "discrete",
         });
         workletNodeRef.current = workletNode;
+
+        // Real audio-interface input: connect the captured MediaStream
+        // directly into the worklet's own input -- process() reads it
+        // instead of calling sourceAt() when sourceType is "live_input".
+        if (liveInputStreamRef.current) {
+          const mediaStreamSource = activeCtx.createMediaStreamSource(liveInputStreamRef.current);
+          liveInputSourceNodeRef.current = mediaStreamSource;
+          mediaStreamSource.connect(workletNode);
+        }
 
         // Populate baseline data
         workletNode.port.postMessage({ type: "code", code: plugin.dspFunction });
         workletNode.port.postMessage({ type: "params", params: activeParamsRef.current });
         workletNode.port.postMessage({ type: "bypass", bypass });
         workletNode.port.postMessage({ type: "oversampling", oversampling: isPrecisionOversampled });
-        workletNode.port.postMessage({ type: "sourceType", sourceType });
+        workletNode.port.postMessage({ type: "sourceType", sourceType: sourceTypeRef.current });
         workletNode.port.postMessage({ type: "trim", trim: outputTrimRef.current });
         workletNode.port.postMessage({ type: "dcblock", dcblock: dcBlockRef.current });
 
@@ -1290,6 +1408,18 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
 
         workletNode.connect(analyser);
       } else {
+        // Legacy ScriptProcessor fallback: synth/sine/noise only. Live
+        // audio-interface input is deliberately scoped to the AudioWorklet
+        // path -- this fallback already exists only for sandboxed frames
+        // without AudioWorklet support, and isn't worth doubling the
+        // maintenance/testing surface for that narrow case.
+        if (sourceTypeRef.current === "live_input") {
+          liveInputStreamRef.current?.getTracks().forEach((t) => t.stop());
+          liveInputStreamRef.current = null;
+          sourceTypeRef.current = "synth";
+          setSourceType("synth");
+          triggerToast("Live input needs AudioWorklet support, which isn't available in this browser context — switched back to the built-in test tones.");
+        }
         // Safe 100% compliant ScriptProcessor Fallback (stereo out)
         const processor = activeCtx.createScriptProcessor(512, 1, 2);
         processorNodeRef.current = processor;
@@ -1298,8 +1428,8 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         // the right channel can read 97 samples ahead (decorrelated pair).
         const sourceAt = (index: number): number => {
           const t = index / 44100;
-          if (sourceType === "sine") return Math.sin(2 * Math.PI * 440 * t) * 0.35;
-          if (sourceType === "noise") {
+          if (sourceTypeRef.current === "sine") return Math.sin(2 * Math.PI * 440 * t) * 0.35;
+          if (sourceTypeRef.current === "noise") {
             let h = (index * 374761393 + 668265263) | 0;
             h = Math.imul(h ^ (h >>> 13), 1274126177);
             return ((h ^ (h >>> 16)) / 2147483648) * 0.15;
@@ -1385,7 +1515,31 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         processor.connect(analyser);
       }
 
-      analyser.connect(activeCtx.destination);
+      // Output-device routing: the direct connection is the default for
+      // everyone (lowest latency, zero extra moving parts). Only when the
+      // user has explicitly picked a non-default output AND the browser
+      // supports it do we build the setSinkId bridge -- Web Audio has no way
+      // to route an AudioContext to a specific device otherwise; setSinkId
+      // only exists on <audio>/<video> elements.
+      if (selectedOutputDeviceId && "setSinkId" in HTMLMediaElement.prototype) {
+        const dest = activeCtx.createMediaStreamDestination();
+        analyser.connect(dest);
+        mediaStreamDestRef.current = dest;
+        const audioEl = document.createElement("audio");
+        audioEl.autoplay = true;
+        audioEl.srcObject = dest.stream;
+        try {
+          await (audioEl as any).setSinkId(selectedOutputDeviceId);
+        } catch (sinkErr) {
+          console.warn("[Audio Engine] setSinkId failed, falling back to default output:", sinkErr);
+          analyser.disconnect(dest);
+          mediaStreamDestRef.current = null;
+          analyser.connect(activeCtx.destination);
+        }
+        outputAudioElRef.current = audioEl;
+      } else {
+        analyser.connect(activeCtx.destination);
+      }
 
       if (activeCtx.state === "suspended") {
         await activeCtx.resume();
@@ -1401,6 +1555,26 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
 
   const stopAudioEngine = () => {
     try {
+      // Live-input/output-bridge cleanup FIRST -- a real MediaStream leak
+      // (mic left "hot", tab still showing the recording indicator) is the
+      // one genuinely new resource this engine can now hold onto.
+      if (liveInputSourceNodeRef.current) {
+        liveInputSourceNodeRef.current.disconnect();
+        liveInputSourceNodeRef.current = null;
+      }
+      if (liveInputStreamRef.current) {
+        liveInputStreamRef.current.getTracks().forEach((t) => t.stop());
+        liveInputStreamRef.current = null;
+      }
+      if (mediaStreamDestRef.current) {
+        mediaStreamDestRef.current.disconnect();
+        mediaStreamDestRef.current = null;
+      }
+      if (outputAudioElRef.current) {
+        outputAudioElRef.current.pause();
+        outputAudioElRef.current.srcObject = null;
+        outputAudioElRef.current = null;
+      }
       if (workletNodeRef.current) {
         workletNodeRef.current.disconnect();
         workletNodeRef.current = null;
@@ -1420,7 +1594,29 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     } catch (e) {
       console.error("Clean error on engine stop:", e);
     }
+    isPlayingRef.current = false; // synchronous -- see changeSourceType's restart path
     setIsPlaying(false);
+  };
+
+  // Single entry point for changing the test-signal source, used by BOTH
+  // Simple Mode's and the Pro-mode Playground's source-type buttons. Every
+  // OTHER source-type swap can just message the already-running worklet
+  // (the existing sourceType-change useEffect handles that) -- but
+  // "live_input" needs a real MediaStream acquired/released at engine-start
+  // time, so swapping into or out of it while already playing requires a
+  // full stop+restart, not just a message. sourceTypeRef/isPlayingRef are
+  // updated synchronously here so the immediate restart sees the NEW values
+  // instead of the stale ones from before this render commits.
+  const changeSourceType = (next: "synth" | "sine" | "noise" | "live_input") => {
+    const prev = sourceTypeRef.current;
+    if (prev === next) return;
+    const needsRestart = isPlayingRef.current && (prev === "live_input" || next === "live_input");
+    sourceTypeRef.current = next;
+    setSourceType(next);
+    if (needsRestart) {
+      stopAudioEngine();
+      void togglePlaySimulation();
+    }
   };
 
   // ---- Perfecting-loop wiring: run the loop, stream each version to the live
@@ -1803,6 +1999,18 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    // Ephemeral, best-effort live-web discovery for THIS build only — never
+    // the permanent-curriculum pending-approval pipeline (that stays
+    // Research-Lab-only, manual, human-gated). Reached only when online (the
+    // isOfflineForced branch above already returned), a real search hiccup
+    // or an unmatched prompt just resolves to "" and every downstream site
+    // treats that as a plain no-op. Computed once and threaded into
+    // whichever of the 5 online paths below actually runs.
+    const discoveryContext = await Promise.race([
+      gatherLiveBuildContext(promptToSend, createProxyWebFetcher()),
+      new Promise<string>((resolve) => setTimeout(() => resolve(""), 3500)),
+    ]);
+
     try {
       let payload: any = null;
 
@@ -1820,6 +2028,7 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           signal: controller.signal,
           generationStart,
           onStage: (stage) => markStage(stage),
+          discoveryContext,
         });
 
         let gate = planned.gate;
@@ -1883,6 +2092,9 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         if (fusionRecipe) {
           finalPrompt += `\n\n${fusionRecipe}`;
         }
+        if (discoveryContext) {
+          finalPrompt += `\n\n${discoveryContext}`;
+        }
         if (llmConfig.lowVramMode) {
           finalPrompt += `\n\n[LOW-VRAM Optimization Active: Write highly concise DSP loops. Avoid memory allocations inside sample cycles.]`;
         }
@@ -1932,6 +2144,9 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         const ollamaRecipe = buildRecipeContext(promptToSend, spec);
         if (ollamaRecipe) {
           finalPrompt += `\n\n${ollamaRecipe}`;
+        }
+        if (discoveryContext) {
+          finalPrompt += `\n\n${discoveryContext}`;
         }
         if (llmConfig.lowVramMode) {
           finalPrompt += `\n\n[LOW-VRAM Optimization Active: Write highly concise DSP loops. Avoid memory allocations inside sample cycles.]`;
@@ -2001,6 +2216,9 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         if (lmsRecipe) {
           finalPrompt += `\n\n${lmsRecipe}`;
         }
+        if (discoveryContext) {
+          finalPrompt += `\n\n${discoveryContext}`;
+        }
         if (llmConfig.lowVramMode) {
           finalPrompt += `\n\n[LOW-VRAM Optimization Active: Write highly concise DSP loops. Avoid memory allocations inside sample cycles.]`;
         }
@@ -2050,12 +2268,13 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           headers: { "Content-Type": "application/json" },
           signal: controller.signal,
           body: JSON.stringify({
-            prompt: modifiedUserPrompt, 
+            prompt: modifiedUserPrompt,
             history: newHistory.slice(0, -1),
             systemInstruction: currentAgent.systemInstruction,
             temperature: currentAgent.temperature,
             activeCode: plugin.dspFunction,
             activeParams: plugin.parameters,
+            discoveryContext,
           }),
         });
 
@@ -3155,7 +3374,10 @@ Return ONLY a JSON object with this exact shape, no other text:
           onClearChat={handleClearChat}
           onTogglePlay={togglePlaySimulation}
           onToggleBypass={() => setBypass((v) => !v)}
-          onSourceTypeChange={setSourceType}
+          onSourceTypeChange={changeSourceType}
+          audioInputDevices={audioInputDevices}
+          selectedInputDeviceId={selectedInputDeviceId}
+          onSelectInputDevice={setSelectedInputDeviceId}
           onSliderChange={handleSliderChange}
           onOpenPro={(tab) => {
             if (tab) setCompanionTab(tab as CompanionTabId);
@@ -4037,10 +4259,10 @@ Return ONLY a JSON object with this exact shape, no other text:
                       <span className="text-[10px] font-mono font-bold text-neutral-500 uppercase tracking-widest">Acoustic Testing Signal</span>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-1 bg-neutral-900/40 p-1 rounded-xl border border-neutral-850">
+                    <div className="grid grid-cols-4 gap-1 bg-neutral-900/40 p-1 rounded-xl border border-neutral-850">
                       <button
                         type="button"
-                        onClick={() => setSourceType("synth")}
+                        onClick={() => changeSourceType("synth")}
                         className={`py-1.5 px-2 rounded-lg text-[9px] font-bold border transition-all cursor-pointer ${
                           sourceType === "synth" ? "bg-neutral-800 border-indigo-900/80 text-indigo-400" : "bg-transparent border-transparent text-neutral-400 hover:text-neutral-200"
                         }`}
@@ -4049,7 +4271,7 @@ Return ONLY a JSON object with this exact shape, no other text:
                       </button>
                       <button
                         type="button"
-                        onClick={() => setSourceType("sine")}
+                        onClick={() => changeSourceType("sine")}
                         className={`py-1.5 px-2 rounded-lg text-[9px] font-bold border transition-all cursor-pointer ${
                           sourceType === "sine" ? "bg-neutral-800 border-indigo-900/80 text-indigo-400" : "bg-transparent border-transparent text-neutral-400 hover:text-neutral-200"
                         }`}
@@ -4058,14 +4280,52 @@ Return ONLY a JSON object with this exact shape, no other text:
                       </button>
                       <button
                         type="button"
-                        onClick={() => setSourceType("noise")}
+                        onClick={() => changeSourceType("noise")}
                         className={`py-1.5 px-2 rounded-lg text-[9px] font-bold border transition-all cursor-pointer ${
                           sourceType === "noise" ? "bg-neutral-800 border-indigo-900/80 text-indigo-400" : "bg-transparent border-transparent text-neutral-400 hover:text-neutral-200"
                         }`}
                       >
                         💨 Noise
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => changeSourceType("live_input")}
+                        className={`py-1.5 px-2 rounded-lg text-[9px] font-bold border transition-all cursor-pointer ${
+                          sourceType === "live_input" ? "bg-neutral-800 border-indigo-900/80 text-indigo-400" : "bg-transparent border-transparent text-neutral-400 hover:text-neutral-200"
+                        }`}
+                      >
+                        🎤 Live In
+                      </button>
                     </div>
+
+                    {sourceType === "live_input" && audioInputDevices.length > 1 && (
+                      <select
+                        value={selectedInputDeviceId ?? ""}
+                        onChange={(e) => setSelectedInputDeviceId(e.target.value || null)}
+                        className="w-full bg-neutral-900/60 border border-neutral-850 rounded-lg px-2 py-1 text-[9px] font-mono text-neutral-300 cursor-pointer"
+                      >
+                        {audioInputDevices.map((d) => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label || `Input ${d.deviceId.slice(0, 6)}`}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    {typeof window !== "undefined" && "setSinkId" in HTMLMediaElement.prototype && audioOutputDevices.length > 1 && (
+                      <select
+                        value={selectedOutputDeviceId ?? ""}
+                        onChange={(e) => setSelectedOutputDeviceId(e.target.value || null)}
+                        className="w-full bg-neutral-900/60 border border-neutral-850 rounded-lg px-2 py-1 text-[9px] font-mono text-neutral-300 cursor-pointer"
+                      >
+                        <option value="">🔈 System default output</option>
+                        {audioOutputDevices.map((d) => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label || `Output ${d.deviceId.slice(0, 6)}`}
+                          </option>
+                        ))}
+                      </select>
+                    )}
 
                     {/* Toggle settings checkboxes */}
                     <div className="flex flex-col gap-1.5 pt-1.5 border-t border-neutral-900">

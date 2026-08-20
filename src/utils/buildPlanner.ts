@@ -213,6 +213,10 @@ export interface PlannerOptions {
   onStage?: (stageId: string) => void;
   /** Wall-clock start (performance.now()) for the latency score. */
   generationStart?: number;
+  /** Ephemeral live-web context for this build (see gatherLiveBuildContext
+   *  in researchEngine.ts). Optional, best-effort, silently absent when
+   *  offline or unmatched -- never required for a build to proceed. */
+  discoveryContext?: string;
 }
 
 /**
@@ -257,7 +261,7 @@ export async function runPlannedBuild(prompt: string, opts: PlannerOptions = {})
   opts.onStage?.("plan");
   started = now();
   const scored = scoreRecipes(prompt, spec);
-  const recipeContext = buildRecipeContext(prompt, spec);
+  const recipeContext = buildRecipeContext(prompt, spec) + (opts.discoveryContext ? `\n\n${opts.discoveryContext}` : "");
   // No verified recipe matches at all -- offlineBuilder's own fallback path
   // (buildOfflinePlugin -> buildPrimitiveGraph) is exactly this condition
   // (amp_sim is handled separately upstream regardless of scored). Mirror it

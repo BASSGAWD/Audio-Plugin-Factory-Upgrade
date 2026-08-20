@@ -33,7 +33,7 @@ import { familyToCategory, PluginFamily } from "./pluginSpec";
 import { DspRecipe } from "./dspRecipes";
 import { LLMConfig, callLocalLLM, isLocalProvider, fetchLLMRoute } from "./llmGateway";
 import {
-  webSourcesFor, extractRelevantPassages,
+  webSourcesFor, extractRelevantPassages, resolveWebSourceConcept,
   OPENAUDIO_INDEX, parseOpenAudioIndex, matchIndexEntries, searchTermsFor,
 } from "./researchSources";
 
@@ -227,7 +227,7 @@ export function createProxyWebFetcher(): WebFetcher {
  * fetched text is never interpreted as instructions. Best-effort: a failed or
  * empty fetch just contributes nothing.
  */
-async function gatherFromWeb(concept: string, fetcher: WebFetcher | null | undefined): Promise<ResearchClaim[]> {
+export async function gatherFromWeb(concept: string, fetcher: WebFetcher | null | undefined): Promise<ResearchClaim[]> {
   if (!fetcher) return [];
   const sources = webSourcesFor(concept);
   const claims: ResearchClaim[] = [];
@@ -246,6 +246,45 @@ async function gatherFromWeb(concept: string, fetcher: WebFetcher | null | undef
     }
   }
   return claims;
+}
+
+/**
+ * EPHEMERAL per-build live context. Unlike runResearch() this NEVER queues
+ * anything for human approval and NEVER runs the quality gate -- it exists
+ * purely to hand the model 1-2 extra cited sentences of real external
+ * reference for THIS one generation, reusing gatherFromWeb/WEB_SOURCES/
+ * extractRelevantPassages unchanged. That permanent-curriculum pipeline
+ * (runResearch -> pending queue -> human approval) is a deliberately
+ * different, heavier job -- growing the factory's permanent knowledge with
+ * oversight. This is the opposite: throwaway, best-effort, per-build only.
+ *
+ * Best-effort and fail-silent: any failure, timeout, or no-match returns ""
+ * -- a network hiccup, an unresolved concept, or a dead link must never
+ * block or degrade a build. Returns a plain string ready to append directly
+ * to a prompt (matching buildRecipeContext's own return contract), ending
+ * with a fixed instruction so the model treats the reference as background,
+ * never as a specification to copy verbatim or brand the plugin after.
+ */
+export async function gatherLiveBuildContext(
+  prompt: string,
+  fetcher: WebFetcher | null | undefined
+): Promise<string> {
+  if (!fetcher) return "";
+  try {
+    const concept = resolveWebSourceConcept(prompt);
+    if (!concept) return "";
+    const claims = await gatherFromWeb(concept, fetcher);
+    if (claims.length === 0) return "";
+    const lines = claims.map(
+      (c) => `Reference (live web -- ${c.citation.title}, ${c.citation.source}): "${c.text}"`
+    );
+    return [
+      ...lines,
+      "[The above is background technical context from a live external source. Extract the underlying design principle only -- it is not a specification to copy verbatim, and the plugin must never be named or branded after a specific commercial product.]",
+    ].join("\n");
+  } catch {
+    return "";
+  }
 }
 
 /**

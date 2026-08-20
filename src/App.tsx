@@ -79,6 +79,7 @@ import RefineControl from "./components/RefineControl";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./components/BuildProgressBar";
 import BlindListeningTest from "./components/BlindListeningTest";
 import { runPlannedBuild } from "./utils/buildPlanner";
+import { loadCanvasWorkspace, saveCanvasWorkspace, placeNewCard, CanvasCard } from "./utils/canvasFactory";
 import { runRefinementLoop, refinementScore, isNearTie, MAX_REFINE_LOOPS, RankedCandidate } from "./utils/refinementLoop";
 import { classifyEditIntent } from "./utils/editIntent";
 import { runEditPass, ElementNote } from "./utils/editPass";
@@ -1019,6 +1020,37 @@ export default function App() {
   const savePluginState = (newPlugin: AudioPlugin) => {
     setPlugin(newPlugin);
     localStorage.setItem(STORAGE_KEY_PLUGIN, JSON.stringify(newPlugin));
+  };
+
+  // Record a genuinely new (or rebuilt) plugin as a Factory Canvas card so
+  // it's browsable later -- even though it was built from Simple/Pro
+  // Studio's chat, not from Canvas's own prompt box. Every distinct build
+  // request the user makes becomes one card; in-place edits/tweaks of the
+  // currently-loaded plugin (runEditPass, slider drags, scratch-code hot
+  // compiles, UI-designer layout changes) deliberately do NOT call this --
+  // only the sites that produce a genuinely new plugin from a fresh prompt
+  // do. Best-effort and fail-silent: a full localStorage quota or a corrupt
+  // workspace must never block a build that already succeeded.
+  const recordCanvasHistoryCard = (prompt: string, builtPlugin: AudioPlugin, minScore?: number) => {
+    try {
+      const trimmed = prompt.trim();
+      if (!trimmed) return;
+      const ws = loadCanvasWorkspace();
+      const pos = placeNewCard(ws.cards, 200, 160);
+      const card: CanvasCard = {
+        id: `card-${Date.now()}-${Math.floor(Math.random() * 1e5)}`,
+        prompt: trimmed,
+        x: pos.x,
+        y: pos.y,
+        status: "ready",
+        plugin: builtPlugin,
+        minScore,
+        createdAt: Date.now(),
+      };
+      saveCanvasWorkspace({ cards: [...ws.cards, card], view: ws.view });
+    } catch (e) {
+      console.warn("Could not record this build to the Canvas history:", e);
+    }
   };
 
   // Handle live slider movements
@@ -1970,6 +2002,11 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           savePluginState(gate.plugin);
           setScratchCode(gate.plugin.dspFunction);
           setIsEditingCode(false);
+          recordCanvasHistoryCard(
+            promptToSend,
+            gate.plugin,
+            Math.min(gate.scores.looks, gate.scores.performance, gate.scores.latency, gate.scores.musicality)
+          );
 
           // Success is shown as measured evidence, never as a bare claim.
           messageText += `\n\n${formatBuildReport(gate.report)}`;
@@ -2051,6 +2088,7 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         savePluginState(gate.plugin);
         setScratchCode(gate.plugin.dspFunction);
         setIsEditingCode(false);
+        recordCanvasHistoryCard(promptToSend, gate.plugin, gateMinScore);
         triggerToast(
           planned.usedFallback
             ? `Loaded "${gate.plugin.name}" (deterministic compiler finished the build)`
@@ -2350,6 +2388,7 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         savePluginState(gate.plugin);
         setScratchCode(gate.plugin.dspFunction);
         setIsEditingCode(false);
+        recordCanvasHistoryCard(promptToSend, gate.plugin, gateMinScore);
 
         triggerToast(
           verification.verified
@@ -2421,6 +2460,11 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         savePluginState(gate.plugin);
         setScratchCode(gate.plugin.dspFunction);
         setIsEditingCode(false);
+        recordCanvasHistoryCard(
+          promptToSend,
+          gate.plugin,
+          Math.min(gate.scores.looks, gate.scores.performance, gate.scores.latency, gate.scores.musicality)
+        );
         fallbackText += `\n\n${formatBuildReport(gate.report)}`;
         triggerToast(`Locally compiled and loaded: "${gate.plugin.name}"`);
         runStabilityAnalysis(gate.plugin.dspFunction, gate.plugin.parameters);
@@ -3077,6 +3121,24 @@ return Math.tanh(finalOut * 0.95);`;
 
     setChatHistory([]);
     localStorage.removeItem(STORAGE_KEY_CHAT);
+
+    // 4. Actually release the loaded plugin. Without this, `plugin.dspFunction`
+    //    stays truthy after "New chat", so classifyEditIntent's `hasPlugin`
+    //    check still sees an active plugin -- the very next build request can
+    //    get routed as an in-place EDIT of yesterday's plugin (or at minimum
+    //    keeps sending its stale code as `activeCode` context) instead of the
+    //    clean regeneration the EDIT-BY-DEFAULT contract in
+    //    processChatMessageRequest promises "after the chat is cleared."
+    //    Stop playback first -- the worklet is about to lose the DSP code
+    //    that's driving it.
+    stopAudioEngine();
+    savePluginState(DEFAULT_STARTING_PLUGIN);
+    setScratchCode(DEFAULT_STARTING_PLUGIN.dspFunction);
+    setBuildVersions([]);
+    setAnalysis(null);
+    setDspError(null);
+    setIsEditingCode(false);
+
     triggerToast("Conversation logs cleared cleanly.");
   };
 
@@ -4078,6 +4140,7 @@ Return ONLY a JSON object with this exact shape, no other text:
                                   saveCandidateRecipe(architectPrompt, architectSpec.family, gate.plugin.dspFunction, gateMinScore);
                                   savePluginState(gate.plugin);
                                   compileDsp(gate.plugin.dspFunction);
+                                  recordCanvasHistoryCard(architectPrompt, gate.plugin, gateMinScore);
                                   triggerToast(`🧙 Injected and Compiled "${name}"!`);
                                 }}
                                 className="text-[9px] font-mono font-bold text-white border border-indigo-500 bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1 rounded transition shadow cursor-pointer"

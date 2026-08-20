@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Play,
   Pause,
@@ -21,6 +21,7 @@ import Visualizer from "./Visualizer";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./BuildProgressBar";
+import { resolveCustomSkinStyle } from "../utils/customSkin";
 
 interface SimpleStudioProps {
   plugin: AudioPlugin;
@@ -206,6 +207,10 @@ export default function SimpleStudio({
 }: SimpleStudioProps) {
   const [input, setInput] = useState("");
   const [dockOpen, setDockOpen] = useState(false);
+  // This plugin's actual configured skin -- resolved once so the card
+  // header font and the faceplate's divider border read from the same
+  // numbers as the faceplate itself, instead of each recomputing it.
+  const resolvedSkin = useMemo(() => resolveCustomSkinStyle(plugin.customSkin), [plugin.customSkin]);
   // Annotation canvas: the control currently being annotated + draft text.
   const [noteTarget, setNoteTarget] = useState<{ id: string; name: string } | null>(null);
   const [noteText, setNoteText] = useState("");
@@ -519,7 +524,10 @@ export default function SimpleStudio({
                 aria-expanded={dockOpen}
                 aria-label="Toggle plugin controls"
               >
-                <div className="text-sm font-medium text-neutral-100 truncate group-hover:text-white">
+                <div
+                  className="text-sm font-medium text-neutral-100 truncate group-hover:text-white"
+                  style={{ fontFamily: resolvedSkin.fontFamily }}
+                >
                   {plugin.name}
                 </div>
                 <div className="text-[11px] text-neutral-500 truncate">
@@ -575,7 +583,13 @@ export default function SimpleStudio({
 
             {/* Expanded controls on the plugin's generative faceplate */}
             {dockOpen && (
-              <GenerativeFaceplate plugin={plugin} analyserNode={analyserNode} isPlaying={isPlaying} className="border-t border-neutral-800 animate-fadeIn">
+              <GenerativeFaceplate
+                plugin={plugin}
+                analyserNode={analyserNode}
+                isPlaying={isPlaying}
+                className="border-t animate-fadeIn"
+                style={{ borderTopColor: resolvedSkin.borderColor, borderTopWidth: resolvedSkin.borderWidth }}
+              >
               <div className="px-4 py-3 space-y-3">
                 {isPlaying && (
                   <div className="h-16 rounded-lg overflow-hidden border border-neutral-850">

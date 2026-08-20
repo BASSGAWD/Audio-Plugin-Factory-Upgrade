@@ -29,6 +29,7 @@ import {
 } from "../utils/canvasFactory";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
+import { resolveSkinFontFamily } from "../utils/customSkin";
 
 /**
  * Factory Canvas: the autonomous plugin factory as a spatial workspace.
@@ -364,7 +365,10 @@ const CanvasPluginCard: React.FC<CardProps> = ({
         </button>
 
         <div className="flex-1 min-w-0">
-          <div className="text-[12.5px] font-semibold text-neutral-100 truncate">
+          <div
+            className="text-[12.5px] font-semibold text-neutral-100 truncate"
+            style={{ fontFamily: resolveSkinFontFamily(plugin?.customSkin?.fontStyle) }}
+          >
             {plugin?.name ?? (card.status === "failed" ? "Failed build" : "Building…")}
           </div>
           <div className="text-[9.5px] text-neutral-500 capitalize truncate">

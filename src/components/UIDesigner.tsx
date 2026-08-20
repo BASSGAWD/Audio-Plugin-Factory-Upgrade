@@ -35,12 +35,16 @@ import {
   Type,
   Copy,
   Layers,
-  X
+  X,
+  PanelRightClose,
+  PanelRightOpen,
+  ImagePlus
 } from "lucide-react";
 import { AudioPlugin, PluginParameter } from "../types";
 import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
 import { ArchetypeId, ARCHETYPE_LABELS, BUILTIN_ARCHETYPES, applyArchetype } from "../utils/guiArchetypes";
 import { KNOB_RECIPES, toCssKnobStyle, resolveKnobStyle, KnobRenderStyle } from "../utils/uiRenderPatterns";
+import { resolveCustomSkinStyle } from "../utils/customSkin";
 
 interface UIDesignerProps {
   plugin: AudioPlugin;
@@ -797,8 +801,20 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
   // primary work surface and is meant to stay visible alongside them.
   type PanelId = "tools" | "palette" | "templates";
   const [activePanel, setActivePanel] = useState<PanelId | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState<boolean>(true);
+  // Starts closed, matching activePanel -- it used to default open and eat
+  // 320px of canvas on every load even with nothing selected. Selecting a
+  // control still opens it automatically (see effect below), so the
+  // click-a-control -> see-its-properties loop is unaffected.
+  const [inspectorOpen, setInspectorOpen] = useState<boolean>(false);
   const togglePanel = (id: PanelId) => setActivePanel((cur) => (cur === id ? null : id));
+
+  // Selecting a control opens the properties panel to show it, even though
+  // the panel now starts closed. Deliberately one-directional: deselecting
+  // does NOT auto-close, so a user can keep browsing Artboard Settings after
+  // clicking empty canvas.
+  useEffect(() => {
+    if (selectedParamId) setInspectorOpen(true);
+  }, [selectedParamId]);
 
   // (Pinning is gone: panels no longer close themselves, so there is nothing
   // to pin them against.)
@@ -810,6 +826,19 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
     setTheme(newTheme);
     localStorage.setItem(`plugin_theme_${plugin.id}`, newTheme);
     triggerToast(`Skin applied: ${newTheme.replace("-", " ").toUpperCase()}`);
+  };
+
+  // Shared by both the file-picker input and the dropzone's onDrop, so
+  // dragging an image in behaves identically to clicking to browse for one.
+  const handleSkinImageFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (uploadEvent) => {
+      const base64 = uploadEvent.target?.result as string;
+      onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), bgImage: base64 } });
+      setTheme("custom-skin");
+      triggerToast("Custom faceplate skin uploaded successfully! Activated custom-skin preset.");
+    };
+    reader.readAsDataURL(file);
   };
 
   // --- GUI archetype: the layout composition axis, fully independent of
@@ -1409,8 +1438,8 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
           <button
             type="button"
             onClick={() => setInspectorOpen((v) => !v)}
-            title="Inspector"
-            aria-label="Inspector"
+            title="Toggle properties panel"
+            aria-label="Toggle properties panel"
             aria-pressed={inspectorOpen}
             className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
               inspectorOpen ? "bg-indigo-600 text-white" : "text-neutral-400 hover:text-white hover:bg-neutral-800"
@@ -1795,59 +1824,67 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
         {/* CANVAS -- takes whatever width the docked Inspector leaves. */}
         <div className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative bg-neutral-950">
           
-          {/* Canvas Sub-Header with Zoom & Grid Controls */}
-          <div className="bg-neutral-900 border-b border-neutral-850 p-2 flex items-center justify-between text-xs text-neutral-300 select-none">
-            
-            {/* Viewport controls -- board size, grid and zoom all live here,
-                next to the thing they act on. Board size used to be an
-                inputs-only panel inside the Inspector, which meant resizing
-                the canvas required deselecting whatever you were editing. */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9px] font-mono font-bold text-neutral-500 uppercase">Board</span>
-              <input
-                type="number"
-                min={400}
-                value={artboardWidth}
-                onChange={(e) => setArtboardWidth(Math.max(400, parseInt(e.target.value) || 400))}
-                title="Faceplate width (px)"
-                aria-label="Faceplate width in pixels"
-                className="w-14 bg-neutral-950 border border-neutral-800 rounded px-1 py-0.5 text-[9px] font-mono text-neutral-300 focus:border-indigo-500 outline-none"
-              />
-              <span className="text-[9px] text-neutral-600">×</span>
-              <input
-                type="number"
-                min={250}
-                value={artboardHeight}
-                onChange={(e) => setArtboardHeight(Math.max(250, parseInt(e.target.value) || 250))}
-                title="Faceplate height (px)"
-                aria-label="Faceplate height in pixels"
-                className="w-14 bg-neutral-950 border border-neutral-800 rounded px-1 py-0.5 text-[9px] font-mono text-neutral-300 focus:border-indigo-500 outline-none"
-              />
-              <div className="h-3 w-[1px] bg-neutral-800" />
-              <button
-                onClick={() => setSnapToGrid(!snapToGrid)}
-                className={`px-1.5 py-0.5 rounded text-[9px] font-bold font-mono border transition ${
-                  snapToGrid ? "bg-indigo-600 border-indigo-500 text-white" : "border-neutral-800 text-neutral-500"
-                }`}
-                title="Align items automatically to incremental points"
-              >
-                SNAP {snapToGrid ? "ON" : "OFF"}
-              </button>
-              <select
-                value={gridSize}
-                onChange={(e) => setGridSize(parseInt(e.target.value))}
-                title="Grid spacing"
-                aria-label="Grid spacing in pixels"
-                className="bg-neutral-950 border border-neutral-800 rounded px-1 py-0.5 text-[9px] font-mono text-neutral-400 focus:border-indigo-500 outline-none"
-              >
-                <option value={5}>5px</option>
-                <option value={10}>10px</option>
-                <option value={20}>20px</option>
-              </select>
+          {/* Canvas Sub-Header with Zoom & Grid Controls -- grouped into
+              bordered pills (matching the theme/layout selector pattern used
+              in the Appearance panel) rather than one dense unbroken row, so
+              the three unrelated control groups (board size / grid+snap /
+              zoom) read as distinct at a glance. */}
+          <div className="bg-neutral-900 border-b border-neutral-800 p-2 flex items-center justify-between gap-2 flex-wrap text-xs text-neutral-300 select-none">
+
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Board size group -- board size used to be an inputs-only
+                  panel inside the Inspector, which meant resizing the canvas
+                  required deselecting whatever you were editing. */}
+              <div className="flex items-center gap-1.5 bg-neutral-950 px-2 py-1 rounded-xl border border-neutral-800">
+                <span className="text-[10px] font-mono font-bold text-neutral-500 uppercase">Board</span>
+                <input
+                  type="number"
+                  min={400}
+                  value={artboardWidth}
+                  onChange={(e) => setArtboardWidth(Math.max(400, parseInt(e.target.value) || 400))}
+                  title="Faceplate width (px)"
+                  aria-label="Faceplate width in pixels"
+                  className="w-14 bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-[10px] font-mono text-neutral-300 focus:border-indigo-500 outline-none"
+                />
+                <span className="text-[10px] text-neutral-600">×</span>
+                <input
+                  type="number"
+                  min={250}
+                  value={artboardHeight}
+                  onChange={(e) => setArtboardHeight(Math.max(250, parseInt(e.target.value) || 250))}
+                  title="Faceplate height (px)"
+                  aria-label="Faceplate height in pixels"
+                  className="w-14 bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-[10px] font-mono text-neutral-300 focus:border-indigo-500 outline-none"
+                />
+              </div>
+
+              {/* Grid + snap group */}
+              <div className="flex items-center gap-1.5 bg-neutral-950 px-2 py-1 rounded-xl border border-neutral-800">
+                <button
+                  onClick={() => setSnapToGrid(!snapToGrid)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-mono border transition ${
+                    snapToGrid ? "bg-indigo-600 border-indigo-500 text-white" : "border-neutral-800 text-neutral-500"
+                  }`}
+                  title="Align items automatically to incremental points"
+                >
+                  SNAP {snapToGrid ? "ON" : "OFF"}
+                </button>
+                <select
+                  value={gridSize}
+                  onChange={(e) => setGridSize(parseInt(e.target.value))}
+                  title="Grid spacing"
+                  aria-label="Grid spacing in pixels"
+                  className="bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-[10px] font-mono text-neutral-400 focus:border-indigo-500 outline-none"
+                >
+                  <option value={5}>5px</option>
+                  <option value={10}>10px</option>
+                  <option value={20}>20px</option>
+                </select>
+              </div>
             </div>
 
-            {/* Zoom tool buttons */}
-            <div className="flex items-center gap-2">
+            {/* Zoom group */}
+            <div className="flex items-center gap-1 bg-neutral-950 px-1.5 py-1 rounded-xl border border-neutral-800">
               <button
                 onClick={() => setZoom(Math.max(0.5, zoom - 0.1))}
                 className="p-1 hover:bg-neutral-800 rounded text-neutral-400 hover:text-white"
@@ -1855,7 +1892,7 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
               >
                 <ZoomOut className="w-3.5 h-3.5" />
               </button>
-              <span className="text-[9px] font-mono font-bold text-indigo-400 w-10 text-center">
+              <span className="text-[10px] font-mono font-bold text-indigo-400 w-10 text-center">
                 {Math.round(zoom * 100)}%
               </span>
               <button
@@ -1867,7 +1904,8 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
               </button>
               <button
                 onClick={() => setZoom(1.0)}
-                className="px-1 py-0.5 bg-neutral-950 text-[8px] text-neutral-500 hover:text-neutral-300 font-mono rounded"
+                className="px-1.5 py-0.5 bg-neutral-900 border border-neutral-800 rounded text-[9px] text-neutral-400 hover:text-neutral-200 font-mono"
+                title="Reset to 100%"
               >
                 FIT
               </button>
@@ -1911,25 +1949,11 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                 style={{ 
                   width: `${artboardWidth}px`, 
                   height: `${artboardHeight}px`,
-                  ...(theme === "custom-skin" ? {
-                    backgroundColor: plugin.customSkin?.bgColor || "#111116",
-                    borderColor: plugin.customSkin?.borderColor || "#1f1f29",
-                    borderWidth: `${plugin.customSkin?.borderWidth ?? 4}px`,
-                    color: plugin.customSkin?.textColor || "#ffffff",
-                    backgroundImage: plugin.customSkin?.bgImage ? `url(${plugin.customSkin.bgImage})` : "none",
-                    backgroundSize: "cover",
-                    backgroundPosition: "center",
-                    boxShadow: plugin.customSkin?.glowStyle === "neon" ? `0 0 30px ${plugin.customSkin?.accentColor || "#10b981"}` : undefined,
-                    fontFamily: plugin.customSkin?.fontStyle === "mono" 
-                      ? "JetBrains Mono, monospace" 
-                      : plugin.customSkin?.fontStyle === "grotesk"
-                      ? "Space Grotesk, sans-serif"
-                      : plugin.customSkin?.fontStyle === "orbitron"
-                      ? "Orbitron, sans-serif"
-                      : plugin.customSkin?.fontStyle === "serif"
-                      ? "Georgia, serif"
-                      : "Inter, sans-serif"
-                  } : {})
+                  // Same numbers GenerativeFaceplate uses to render "the
+                  // plugin" everywhere outside this preview -- single source
+                  // via resolveCustomSkinStyle(), so what you see here is
+                  // exactly what Simple Mode / Factory Canvas will show.
+                  ...(theme === "custom-skin" ? resolveCustomSkinStyle(plugin.customSkin) : {})
                 }}
                 className={`${getArtboardSkinStyle()} relative shadow-2xl transition-all duration-200 select-none`}
               >
@@ -3613,6 +3637,24 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
           </div>
         </div>
 
+        {/* Properties panel edge tab -- always visible at the canvas/panel
+            seam, in BOTH open and closed states, so there's an obvious
+            open/close affordance right where the panel actually is (the
+            rail icon on the far-left edge controlled this same panel with
+            no visual link to it at all). Tracks the panel's own width via
+            an inline `right` so it slides in lockstep with it. */}
+        <button
+          type="button"
+          onClick={() => setInspectorOpen((v) => !v)}
+          title={inspectorOpen ? "Close properties panel" : "Open properties panel"}
+          aria-label={inspectorOpen ? "Close properties panel" : "Open properties panel"}
+          aria-pressed={inspectorOpen}
+          style={{ right: inspectorOpen ? 320 : 0 }}
+          className="absolute top-1/2 -translate-y-1/2 z-40 -mr-3.5 w-7 h-11 flex items-center justify-center rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-white hover:border-indigo-500 shadow-xl transition-[right,color,border-color] duration-300 ease-in-out"
+        >
+          {inspectorOpen ? <PanelRightClose className="w-3.5 h-3.5" /> : <PanelRightOpen className="w-3.5 h-3.5" />}
+        </button>
+
         {/* INSPECTOR -- DOCKED, not floating. It is where the actual work
             happens, so it holds a real column of the layout and the canvas
             reflows around it; closing it gives the width back to the canvas
@@ -4050,7 +4092,7 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                   <span className="text-[8.5px] text-neutral-500 uppercase block font-bold">Custom Skin Settings</span>
                   
                   <div className="space-y-1">
-                    <span className="text-[8px] block text-neutral-400">SELECT OVERALL SKIN FONT</span>
+                    <span className="text-[9px] block text-neutral-400">SELECT OVERALL SKIN FONT</span>
                     <select
                       value={plugin.customSkin?.fontStyle || "sans"}
                       onChange={(e) => {
@@ -4073,7 +4115,7 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                   </div>
 
                   <div className="space-y-1">
-                    <span className="text-[8px] block text-neutral-400">GLOW ACCENT STYLE</span>
+                    <span className="text-[9px] block text-neutral-400">GLOW ACCENT STYLE</span>
                     <select
                       value={plugin.customSkin?.glowStyle || "none"}
                       onChange={(e) => {
@@ -4095,7 +4137,7 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
 
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <div className="space-y-1">
-                      <span className="text-[8px] block text-neutral-500">BORDER WIDTH</span>
+                      <span className="text-[9px] block text-neutral-500">BORDER WIDTH</span>
                       <input
                         type="number"
                         min="0"
@@ -4115,72 +4157,51 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                     </div>
                   </div>
 
-                  {/* Faceplate colors customization */}
+                  {/* Faceplate colors customization -- each swatch+hex pair
+                      wrapped in one bordered pill, native color-swatch chrome
+                      restyled to a real rounded chip instead of a bare
+                      floating square. */}
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <div className="space-y-1">
-                      <span className="text-[8px] text-neutral-400 block">FACEPLATE BG</span>
-                      <div className="flex items-center gap-1">
+                      <span className="text-[9px] text-neutral-400 block">FACEPLATE BG</span>
+                      <div className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-lg pl-1 pr-2 py-1 focus-within:border-indigo-500 transition-colors">
                         <input
                           type="color"
                           value={plugin.customSkin?.bgColor || "#111116"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                bgColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), bgColor: e.target.value } });
                           }}
-                          className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                          className="w-6 h-6 rounded-md border border-neutral-700 cursor-pointer shrink-0 [&::-webkit-color-swatch]:rounded-md [&::-webkit-color-swatch]:border-0 [&::-webkit-color-swatch-wrapper]:p-0"
                         />
                         <input
                           type="text"
                           value={plugin.customSkin?.bgColor || "#111116"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                bgColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), bgColor: e.target.value } });
                           }}
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-[8px] text-neutral-300 font-mono outline-none"
+                          className="w-full bg-transparent text-[9px] text-neutral-300 font-mono outline-none uppercase"
                         />
                       </div>
                     </div>
 
                     <div className="space-y-1">
-                      <span className="text-[8px] text-neutral-400 block">BORDER COLOR</span>
-                      <div className="flex items-center gap-1">
+                      <span className="text-[9px] text-neutral-400 block">BORDER COLOR</span>
+                      <div className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-lg pl-1 pr-2 py-1 focus-within:border-indigo-500 transition-colors">
                         <input
                           type="color"
                           value={plugin.customSkin?.borderColor || "#1f1f29"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                borderColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), borderColor: e.target.value } });
                           }}
-                          className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                          className="w-6 h-6 rounded-md border border-neutral-700 cursor-pointer shrink-0 [&::-webkit-color-swatch]:rounded-md [&::-webkit-color-swatch]:border-0 [&::-webkit-color-swatch-wrapper]:p-0"
                         />
                         <input
                           type="text"
                           value={plugin.customSkin?.borderColor || "#1f1f29"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                borderColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), borderColor: e.target.value } });
                           }}
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-[8px] text-neutral-300 font-mono outline-none"
+                          className="w-full bg-transparent text-[9px] text-neutral-300 font-mono outline-none uppercase"
                         />
                       </div>
                     </div>
@@ -4188,122 +4209,97 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
 
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <div className="space-y-1">
-                      <span className="text-[8px] text-neutral-400 block">TEXT COLOR</span>
-                      <div className="flex items-center gap-1">
+                      <span className="text-[9px] text-neutral-400 block">TEXT COLOR</span>
+                      <div className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-lg pl-1 pr-2 py-1 focus-within:border-indigo-500 transition-colors">
                         <input
                           type="color"
                           value={plugin.customSkin?.textColor || "#ffffff"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                textColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), textColor: e.target.value } });
                           }}
-                          className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                          className="w-6 h-6 rounded-md border border-neutral-700 cursor-pointer shrink-0 [&::-webkit-color-swatch]:rounded-md [&::-webkit-color-swatch]:border-0 [&::-webkit-color-swatch-wrapper]:p-0"
                         />
                         <input
                           type="text"
                           value={plugin.customSkin?.textColor || "#ffffff"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                textColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), textColor: e.target.value } });
                           }}
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-[8px] text-neutral-300 font-mono outline-none"
+                          className="w-full bg-transparent text-[9px] text-neutral-300 font-mono outline-none uppercase"
                         />
                       </div>
                     </div>
 
                     <div className="space-y-1">
-                      <span className="text-[8px] text-neutral-400 block">ACCENT COLOR</span>
-                      <div className="flex items-center gap-1">
+                      <span className="text-[9px] text-neutral-400 block">ACCENT COLOR</span>
+                      <div className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-lg pl-1 pr-2 py-1 focus-within:border-indigo-500 transition-colors">
                         <input
                           type="color"
                           value={plugin.customSkin?.accentColor || "#10b981"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                accentColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), accentColor: e.target.value } });
                           }}
-                          className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                          className="w-6 h-6 rounded-md border border-neutral-700 cursor-pointer shrink-0 [&::-webkit-color-swatch]:rounded-md [&::-webkit-color-swatch]:border-0 [&::-webkit-color-swatch-wrapper]:p-0"
                         />
                         <input
                           type="text"
                           value={plugin.customSkin?.accentColor || "#10b981"}
                           onChange={(e) => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                accentColor: e.target.value
-                              }
-                            });
+                            onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), accentColor: e.target.value } });
                           }}
-                          className="w-full bg-neutral-900 border border-neutral-800 rounded px-1 py-0.5 text-[8px] text-neutral-300 font-mono outline-none"
+                          className="w-full bg-transparent text-[9px] text-neutral-300 font-mono outline-none uppercase"
                         />
                       </div>
                     </div>
                   </div>
 
-                  {/* Base64 faceplate image skin uploader */}
-                  <div className="space-y-1 pt-1.5 border-t border-neutral-850/40">
-                    <span className="text-[8px] block text-neutral-400">UPLOAD CUSTOM SKIN IMAGE</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onload = (uploadEvent) => {
-                            const base64 = uploadEvent.target?.result as string;
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                bgImage: base64
-                              }
-                            });
-                            setTheme("custom-skin");
-                            triggerToast("Custom faceplate skin uploaded successfully! Activated custom-skin preset.");
-                          };
-                          reader.readAsDataURL(file);
-                        }
+                  {/* Base64 faceplate image skin uploader -- a real dropzone
+                      (click OR drag-and-drop) with a thumbnail preview of the
+                      uploaded skin, instead of a raw file input + text-only
+                      checkmark row. */}
+                  <div className="space-y-1.5 pt-1.5 border-t border-neutral-800/60">
+                    <span className="text-[9px] block text-neutral-400">FACEPLATE SKIN IMAGE</span>
+                    <label
+                      htmlFor="artboard-skin-image-upload"
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const file = e.dataTransfer.files?.[0];
+                        if (file) handleSkinImageFile(file);
                       }}
-                      className="w-full text-[9px] font-mono text-neutral-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[9px] file:font-mono file:bg-indigo-950 file:text-indigo-400 hover:file:bg-indigo-900 cursor-pointer"
-                    />
-                    
+                      className="flex flex-col items-center justify-center gap-1.5 border border-dashed border-neutral-700 hover:border-indigo-500 bg-neutral-900/60 hover:bg-neutral-900 rounded-xl px-3 py-4 cursor-pointer transition-colors text-center"
+                    >
+                      {plugin.customSkin?.bgImage ? (
+                        <img src={plugin.customSkin.bgImage} alt="Uploaded faceplate skin preview" className="w-full h-16 object-cover rounded-lg border border-neutral-800" />
+                      ) : (
+                        <>
+                          <ImagePlus className="w-5 h-5 text-neutral-500" />
+                          <span className="text-[9px] font-mono text-neutral-400">Drop image or click to upload</span>
+                        </>
+                      )}
+                      <input
+                        id="artboard-skin-image-upload"
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) handleSkinImageFile(file);
+                        }}
+                      />
+                    </label>
+
                     {plugin.customSkin?.bgImage && (
-                      <div className="flex items-center justify-between gap-1 mt-1 bg-black/40 p-1 rounded">
-                        <span className="text-[7.5px] font-mono text-emerald-400 truncate">✓ Active skin image</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onChange({
-                              ...plugin,
-                              customSkin: {
-                                ...(plugin.customSkin || {}),
-                                bgImage: undefined
-                              }
-                            });
-                            triggerToast("Custom skin image removed.");
-                          }}
-                          className="text-[7.5px] font-mono text-rose-450 hover:text-rose-300 hover:underline"
-                        >
-                          Clear Image
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onChange({ ...plugin, customSkin: { ...(plugin.customSkin || {}), bgImage: undefined } });
+                          triggerToast("Custom skin image removed.");
+                        }}
+                        className="w-full text-[9px] font-mono text-rose-400 hover:text-rose-300 hover:underline"
+                      >
+                        Clear image
+                      </button>
                     )}
                   </div>
                 </div>

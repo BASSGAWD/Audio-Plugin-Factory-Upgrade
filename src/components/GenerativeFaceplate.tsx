@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { AudioPlugin } from "../types";
+import { resolveCustomSkinStyle } from "../utils/customSkin";
 
 /**
  * Interactive generative faceplate: every plugin gets a UNIQUE, procedurally
@@ -22,6 +23,10 @@ interface GenerativeFaceplateProps {
   analyserNode?: AnalyserNode | null;
   isPlaying?: boolean;
   className?: string;
+  /** Extra inline styles merged in AFTER the resolved customSkin style, so a
+   *  caller can override one piece of it (e.g. retinting its own border-top
+   *  divider) without fighting the skin the faceplate already applies. */
+  style?: React.CSSProperties;
   children: React.ReactNode;
 }
 
@@ -196,11 +201,24 @@ function buildArtwork(plugin: AudioPlugin): Artwork {
   return { node, movers, elementRefs };
 }
 
-export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, className = "", children }: GenerativeFaceplateProps) {
+export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, className = "", style, children }: GenerativeFaceplateProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const artwork = useMemo(() => buildArtwork(plugin), [plugin.id, plugin.name, plugin.category, plugin.customSkin?.accentColor]);
+  // borderColor is read inside buildArtwork() (used for some stroke colors)
+  // but was missing from this dependency array -- changing it silently
+  // failed to regenerate the artwork that actually uses it.
+  const artwork = useMemo(
+    () => buildArtwork(plugin),
+    [plugin.id, plugin.name, plugin.category, plugin.customSkin?.accentColor, plugin.customSkin?.borderColor]
+  );
   const accent = plugin.customSkin?.accentColor || "#f97316";
   const { elementRefs } = artwork;
+  // The plugin's own configured skin -- background, border, font, static
+  // glow. Unconditional (no theme gate the way the Pro artboard preview has
+  // one): this is "the plugin" everywhere outside that preview, so whatever
+  // customSkin is actually set on the plugin object should just render here.
+  // Unset fields fall back to a coherent dark baseline, so this is a no-op
+  // for any plugin that has never touched Custom Skin Settings.
+  const skinStyle = useMemo(() => resolveCustomSkinStyle(plugin.customSkin), [plugin.customSkin]);
 
   // Single rAF loop: drives idle drift/pulse motion (always) and the
   // audio-reactive glow (only while playing). Pure JS DOM writes — no CSS
@@ -246,7 +264,7 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
   }, [analyserNode, isPlaying, artwork]);
 
   return (
-    <div ref={rootRef} className={`relative overflow-hidden ${className}`} style={{ ["--gfp-live" as any]: 0 }}>
+    <div ref={rootRef} className={`relative overflow-hidden ${className}`} style={{ ["--gfp-live" as any]: 0, ...skinStyle, ...style }}>
       {artwork.node}
       <div
         aria-hidden="true"

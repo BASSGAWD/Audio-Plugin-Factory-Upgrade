@@ -647,6 +647,23 @@ export default function App() {
   const [selectedInputDeviceId, setSelectedInputDeviceId] = useState<string | null>(null);
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState<string | null>(null);
   const liveInputWarningShownRef = useRef(false);
+
+  // External sidechain key source -- a second, independent signal feeding
+  // the DSP's opt-in inputKey argument. "none" (default) means no key is
+  // connected at all: the worklet passes nothing, and a sidechain-keyed
+  // plugin's own `inputKey !== undefined ? inputKey : inputSample` fallback
+  // makes it behave like an ordinary self-detecting compressor -- every
+  // OTHER plugin ignores this entirely regardless of setting. AudioWorklet-
+  // only, same posture as live_input: the ScriptProcessor fallback has no
+  // second-input concept at all (it's single-input by Web Audio API
+  // construction), so a key source silently reverts to "none" there.
+  const [keySourceType, setKeySourceType] = useState<"none" | "synth" | "sine" | "noise" | "live_input">("none");
+  const [selectedKeyDeviceId, setSelectedKeyDeviceId] = useState<string | null>(null);
+  const liveKeyStreamRef = useRef<MediaStream | null>(null);
+  const liveKeySourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const keySourceTypeRef = useRef(keySourceType);
+  useEffect(() => { keySourceTypeRef.current = keySourceType; }, [keySourceType]);
+
   // Mirror sourceType/isPlaying in refs so changeSourceType's live-input
   // restart path (stopAudioEngine() -> togglePlaySimulation()) sees the NEW
   // values immediately -- both calls happen inside the same synchronous
@@ -762,6 +779,12 @@ export default function App() {
       workletNodeRef.current.port.postMessage({ type: "sourceType", sourceType });
     }
   }, [sourceType]);
+
+  useEffect(() => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: "keySourceType", keySourceType });
+    }
+  }, [keySourceType]);
 
   // Synchronise parameters instantly to refs representing real-time Audio Loop parameters
   useEffect(() => {
@@ -1149,6 +1172,32 @@ export default function App() {
         }
       }
 
+      // External sidechain key input: a SEPARATE getUserMedia call/device
+      // from the main input above -- the whole point of an external key is
+      // that it's an independent source. Acquired before the worklet is
+      // built too, so a denied key permission aborts cleanly (falls back to
+      // "none": the plugin just self-detects) without half-starting the
+      // engine or leaving the main input's own stream dangling.
+      if (keySourceTypeRef.current === "live_input") {
+        try {
+          const keyStream = await acquireLiveInputStream(selectedKeyDeviceId);
+          liveKeyStreamRef.current = keyStream;
+        } catch (mediaErr: any) {
+          keySourceTypeRef.current = "none";
+          setKeySourceType("none");
+          const denied = mediaErr?.name === "NotAllowedError" || mediaErr?.name === "PermissionDeniedError";
+          triggerToast(
+            denied
+              ? "Sidechain key access was denied — the plugin will self-detect instead of ducking from an external key."
+              : `Couldn't access a key input device: ${mediaErr?.message || mediaErr} — the plugin will self-detect instead.`
+          );
+          // Unlike the main-input failure above, a failed KEY acquisition
+          // is not fatal to playback -- every sidechain-keyed plugin's own
+          // fallback (inputKey undefined -> self-detect) makes "no key"
+          // a fully valid, already-tested state. Keep starting the engine.
+        }
+      }
+
       // Anti-alias smoother state for the ScriptProcessor fallback's precision mode
       let aa1 = 0.0;
       let aa2 = 0.0;
@@ -1224,6 +1273,7 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     this.bypass = false;
     this.isPrecisionOversampled = false;
     this.sourceType = "synth";
+    this.keySourceType = "none";
     this.outputTrim = 1.0;
     this.dcBlockOn = false;
     // One-pole DC blocker state (y = x - x1 + 0.995 * y1), per channel
@@ -1254,6 +1304,8 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
         this.isPrecisionOversampled = data.oversampling;
       } else if (data.type === "sourceType") {
         this.sourceType = data.sourceType;
+      } else if (data.type === "keySourceType") {
+        this.keySourceType = data.keySourceType;
       } else if (data.type === "trim") {
         this.outputTrim = data.trim;
       } else if (data.type === "dcblock") {
@@ -1298,6 +1350,27 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     return (baseOsc + subOsc + chorusOsc) * 0.18;
   }
 
+  // The sidechain KEY's own test source -- deliberately separate from
+  // sourceAt() (which reads this.sourceType for the MAIN signal) so the two
+  // are fully independent and this can never affect main-signal playback.
+  // "synth" here is a rhythmic kick-like pulse, not the main signal's
+  // melodic arp: a continuous tone doesn't demonstrate ducking at all, a
+  // clear on/off pulse does.
+  keySourceAt(index) {
+    const t = index / 44100;
+    if (this.keySourceType === "sine") {
+      return Math.sin(2 * Math.PI * 440 * t) * 0.35;
+    } else if (this.keySourceType === "noise") {
+      let h = (index * 987654323 + 123456791) | 0;
+      h = Math.imul(h ^ (h >>> 13), 1274126177);
+      return ((h ^ (h >>> 16)) / 2147483648) * 0.15;
+    }
+    const period = 0.5; // 120 bpm
+    const phase = t % period;
+    const env = Math.exp(-phase * 18);
+    return Math.sin(2 * Math.PI * 60 * phase) * env * 0.9;
+  }
+
   process(inputs, outputs, parameters) {
     const output = outputs[0];
     const outputChannel = output[0];
@@ -1311,6 +1384,12 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     // (bypass, dspFunc call, sanitize, DC-block, oversampling, clamp) is
     // unchanged -- only the SOURCE of srcL/srcR differs for this one branch.
     const liveIn = this.sourceType === "live_input" && inputs[0] && inputs[0][0] && inputs[0][0].length > 0;
+    // External sidechain key: input 1 is a SEPARATE bus from the main
+    // signal on input 0 (connected only when keySourceType is "live_input"
+    // and a real MediaStream was acquired on the main thread). "none" means
+    // no key at all -- srcKey stays undefined and every plugin's own
+    // inputKey-fallback idiom (inputKey !== undefined ? inputKey : inputSample) applies.
+    const keyLiveIn = this.keySourceType === "live_input" && inputs[1] && inputs[1][0] && inputs[1][0].length > 0;
 
     for (let i = 0; i < len; i++) {
       let srcL, srcR;
@@ -1320,6 +1399,14 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
       } else {
         srcL = this.sourceAt(this.timeIndex);
         srcR = this.sourceAt(this.timeIndex + 97);
+      }
+      let srcKey;
+      if (this.keySourceType === "none") {
+        srcKey = undefined;
+      } else if (keyLiveIn) {
+        srcKey = sanitizeSample(inputs[1][0][i] ?? 0);
+      } else {
+        srcKey = this.keySourceAt(this.timeIndex);
       }
       this.timeIndex++;
 
@@ -1332,7 +1419,7 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
           // write to state.outR) BEFORE outputTrim math or the stateful
           // DC-block/anti-alias recursions below -- otherwise one NaN/
           // Infinity sample poisons those recursive filters permanently.
-          let resL = sanitizeSample(this.dspFunc(srcL, this.params, this.dspState, srcR)) * this.outputTrim;
+          let resL = sanitizeSample(this.dspFunc(srcL, this.params, this.dspState, srcR, srcKey)) * this.outputTrim;
           // Opt-in stereo contract: a stereo DSP writes its right channel to
           // state.outR each sample; mono DSP never touches it -> dual-mono.
           const rawR = this.dspState.outR;
@@ -1407,6 +1494,7 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         // side to a real discrete stereo pair too, so a stereo mic stream
         // isn't silently downmixed to mono before process() ever sees it.
         const workletNode = new AudioWorkletNode(activeCtx, "dynamic-dsp-processor", {
+          numberOfInputs: 2,
           outputChannelCount: [2],
           channelCount: 2,
           channelCountMode: "explicit",
@@ -1415,12 +1503,23 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         workletNodeRef.current = workletNode;
 
         // Real audio-interface input: connect the captured MediaStream
-        // directly into the worklet's own input -- process() reads it
+        // directly into the worklet's own input 0 -- process() reads it
         // instead of calling sourceAt() when sourceType is "live_input".
         if (liveInputStreamRef.current) {
           const mediaStreamSource = activeCtx.createMediaStreamSource(liveInputStreamRef.current);
           liveInputSourceNodeRef.current = mediaStreamSource;
           mediaStreamSource.connect(workletNode);
+        }
+
+        // External sidechain key: a real live source connects to input
+        // index 1 specifically (the 3-arg connect(dest, output, input)
+        // form) -- a genuinely separate bus from the main signal on input
+        // 0, never mixed into it. Synth/sine/noise key tones need no real
+        // connection at all; the worklet generates them internally.
+        if (keySourceTypeRef.current === "live_input" && liveKeyStreamRef.current) {
+          const keyMediaStreamSource = activeCtx.createMediaStreamSource(liveKeyStreamRef.current);
+          liveKeySourceNodeRef.current = keyMediaStreamSource;
+          keyMediaStreamSource.connect(workletNode, 0, 1);
         }
 
         // Populate baseline data
@@ -1429,6 +1528,7 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         workletNode.port.postMessage({ type: "bypass", bypass });
         workletNode.port.postMessage({ type: "oversampling", oversampling: isPrecisionOversampled });
         workletNode.port.postMessage({ type: "sourceType", sourceType: sourceTypeRef.current });
+        workletNode.port.postMessage({ type: "keySourceType", keySourceType: keySourceTypeRef.current });
         workletNode.port.postMessage({ type: "trim", trim: outputTrimRef.current });
         workletNode.port.postMessage({ type: "dcblock", dcblock: dcBlockRef.current });
 
@@ -1452,6 +1552,16 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
           sourceTypeRef.current = "synth";
           setSourceType("synth");
           triggerToast("Live input needs AudioWorklet support, which isn't available in this browser context — switched back to the built-in test tones.");
+        }
+        // ScriptProcessorNode is single-input by Web Audio API construction
+        // -- there is no second bus to carry a sidechain key here at all,
+        // synthetic or live. Same scoping decision as live_input above.
+        if (keySourceTypeRef.current !== "none") {
+          liveKeyStreamRef.current?.getTracks().forEach((t) => t.stop());
+          liveKeyStreamRef.current = null;
+          keySourceTypeRef.current = "none";
+          setKeySourceType("none");
+          triggerToast("Sidechain key input needs AudioWorklet support, which isn't available in this browser context — the plugin will self-detect instead.");
         }
         // Safe 100% compliant ScriptProcessor Fallback (stereo out)
         const processor = activeCtx.createScriptProcessor(512, 1, 2);
@@ -1599,6 +1709,14 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         liveInputStreamRef.current.getTracks().forEach((t) => t.stop());
         liveInputStreamRef.current = null;
       }
+      if (liveKeySourceNodeRef.current) {
+        liveKeySourceNodeRef.current.disconnect();
+        liveKeySourceNodeRef.current = null;
+      }
+      if (liveKeyStreamRef.current) {
+        liveKeyStreamRef.current.getTracks().forEach((t) => t.stop());
+        liveKeyStreamRef.current = null;
+      }
       if (mediaStreamDestRef.current) {
         mediaStreamDestRef.current.disconnect();
         mediaStreamDestRef.current = null;
@@ -1646,6 +1764,23 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     const needsRestart = isPlayingRef.current && (prev === "live_input" || next === "live_input");
     sourceTypeRef.current = next;
     setSourceType(next);
+    if (needsRestart) {
+      stopAudioEngine();
+      void togglePlaySimulation();
+    }
+  };
+
+  // Same entry point, same reasoning, for the sidechain KEY source: only
+  // "live_input" needs a real MediaStream acquired/released at engine-start
+  // time (synth/sine/noise key tones are generated inside the worklet, no
+  // stream involved), so only a swap into or out of live_input while
+  // already playing needs the full stop+restart.
+  const changeKeySourceType = (next: "none" | "synth" | "sine" | "noise" | "live_input") => {
+    const prev = keySourceTypeRef.current;
+    if (prev === next) return;
+    const needsRestart = isPlayingRef.current && (prev === "live_input" || next === "live_input");
+    keySourceTypeRef.current = next;
+    setKeySourceType(next);
     if (needsRestart) {
       stopAudioEngine();
       void togglePlaySimulation();
@@ -3441,6 +3576,10 @@ Return ONLY a JSON object with this exact shape, no other text:
           audioInputDevices={audioInputDevices}
           selectedInputDeviceId={selectedInputDeviceId}
           onSelectInputDevice={setSelectedInputDeviceId}
+          keySourceType={keySourceType}
+          onKeySourceTypeChange={changeKeySourceType}
+          selectedKeyDeviceId={selectedKeyDeviceId}
+          onSelectKeyDevice={setSelectedKeyDeviceId}
           onSliderChange={handleSliderChange}
           onOpenPro={(tab) => {
             if (tab) setCompanionTab(tab as CompanionTabId);
@@ -4389,6 +4528,53 @@ Return ONLY a JSON object with this exact shape, no other text:
                           </option>
                         ))}
                       </select>
+                    )}
+
+                    {/* Sidechain key source -- only shown when the loaded plugin's
+                        own DSP body actually reads inputKey. An ordinary plugin has
+                        no key input, so this picker would be a fake control for it. */}
+                    {plugin.dspFunction.includes("inputKey") && (
+                      <div className="space-y-1.5 pt-1.5 border-t border-neutral-900">
+                        <span className="text-[10px] font-mono font-bold text-neutral-500 uppercase tracking-widest">Sidechain Key Signal</span>
+                        <div className="grid grid-cols-5 gap-1 bg-neutral-900/40 p-1 rounded-xl border border-neutral-850">
+                          {(["none", "synth", "sine", "noise"] as const).map((s) => (
+                            <button
+                              key={s}
+                              type="button"
+                              onClick={() => changeKeySourceType(s)}
+                              className={`py-1.5 px-1 rounded-lg text-[9px] font-bold border transition-all cursor-pointer ${
+                                keySourceType === s ? "bg-neutral-800 border-indigo-900/80 text-indigo-400" : "bg-transparent border-transparent text-neutral-400 hover:text-neutral-200"
+                              }`}
+                              title={s === "none" ? "No external key -- self-detecting" : `${s} key signal`}
+                            >
+                              {s === "none" ? "🚫 Self" : s === "synth" ? "🥁 Kick" : s === "sine" ? "🔊 Tone" : "💨 Noise"}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => changeKeySourceType("live_input")}
+                            className={`py-1.5 px-1 rounded-lg text-[9px] font-bold border transition-all cursor-pointer ${
+                              keySourceType === "live_input" ? "bg-neutral-800 border-indigo-900/80 text-indigo-400" : "bg-transparent border-transparent text-neutral-400 hover:text-neutral-200"
+                            }`}
+                          >
+                            🎤 Live
+                          </button>
+                        </div>
+                        {keySourceType === "live_input" && audioInputDevices.length > 1 && (
+                          <select
+                            value={selectedKeyDeviceId ?? ""}
+                            onChange={(e) => setSelectedKeyDeviceId(e.target.value || null)}
+                            className="w-full bg-neutral-900/60 border border-neutral-850 rounded-lg px-2 py-1 text-[9px] font-mono text-neutral-300 cursor-pointer"
+                          >
+                            <option value="">System default input</option>
+                            {audioInputDevices.map((d) => (
+                              <option key={d.deviceId} value={d.deviceId}>
+                                {d.label || `Input ${d.deviceId.slice(0, 6)}`}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
                     )}
 
                     {/* Toggle settings checkboxes */}

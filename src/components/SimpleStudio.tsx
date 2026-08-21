@@ -45,6 +45,14 @@ interface SimpleStudioProps {
   audioInputDevices?: MediaDeviceInfo[];
   selectedInputDeviceId?: string | null;
   onSelectInputDevice?: (deviceId: string | null) => void;
+  /** Sidechain key source: only ever shown when the loaded plugin's own
+   *  DSP body actually reads `inputKey` -- an ordinary compressor/delay/etc.
+   *  has no key input at all, so the picker would be a fake control if
+   *  it appeared unconditionally. */
+  keySourceType?: "none" | "synth" | "sine" | "noise" | "live_input";
+  onKeySourceTypeChange?: (source: "none" | "synth" | "sine" | "noise" | "live_input") => void;
+  selectedKeyDeviceId?: string | null;
+  onSelectKeyDevice?: (deviceId: string | null) => void;
   onSliderChange: (paramId: string, value: number) => void;
   onOpenPro: (tab?: string) => void;
   /** Opens the Factory Canvas: the spatial multi-plugin workspace. */
@@ -199,6 +207,10 @@ export default function SimpleStudio({
   audioInputDevices = [],
   selectedInputDeviceId = null,
   onSelectInputDevice,
+  keySourceType = "none",
+  onKeySourceTypeChange,
+  selectedKeyDeviceId = null,
+  onSelectKeyDevice,
   onSliderChange,
   onOpenPro,
   onOpenCanvas,
@@ -764,6 +776,51 @@ export default function SimpleStudio({
                         </option>
                       ))}
                     </select>
+                  )}
+                  {plugin.dspFunction.includes("inputKey") && (
+                    <>
+                      <span className="text-[10px] text-neutral-500 font-medium ml-1">Sidechain key:</span>
+                      {(["none", "synth", "sine", "noise"] as const).map((s) => (
+                        <button
+                          key={s}
+                          onClick={() => onKeySourceTypeChange?.(s)}
+                          className={`text-[10px] px-2.5 py-1 rounded-full border transition-colors cursor-pointer capitalize ${
+                            keySourceType === s
+                              ? "bg-indigo-600/20 border-indigo-700 text-indigo-300"
+                              : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200"
+                          }`}
+                          title={s === "none" ? "No external key -- self-detecting compression" : `Feed a ${s} test tone into the sidechain key input`}
+                        >
+                          {s === "none" ? "Self" : s === "synth" ? "Kick" : s === "sine" ? "Tone" : "Noise"}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => onKeySourceTypeChange?.("live_input")}
+                        className={`text-[10px] px-2.5 py-1 rounded-full border transition-colors cursor-pointer ${
+                          keySourceType === "live_input"
+                            ? "bg-indigo-600/20 border-indigo-700 text-indigo-300"
+                            : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200"
+                        }`}
+                        title="Key the compressor off a real instrument/mic through your audio interface"
+                      >
+                        🎤 Live Key
+                      </button>
+                      {keySourceType === "live_input" && audioInputDevices.length > 1 && (
+                        <select
+                          value={selectedKeyDeviceId ?? ""}
+                          onChange={(e) => onSelectKeyDevice?.(e.target.value || null)}
+                          className="text-[10px] bg-neutral-900 border border-neutral-800 text-neutral-300 rounded-full px-2 py-1 outline-none cursor-pointer"
+                          title="Which input device to key from"
+                        >
+                          <option value="">System default</option>
+                          {audioInputDevices.map((d) => (
+                            <option key={d.deviceId} value={d.deviceId}>
+                              {d.label || `Input ${d.deviceId.slice(0, 6)}`}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </>
                   )}
                   <button
                     onClick={onToggleBypass}

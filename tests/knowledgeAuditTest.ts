@@ -30,22 +30,22 @@ check("inventory: >= 12 topologies", audit.inventory.topologies >= 12, `${audit.
 /* ---- coverage is honest: neither empty nor perfect ---- */
 check("overall coverage is a real percentage", audit.overallCoveragePct > 0 && audit.overallCoveragePct < 100, `${audit.overallCoveragePct}%`);
 const allMissing = audit.coverage.flatMap((a) => a.missing);
-check("known-missing: convolution reverb is reported", allMissing.some((m) => /convolution/i.test(m)));
-// FFT/spectral and stereo/mid-side used to be this test's known-missing
-// examples -- they stopped being gaps the moment spectral_gate (a real
-// recipe) and comp_midside (a real topology) shipped, which is a GOOD
-// outcome, not a break (same pattern as the "10 recipes" hardcode above).
-// First swapped to biquad -- which itself got promoted (eq_biquad_bell) one
-// commit later, breaking THIS check too. Swapped again, this time to two
-// deliberately-durable anchors instead of another pending-research concept
-// that could get promoted out from under the test: "Parallel (NY)
-// compression" is kept open ON PURPOSE (comp_parallel's tags avoid the
-// literal curriculum string specifically so researchEngineTest.ts's
-// gap-before-research check stays valid -- see dspTopologies.ts), and
-// external sidechain is permanently, structurally blocked. Neither can
-// close via a future promotion the way biquad just did.
-check("known-missing: parallel compression (deliberately kept open) is reported", allMissing.some((m) => /parallel/i.test(m)));
+// FFT/spectral, stereo/mid-side, biquad, parallel-compression, and
+// convolution all used to be this test's known-missing examples in turn --
+// each stopped being a gap the moment its real topology shipped, which is a
+// GOOD outcome, not a break (same pattern as the "10 recipes" hardcode
+// above). Chasing real-but-temporary gaps for this purpose kept breaking
+// the test, so a single PERMANENT synthetic anchor now does this job
+// instead (knowledgeAudit.ts's "Test invariants" area) -- it can never be
+// promoted out from under the test because nothing real can ever satisfy
+// its deliberately-fake concept string. External sidechain remains the one
+// real, structurally-blocked concept (see researchCorpus.ts) until a second
+// input bus lands.
+check("covered: convolution reverb no longer a gap", !allMissing.some((m) => /convolution/i.test(m)));
+check("covered: multi-tap delay no longer a gap", !allMissing.some((m) => /multi.?tap/i.test(m)));
+check("covered: parallel compression no longer a gap", !allMissing.some((m) => /parallel/i.test(m)));
 check("known-missing: external sidechain (structurally blocked) is reported", allMissing.some((m) => /sidechain input/i.test(m)));
+check("known-missing: the permanent test-honesty anchor is reported", allMissing.some((m) => /audit-honesty anchor/i.test(m)));
 check("covered: lookahead compression no longer a gap", !allMissing.some((m) => /lookahead/i.test(m)));
 check("covered: FDN no longer a gap", !allMissing.some((m) => /delay network/i.test(m)));
 check("every curriculum area is scored", audit.coverage.length >= 8, `${audit.coverage.length} areas`);

@@ -818,6 +818,57 @@ if (state.cnt >= H) {
 return Math.tanh(inputSample * (1 - mix) + y * mix);`,
     },
   },
+  /* ================================================================ */
+  /* TEST-ONLY FIXTURES -- not a real DSP concept, never surfaced to    */
+  /* users, never meant to be promoted into dspTopologies.ts.           */
+  /*                                                                    */
+  /* researchEngineTest.ts's "pending research changes nothing / approval */
+  /* extends coverage / rejection changes nothing" lifecycle checks used  */
+  /* to borrow a real-but-temporary corpus gap (phaser, then parallel-    */
+  /* compression, then multi-tap) and each one broke the moment that       */
+  /* concept legitimately shipped as a topology. These two fixtures decouple */
+  /* "does the approval boundary work correctly" (an evergreen engine        */
+  /* behavior) from "which real DSP concepts are still missing" (a moving   */
+  /* target that shrinks as the corpus matures) -- they can never be         */
+  /* promoted out from under the test because nothing real ever matches     */
+  /* their deliberately synthetic concept names or match regexes.           */
+  /* ================================================================ */
+  {
+    concept: "test-lifecycle-fixture-a",
+    area: "Utility",
+    match: /\btest.?lifecycle.?fixture.?a\b/i,
+    claims: [
+      { text: "Synthetic test fixture -- exercises the pending -> approved research lifecycle. Not a real DSP finding.", citation: { title: "Internal test fixture", source: "tests/researchEngineTest.ts", authority: 100 } },
+      { text: "This concept is deliberately never promoted into dspTopologies.ts, so it stays a genuine pending-research example indefinitely.", citation: { title: "Internal test fixture", source: "tests/researchEngineTest.ts", authority: 100 } },
+    ],
+    proposedModule: {
+      family: "utility",
+      title: "Test fixture A (trivial gain trim -- never meant to ship to real users)",
+      parameters: [{ id: "gain", name: "Gain", min: -24, max: 24, defaultValue: 0, unit: "dB" }],
+      body: `if (!state.init) { state.init = true; }
+let gain = params.gain !== undefined ? params.gain : 0;
+let g = Math.pow(10, gain / 20);
+return inputSample * g;`,
+    },
+  },
+  {
+    concept: "test-lifecycle-fixture-b",
+    area: "Utility",
+    match: /\btest.?lifecycle.?fixture.?b\b/i,
+    claims: [
+      { text: "Synthetic test fixture -- exercises the rejection lifecycle (rejecting research must change nothing). Not a real DSP finding.", citation: { title: "Internal test fixture", source: "tests/researchEngineTest.ts", authority: 100 } },
+      { text: "This concept is deliberately never promoted into dspTopologies.ts, so it stays a genuine pending-research example indefinitely.", citation: { title: "Internal test fixture", source: "tests/researchEngineTest.ts", authority: 100 } },
+    ],
+    proposedModule: {
+      family: "utility",
+      title: "Test fixture B (trivial gain trim -- never meant to ship to real users)",
+      parameters: [{ id: "gain", name: "Gain", min: -24, max: 24, defaultValue: 0, unit: "dB" }],
+      body: `if (!state.init) { state.init = true; }
+let gain = params.gain !== undefined ? params.gain : 0;
+let g = Math.pow(10, gain / 20);
+return inputSample * g;`,
+    },
+  },
 ];
 
 export function corpusEntriesFor(concept: string): CorpusEntry[] {

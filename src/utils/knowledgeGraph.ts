@@ -91,7 +91,9 @@ const TOPOLOGY_CONCEPTS: Record<string, { concept: string; related: string[] }> 
   comp_fet_1176: { concept: "compressor", related: ["fet-model", "peak-detection", "transients"] },
   comp_multiband_2band: { concept: "compressor", related: ["multiband-compression", "crossover", "band-splitting"] },
   comp_deesser: { concept: "compressor", related: ["sidechain-filter", "de-essing", "sibilance"] },
-  comp_parallel: { concept: "compressor", related: ["parallel-topology", "wet-dry-blend", "upward-density", "new-york-style"] },
+  comp_parallel: { concept: "compressor", related: ["parallel-compression", "wet-dry-blend", "upward-density", "new-york-style"] },
+  reverb_convolution: { concept: "reverb", related: ["convolution", "impulse-response", "fir-filter"] },
+  delay_multitap: { concept: "delay", related: ["multi-tap", "rhythmic-echo-pattern"] },
   // No test collision (same check already done for wavetable/fm-synthesis/
   // spectral_gate above): stereoEngineTest.ts approves mid-side research
   // before ever checking coverage, never checks it's a gap beforehand, so

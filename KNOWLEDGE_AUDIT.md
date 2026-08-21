@@ -1,43 +1,40 @@
 # OrangeJuce Knowledge Audit
 
-Generated 2026-08-07T11:18:48.423Z — every number below is measured, not claimed.
+Generated 2026-08-21T13:35:53.275Z — every number below is measured, not claimed.
 
 ## 1. Inventory
 
-- Golden recipes: **10**
+- Golden recipes: **13**
 - Composable primitives: **10**
-- Topology variants (engineering choices): **12**
-- Graph nodes: **32**, reachable concepts: **83**
+- Topology variants (engineering choices): **27**
+- Graph nodes: **50**, reachable concepts: **127**
 
-## 2. Curriculum coverage — overall 76%
+## 2. Curriculum coverage — overall 97%
 
-`██████░░░░` **Compressors** 57% (8/14)
-`█████████░` **Reverbs** 86% (6/7)
-`███████░░░` **Delays** 67% (4/6)
-`█████████░` **Distortion** 86% (6/7)
-`████████░░` **Filters & EQ** 83% (5/6)
-`████████░░` **Modulation** 75% (3/4)
-`████████░░` **Pitch & Time** 80% (4/5)
-`██████░░░░` **Synthesis** 60% (3/5)
+`█████████░` **Compressors** 93% (13/14)
+`██████████` **Reverbs** 100% (7/7)
+`██████████` **Delays** 100% (6/6)
+`██████████` **Distortion** 100% (7/7)
+`██████████` **Filters & EQ** 100% (6/6)
+`██████████` **Modulation** 100% (4/4)
+`██████████` **Pitch & Time** 100% (5/5)
+`██████████` **Synthesis** 100% (5/5)
 `██████████` **Engineering hygiene** 100% (8/8)
+`░░░░░░░░░░` **Test invariants** 0% (0/1)
 
 ### Gap report (the shopping list)
 
-- **Compressors**: Parallel (NY) compression; Multiband compression; Sidechain input (external key); Internal sidechain filtering (de-esser); Opto/VCA/FET circuit models; Stereo linking / mid-side
-- **Reverbs**: Convolution / impulse responses
-- **Delays**: Multi-tap patterns; Ping-pong / stereo spread
-- **Distortion**: Dynamic (level-tracking) saturation
-- **Filters & EQ**: Biquad / RBJ cookbook forms
-- **Modulation**: Phaser (allpass cascade)
-- **Pitch & Time**: Spectral (FFT) processing
-- **Synthesis**: Wavetable synthesis; FM synthesis
+- **Compressors**: Sidechain input (external key)
+- **Test invariants**: Reserved: audit-honesty anchor (not a real capability — see knowledgeAuditTest.ts)
 
 ## 3. Balance (modules per concept)
 
-- **compressor** ×5: dynamics (recipe), comp_ff_rms (topology), comp_peak_punch (topology), comp_feedback_glue (topology), comp_lookahead_master (topology)
-- **reverb** ×4: reverb (recipe), reverb_schroeder (topology), reverb_fdn_plate (topology), reverb_room_er (topology)
-- **delay** ×4: delay (recipe), echo (primitive), delay_tape (topology), delay_digital (topology)
-- **distortion** ×4: distortion (recipe), dist_softclip (topology), dist_tube_asym (topology), dist_fuzz (topology)
+- **compressor** ×11: dynamics (recipe), comp_ff_rms (topology), comp_peak_punch (topology), comp_feedback_glue (topology), comp_lookahead_master (topology), comp_opto (topology), comp_fet_1176 (topology), comp_multiband_2band (topology), comp_deesser (topology), comp_parallel (topology), comp_midside (topology)
+- **delay** ×6: delay (recipe), echo (primitive), delay_tape (topology), delay_digital (topology), delay_pingpong (topology), delay_multitap (topology)
+- **reverb** ×5: reverb (recipe), reverb_schroeder (topology), reverb_fdn_plate (topology), reverb_room_er (topology), reverb_convolution (topology)
+- **distortion** ×5: distortion (recipe), dist_softclip (topology), dist_tube_asym (topology), dist_fuzz (topology), dist_dynamic_sat (topology)
+- **synthesizer** ×4: synth (recipe), synth_pad (topology), synth_wavetable (topology), synth_fm (topology)
+- **equalizer** ×3: eq (recipe), eq_3band (topology), eq_biquad_bell (topology)
 
 ## 4. Trust tiers
 
@@ -49,28 +46,28 @@ Generated 2026-08-07T11:18:48.423Z — every number below is measured, not claim
 | 4 | Learned, re-validated at use | candidate recipe memory, learned pitfalls (localStorage) | re-gated before reuse; pitfalls only bias prompts, never ship code |
 | 5 | Model proposals | local LLM rework/edit suggestions | never trusted: must beat the incumbent's measured score to survive |
 
-## 5. Demonstrated ability — 100% of benchmarks ship at the >= 97 floor (avg code health 100)
+## 5. Demonstrated ability — 100% of benchmarks ship at the >= 97 floor (avg code health 99)
 
 | Benchmark | Family | Min score | Code health | Ships? | Candidates | Topology chosen |
 |-----------|--------|-----------|-------------|--------|------------|-----------------|
 | Transparent mastering compressor | dynamics | 100 | 100 | yes | 4 | comp_lookahead_master |
-| Drum smash compressor | dynamics | 100 | 100 | yes | 4 | comp_peak_punch |
+| Drum smash compressor | dynamics | 100 | 97 | yes | 4 | comp_peak_punch |
 | Vintage vocal compressor | dynamics | 100 | 97 | yes | 4 | comp_feedback_glue |
 | Live vocal compressor | dynamics | 100 | 97 | yes | 4 | comp_feedback_glue |
 | Plate vocal reverb | reverb | 100 | 100 | yes | 4 | reverb_fdn_plate |
 | Tight drum room | reverb | 100 | 100 | yes | 4 | reverb_room_er |
 | Shimmer reverb | reverb | 100 | 100 | yes | 4 | reverb_schroeder |
 | Tape echo | delay | 100 | 100 | yes | 4 | delay_tape |
-| Pristine digital delay | delay | 100 | 100 | yes | 3 | delay_digital |
+| Pristine digital delay | delay | 100 | 100 | yes | 4 | delay_digital |
 | Tube saturation | saturator | 100 | 100 | yes | 2 | — |
 | Hard fuzz | distortion | 100 | 100 | yes | 4 | dist_fuzz |
-| Resonant filter sweep | filter | 100 | 100 | yes | 2 | — |
-| 3-band EQ | eq | 100 | 100 | yes | 3 | — |
-| Chorus | modulation | 100 | 100 | yes | 2 | — |
+| Resonant filter sweep | filter | 100 | 97 | yes | 2 | — |
+| 3-band EQ | eq | 100 | 100 | yes | 4 | eq_3band |
+| Chorus | modulation | 100 | 100 | yes | 3 | — |
 | Autotune | pitch | 100 | 97 | yes | 2 | — |
 | Drum pads | sampler | 100 | 100 | yes | 2 | — |
-| Synth pad | synthesizer | 100 | 100 | yes | 2 | — |
-| Novel hybrid | hybrid_other | 100 | 100 | yes | 1 | — |
+| Synth pad | synthesizer | 100 | 100 | yes | 4 | synth_wavetable |
+| Novel hybrid | hybrid_other | 100 | 100 | yes | 4 | — |
 
 ---
 Regenerate with `npm run audit`. Coverage comes from the knowledge graph

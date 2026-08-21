@@ -486,6 +486,105 @@ wet = state.dw;
 return Math.tanh(inputSample * (1 - mix) + wet * mix * 1.1);`,
     tags: { topology: "early-reflection-room", character: ["transparent"], sources: ["drums", "guitar"], latency: "zero", cpu: "light" },
   },
+  {
+    // Adapted from researchCorpus.ts's "convolution" entry (same IR
+    // synthesis engine, same params) -- promoting it surfaced a real defect
+    // the corpus module was never checked against: a bare 1024-tap one-shot
+    // FIR (no feedback) can only ring for ~23ms before the buffer fully
+    // flushes, which functionalFitnessTest.ts's decay-time probe correctly
+    // measured as indistinguishable from "a near-instant blip," not a
+    // reverb (same class of fix as reverb_fdn_plate's own history: an
+    // inadequate decay tail means add/raise feedback gain, not lower the
+    // bar). Recirculating the wet signal back INTO the 1024-tap convolution
+    // buffer was tried first and rejected: the loudest tap (ir[0], an
+    // almost-immediate self-read) dominates as a per-SAMPLE feedback mode
+    // whose decay rate is set by the IR's own shape and barely responds to
+    // an external feedback gain at all -- every attempt landed on the same
+    // measured ~46ms drop regardless of the gain used. Real algorithmic
+    // reverbs that combine convolution with a long tail don't recirculate
+    // through the IR itself either -- they add a SEPARATE late-reverberation
+    // feedback stage after a short/dense early-reflection convolution, which
+    // is what this does: the 1024-tap FIR still provides the dense, colored
+    // early-reflection character (unchanged), and an independent single-tap
+    // feedback line (state.tail, proven shape -- same "one-pole momentum +
+    // regen scalar" reverb_room_er already uses) supplies the actual decay,
+    // fed BY the convolution's output rather than routed back through it.
+    // See dspTopologies.ts's own file header re: the promotion pattern
+    // already used for opto/FET/multiband/de-esser/mid-side/wavetable/FM/
+    // ping-pong.
+    id: "reverb_convolution",
+    family: "reverb",
+    title: "Convolution reverb (procedurally-synthesized room IR, direct FIR — 1024 taps, with a regenerating tail)",
+    rationale: "a direct FIR against a synthesized decaying, tone-shaped-noise impulse response for dense, room-accurate early reflections, feeding an independent single-tap regenerating line for the actual decay tail -- denser than a comb/FDN network up front, at the cost of a 1024-tap-per-sample budget",
+    parameters: [
+      { id: "size", name: "Size", min: 0.1, max: 1, defaultValue: 0.6, unit: "ratio" },
+      { id: "decay", name: "Decay", min: 0.1, max: 0.98, defaultValue: 0.7, unit: "ratio" },
+      { id: "tone", name: "Tone", min: 800, max: 12000, defaultValue: 5000, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+    ],
+    // The IR lives in a buffer allocated ONCE (init guard); it is refilled
+    // in place (no allocation) only when Size/Decay/Tone change, so a swept
+    // knob costs one refill per render, not one per sample. The regenerating
+    // tail line is a second, separate fixed buffer (also allocated once).
+    body: `if (!state.init) {
+  state.ir = new Float32Array(1024);
+  state.buf = new Float32Array(1024);
+  state.w = 0;
+  state.key = -1;
+  state.tail = new Float32Array(9000);
+  state.tp = 0;
+  state.init = true;
+}
+let size = params.size !== undefined ? params.size : 0.6;
+let decay = params.decay !== undefined ? params.decay : 0.7;
+let tone = params.tone !== undefined ? params.tone : 5000;
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let key = Math.round(size * 200) * 100000 + Math.round(decay * 1000) * 100 + Math.round(tone / 120);
+if (key !== state.key) {
+  let taps = Math.max(64, Math.floor(size * 1024));
+  let rng = 22222;
+  let lp = 0;
+  let toneA = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+  let decayRate = 3 + (1 - decay) * 60;
+  let norm = 0;
+  for (let k = 0; k < 1024; k++) {
+    if (k < taps) {
+      rng = (rng * 1664525 + 1013904223) | 0;
+      let wn = (rng / 2147483648);
+      let env = Math.exp(-decayRate * k / taps);
+      lp += toneA * (wn - lp);
+      let early = k < 6 ? 0.9 : 0;
+      let v = (lp + early * wn) * env;
+      state.ir[k] = v;
+      norm += v * v;
+    } else {
+      state.ir[k] = 0;
+    }
+  }
+  let g = norm > 1e-9 ? 0.7 / Math.sqrt(norm) : 0;
+  for (let k = 0; k < taps; k++) state.ir[k] *= g;
+  state.key = key;
+}
+state.buf[state.w] = inputSample;
+let acc = 0;
+for (let k = 0; k < 1024; k++) {
+  let idx = state.w - k;
+  if (idx < 0) idx += 1024;
+  acc += state.ir[k] * state.buf[idx];
+}
+state.w = (state.w + 1) % 1024;
+// Separate long regenerating tail: a single ~180ms feedback line fed by the
+// convolution's own dense output, same proven shape as reverb_room_er's
+// own regen line. Math.tanh bounds the fed-back read every sample, so this
+// is stable at any Decay setting regardless of the convolution's own gain.
+let tailRead = state.tail[(state.tp - 7938 + 9000) % 9000];
+let regen = 0.5 + decay * 0.46;
+state.tail[state.tp] = acc * 0.6 + Math.tanh(tailRead) * regen;
+state.tp = (state.tp + 1) % 9000;
+let wet = acc + tailRead * 0.35;
+return Math.tanh(inputSample * (1 - mix) + wet * mix * 1.2);`,
+    tags: { topology: "direct-fir-convolution", character: ["colored", "transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "medium" },
+  },
 
   /* ================================================================ */
   /* DELAY: three echo designs                                         */
@@ -553,6 +652,36 @@ let wr = ms + (wetR - ms) * width;
 state.outR = Math.tanh(inR * (1 - mix) + wr * mix * 1.3);
 return Math.tanh(inputSample * (1 - mix) + wl * mix * 1.3);`,
     tags: { topology: "cross-fed-pingpong", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+  },
+  {
+    // Promoted verbatim from researchCorpus.ts's "multi-tap" entry (same
+    // body, same params) -- same promotion pattern as reverb_convolution
+    // above and the 8 earlier promotions this file's header describes.
+    id: "delay_multitap",
+    family: "delay",
+    title: "Multi-tap rhythmic delay (3 pattern taps on one line, damped regeneration)",
+    rationale: "reads one delay line at three offsets at once instead of a single repeat, producing a rhythmic pattern from one write head -- distinct from ping-pong's cross-fed stereo bounce or the tape/digital loop's single steady echo",
+    parameters: [
+      { id: "time", name: "Time", min: 50, max: 1200, defaultValue: 400, unit: "ms" },
+      { id: "feedback", name: "Feedback", min: 0, max: 0.85, defaultValue: 0.35, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(96000); state.ptr = 0; state.damp = 0; state.init = true; }
+let time = params.time !== undefined ? params.time : 400;
+let fb = Math.min(0.85, params.feedback !== undefined ? params.feedback : 0.35);
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let d = Math.max(4, Math.min(52900, Math.floor(time * 44.1)));
+let d1 = Math.max(1, Math.floor(d * 0.5));
+let d2 = Math.max(2, Math.floor(d * 0.75));
+let t1 = state.buf[(state.ptr - d1 + 96000) % 96000];
+let t2 = state.buf[(state.ptr - d2 + 96000) % 96000];
+let t3 = state.buf[(state.ptr - d + 96000) % 96000];
+let wet = t1 * 0.32 + t2 * 0.28 + t3 * 0.4;
+state.damp += 0.35 * (t3 - state.damp);
+state.buf[state.ptr] = inputSample + state.damp * fb;
+state.ptr = (state.ptr + 1) % 96000;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "multi-tap-rhythmic", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
   },
 
   /* ================================================================ */

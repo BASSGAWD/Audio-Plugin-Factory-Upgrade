@@ -27,7 +27,7 @@ import { DSP_RECIPES, DspRecipe, PITCH_SHIFT_RECIPE, scoreRecipes } from "./dspR
 import { buildPrimitiveGraph, composePrimitiveGraph, inferStages, reverseChain, swapSiblingInChain, DSP_PRIMITIVES } from "./dspPrimitives";
 import { inferRequirements, hasRequirements, BuildRequirements } from "./requirements";
 import { rankTopologies, logPromptGap } from "./knowledgeGraph";
-import { DspTopology } from "./dspTopologies";
+import { DspTopology, DSP_TOPOLOGIES } from "./dspTopologies";
 import { findApprovedModuleForPrompt } from "./researchEngine";
 
 /** Why a particular topology was chosen — the "engineering brain" made
@@ -504,10 +504,24 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
   // the pitch stage as a subtle octave-up blend.
   const wantsShimmer = /shimmer/i.test(prompt) && spec.family === "reverb";
 
+  // requirements.ts's source/character/latency dimensions don't recognize
+  // structural wording like "multi-tap" -- without this short-circuit, a
+  // bare "multi-tap delay" prompt has no requirements at all and
+  // rankTopologies() just returns the family default (delay_tape).
+  const wantsMultiTap = /multi.?tap|rhythmic\s*(?:delay|echo)|tap\s*delay/i.test(prompt) && spec.family === "delay";
+
+  // Same gap: "convolution"/"impulse response" wording isn't a recognized
+  // character/source/latency requirement either, so without this a prompt
+  // naming the technique by name silently built reverb_fdn_plate (the
+  // requirements-neutral runner-up) instead of reverb_convolution -- the
+  // exact word the user typed. Regex matches researchCorpus.ts's own
+  // "convolution" concept match verbatim.
+  const wantsConvolution = /convolution|impulse\s*response|\bir\b\s*(?:reverb|loader)|convolv/i.test(prompt) && spec.family === "reverb";
+
   // Human-approved research first: a gate-verified module the user approved
   // in the Research Lab whose concept wording matches this prompt beats the
   // generic banks -- that's the whole point of researching a gap.
-  const researched = spec.family === "amp_sim" || wantsShimmer ? null : findApprovedModuleForPrompt(prompt);
+  const researched = spec.family === "amp_sim" || wantsShimmer || wantsMultiTap || wantsConvolution ? null : findApprovedModuleForPrompt(prompt);
 
   if (researched?.proposedModule) {
     const m = researched.proposedModule;
@@ -544,6 +558,20 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     dspFunction = composed.body;
     structure = "Schroeder reverb with an octave-up pitch-shifted sheen woven into the tail";
     friendly = "a dense hall with an octave-up sparkle woven into the tail — a true shimmer";
+  } else if (wantsMultiTap) {
+    const multiTap = DSP_TOPOLOGIES.find((t) => t.id === "delay_multitap")!;
+    parameters = toLiveParams(multiTap.parameters);
+    dspFunction = multiTap.body;
+    structure = multiTap.title;
+    friendly = "a multi-tap rhythmic delay reading one line at three offsets, instead of a single steady echo";
+    engineeringChoice = multiTap;
+  } else if (wantsConvolution) {
+    const convolution = DSP_TOPOLOGIES.find((t) => t.id === "reverb_convolution")!;
+    parameters = toLiveParams(convolution.parameters);
+    dspFunction = convolution.body;
+    structure = convolution.title;
+    friendly = "a direct FIR convolution against a synthesized room impulse response, instead of a comb/FDN network";
+    engineeringChoice = convolution;
   } else if (scored.length >= 2 && (spec.hybrid || spec.family === "multiband_saturator")) {
     const composed = composeRecipes(scored[0].recipe, scored[1].recipe);
     parameters = toLiveParams(composed.parameters);

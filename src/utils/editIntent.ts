@@ -28,6 +28,42 @@ const EDIT_WORDING =
 /** Questions are conversation, not change requests. */
 const QUESTION_WORDING = /^(what|why|how|when|where|who|which|does|do|is|are|can|could|should|explain|tell me)\b|\?\s*$/i;
 
+/** How a fresh build description starts in natural English -- "a warmer
+ *  vintage delay...", "a brighter shimmer reverb...", never "make it
+ *  brighter" or "brighter please" (those don't take an indefinite article
+ *  at all). */
+const LEADING_ARTICLE = /^\s*(?:a|an)\b/i;
+
+/**
+ * A prompt phrased as a full description of a NEW plugin ("a brighter
+ * shimmer reverb with size and tone controls") reads exactly like a build
+ * request even though it also contains a tonal adjective EDIT_WORDING
+ * watches for ("brighter", "warmer", "cleaner", "darker", "smoother", ...) --
+ * and a plugin is loaded almost always (the default starting plugin loads
+ * before the user's first message), so without this check, describing a
+ * NEW sound's character in the single most natural way English allows
+ * ("a warmer vintage delay with feedback and tone controls") silently
+ * edits whatever happens to be loaded instead of building the thing being
+ * described. Verified empirically: "a warmer vintage delay...", "a
+ * cleaner, smoother compressor...", "a brighter shimmer reverb...", and "a
+ * darker ambient pad synth..." all classified as "edit" before this check
+ * existed.
+ *
+ * Recognized by three independent signals, all required: starts with an
+ * indefinite article (how a fresh description is phrased; a tweak of an
+ * existing plugin says "make it brighter" or "brighter please", never "a
+ * brighter ..."), names a REAL recognized plugin family (so "a bit
+ * brighter" -- family hybrid_other -- is excluded regardless of its
+ * leading "a"), and has enough words to actually be a description rather
+ * than a short hedge that coincidentally starts with "a" (a second,
+ * independent guard alongside the family check).
+ */
+function looksLikeFreshBuildDescription(text: string): boolean {
+  if (!LEADING_ARTICLE.test(text)) return false;
+  if (text.trim().split(/\s+/).length < 5) return false;
+  return classifyPluginIntent(text).family !== "hybrid_other";
+}
+
 export type EditIntent = "edit" | "rebuild" | "none";
 
 export function classifyEditIntent(
@@ -52,6 +88,12 @@ export function classifyEditIntent(
   }
 
   if (QUESTION_WORDING.test(text)) return "none";
+
+  // See looksLikeFreshBuildDescription's doc comment: must be checked BEFORE
+  // EDIT_WORDING, since a full description of a new plugin's character
+  // ("a warmer vintage delay...") legitimately contains an EDIT_WORDING
+  // adjective without being an edit request at all.
+  if (looksLikeFreshBuildDescription(text)) return "rebuild";
 
   if (isRelativeTweakRequest(text)) return "edit";
   if (EDIT_WORDING.test(text)) return "edit";

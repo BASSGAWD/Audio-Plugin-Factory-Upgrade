@@ -48,6 +48,48 @@ const minScore = (g: { scores: { looks: number; performance: number; latency: nu
   check("intent: a question -> none", classifyEditIntent("what does the feedback knob do?", { hasPlugin: true }) === "none");
   check("intent: pinned notes force edit", classifyEditIntent("apply", { hasPlugin: true, noteCount: 2 }) === "edit");
 
+  /* 1b. looksLikeFreshBuildDescription: a full description of a NEW plugin's
+     character must rebuild even when it contains a tonal adjective
+     EDIT_WORDING watches for -- verified empirically to misclassify as
+     "edit" before this fix (a plugin is loaded almost always, since the
+     default starting plugin loads before the user's first message, so this
+     fires on ordinary first-message wording, not just re-typed prompts). */
+  check(
+    "intent: 'a warmer vintage delay with feedback and tone controls' -> rebuild (fresh build, not a tweak)",
+    classifyEditIntent("a warmer vintage delay with feedback and tone controls", { hasPlugin: true }) === "rebuild"
+  );
+  check(
+    "intent: 'a cleaner, smoother compressor with attack and release knobs' -> rebuild",
+    classifyEditIntent("a cleaner, smoother compressor with attack and release knobs", { hasPlugin: true }) === "rebuild"
+  );
+  check(
+    "intent: 'a brighter shimmer reverb with size and tone' -> rebuild",
+    classifyEditIntent("a brighter shimmer reverb with size and tone", { hasPlugin: true }) === "rebuild"
+  );
+  check(
+    "intent: 'a darker ambient pad synth with slow attack' -> rebuild",
+    classifyEditIntent("a darker ambient pad synth with slow attack", { hasPlugin: true }) === "rebuild"
+  );
+  // Genuine short tweaks of the SAME shape must still stay edits -- the
+  // family gate (hybrid_other) and the word-count floor both have to hold.
+  check("intent: 'make it brighter' still edits (no leading article)", classifyEditIntent("make it brighter", { hasPlugin: true }) === "edit");
+  check("intent: 'a bit brighter' still edits (no recognized family)", classifyEditIntent("a bit brighter", { hasPlugin: true }) === "edit");
+  check("intent: 'brighter please' still edits", classifyEditIntent("brighter please", { hasPlugin: true }) === "edit");
+
+  /* 1c. pickAdditionStage proximity guard: a long descriptive BUILD sentence
+     that happens to contain an addable-effect noun somewhere far from any
+     "add"/"with a" wording must not chain a stage onto whatever's loaded --
+     defense in depth alongside the intent-classification fix above, for
+     phrasing that check doesn't catch (e.g. missing a leading article). */
+  check(
+    "pickAdditionStage: close together ('add a ring mod') still chains",
+    pickAdditionStage("add a ring mod")?.id === "ring_mod"
+  );
+  check(
+    "pickAdditionStage: far apart in a long descriptive sentence does not chain",
+    pickAdditionStage("a vintage guitar amp with drive, tone, and level controls, then maybe add some character later") === null
+  );
+
   /* 2. Note edits: rename / raise / lower / widen / narrow / leftover */
   const params = (): PluginParameter[] => [
     { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 8, value: 8, unit: "dB" },

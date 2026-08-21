@@ -191,8 +191,24 @@ const ADDITION_NOUNS: Record<string, RegExp> = {
 };
 
 export function pickAdditionStage(prompt: string): (typeof ADDABLE_STAGES)[number] | null {
-  if (!ADD_WORDING.test(prompt)) return null;
-  return ADDABLE_STAGES.find((s) => (ADDITION_NOUNS[s.id] ?? s.match).test(prompt)) ?? null;
+  const addMatch = ADD_WORDING.exec(prompt);
+  if (!addMatch) return null;
+  const stage = ADDABLE_STAGES.find((s) => (ADDITION_NOUNS[s.id] ?? s.match).test(prompt));
+  if (!stage) return null;
+  // Proximity guard: "add a ring mod" and "give it some echo" say the
+  // addition wording and the effect noun close together -- a long
+  // descriptive BUILD sentence that merely happens to contain both
+  // somewhere ("a vintage amp with drive, tone, and level controls, add
+  // some character") reads completely differently, even though it would
+  // otherwise match both regexes. Require the effect noun to start within
+  // ~40 characters of the addition wording's own match. (classifyEditIntent
+  // already keeps most fresh-build descriptions out of the edit pass
+  // entirely via looksLikeFreshBuildDescription; this is defense in depth
+  // for phrasing that check doesn't catch, e.g. one missing a leading
+  // indefinite article.)
+  const nounMatch = (ADDITION_NOUNS[stage.id] ?? stage.match).exec(prompt);
+  if (!nounMatch || Math.abs(nounMatch.index - addMatch.index) > 40) return null;
+  return stage;
 }
 
 /* ------------------------------------------------------------------ */

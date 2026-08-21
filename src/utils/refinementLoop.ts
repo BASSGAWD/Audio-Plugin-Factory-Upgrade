@@ -148,7 +148,16 @@ export function refinementScore(gate: QualityGateResult): number {
     voicingEntries && voicingEntries.length > 0
       ? 0.2 * (voicingEntries.reduce((sum, v) => sum + v.score, 0) / voicingEntries.length)
       : 0;
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus;
+  // VISUAL INTEGRITY — WCAG contrast on the faceplate, orthogonal to
+  // scoreLooks's structural presence checks (does every param HAVE a
+  // controlType/x/y/accentColor?) and to overlap (already penalized
+  // directly in scoreLooks, not duplicated here). A light tie-breaker
+  // deliberately: a legitimately bold, high-contrast-by-design theme must
+  // never be blocked from shipping over a borderline number, so this never
+  // touches the >=97 floor -- only which of several CORRECT candidates
+  // ranks first.
+  const visualBonus = 0.1 * (gate.report.visualIntegrity?.score ?? 100);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus + visualBonus;
 }
 
 /* ------------------------------------------------------------------ */

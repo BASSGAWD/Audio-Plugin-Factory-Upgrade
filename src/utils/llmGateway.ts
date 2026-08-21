@@ -315,8 +315,30 @@ function escapeRawControlCharsInStrings(text: string): string {
   return out;
 }
 
+/**
+ * Strips a leading reasoning/thinking preamble a "thinking" model can emit
+ * before its actual JSON answer -- Qwen3 with thinking enabled (this
+ * project's own base model, trained for thinking DISABLED -- see
+ * local-model/README.md's "empty <think></think> block" convention) and
+ * other popular local models people load into Ollama/LM Studio (DeepSeek-R1
+ * distills, QwQ, ...) all use this pattern. Without stripping it, a model
+ * reasoning ABOUT the JS/JSON it's about to write is very likely to mention
+ * `{`/`}` characters inside its own thinking block, and the "find the first
+ * { and its balanced closing }" scan below can lock onto the wrong pair or
+ * fail outright -- a plausible, concrete cause of "this local model doesn't
+ * work" reports that has nothing to do with the model's actual answer.
+ *
+ * Only strips a WELL-FORMED (opened AND closed) block. An unclosed one means
+ * the response is genuinely truncated mid-thought -- a different failure
+ * this function should not paper over by inventing where the thinking
+ * would have ended.
+ */
+function stripReasoningPreamble(text: string): string {
+  return text.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "").trim();
+}
+
 export function parseModelJson(raw: string): any {
-  const text = (raw || "").trim();
+  const text = stripReasoningPreamble((raw || "").trim());
   if (!text) return {};
   try {
     return JSON.parse(text);

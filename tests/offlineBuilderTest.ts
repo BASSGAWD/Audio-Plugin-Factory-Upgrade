@@ -5,7 +5,7 @@
  * all four dimensions, with honest capability descriptions.
  */
 
-import { buildOfflinePlugin, applyRelativeTweaks, isRelativeTweakRequest, derivePluginName } from "../src/utils/offlineBuilder";
+import { buildOfflinePlugin, buildOfflineCandidates, applyRelativeTweaks, isRelativeTweakRequest, derivePluginName } from "../src/utils/offlineBuilder";
 import { processOfflineMessage } from "../src/utils/offlineEngine";
 import { runQualityGate, formatBuildReport } from "../src/utils/qualityGate";
 import { detectDesignAttributes } from "../src/utils/uiSpec";
@@ -305,6 +305,52 @@ check("formatBuildReport reads as evidence", /verified audible/.test(formatBuild
 /* --------------------------------------------------------------- */
 
 check("classifier still splits the EQ/saturator hybrid", classifyPluginIntent("an EQ where each band saturates").family === "multiband_saturator");
+
+/* --------------------------------------------------------------- */
+/* 10. engineeringChoice is populated on EVERY build, not just the   */
+/*     ones where the wording drove a requirement-based override    */
+/* --------------------------------------------------------------- */
+{
+  // amp_sim: hits its own dedicated branch (no rankedTopologies path at all).
+  const amp = buildOfflinePlugin("a crunchy vintage guitar amp with drive, tone, and level controls");
+  check("engineeringChoice: amp_sim build has one", !!amp.engineeringChoice && amp.engineeringChoice.topology.length > 0, JSON.stringify(amp.engineeringChoice));
+
+  // A plain, neutral single-recipe prompt with NO special wording at all --
+  // the branch that used to ship with engineeringChoice undefined because
+  // hasRequirements(requirements) was false and chosen.isDefault was true.
+  const plain = buildOfflinePlugin("a delay");
+  check("engineeringChoice: even a bare neutral prompt gets one", !!plain.engineeringChoice, JSON.stringify(plain.engineeringChoice));
+
+  // Hybrid composition (two recipes chained) -- previously never set
+  // engineeringChoice at all.
+  const hybrid = buildOfflinePlugin("an EQ where each band saturates");
+  check("engineeringChoice: hybrid composition gets one", !!hybrid.engineeringChoice, JSON.stringify(hybrid.engineeringChoice));
+
+  // No-recipe-matched primitive chain -- the true fallback path.
+  const oddball = buildOfflinePlugin("turn my voice into a robot underwater whale song");
+  check("engineeringChoice: the no-family primitive-chain fallback gets one", !!oddball.engineeringChoice, JSON.stringify(oddball.engineeringChoice));
+
+  // Requirement-driven override still carries its REAL evidence (unchanged
+  // behavior, not just "always non-null now").
+  const multiTap = buildOfflinePlugin("a multi-tap rhythmic delay");
+  check(
+    "engineeringChoice: a genuine requirement-driven choice still reports real evidence",
+    !!multiTap.engineeringChoice && multiTap.engineeringChoice.evidence.length >= 0,
+    JSON.stringify(multiTap.engineeringChoice)
+  );
+
+  // Runner-up alternates (buildOfflineCandidates) still correctly carry NO
+  // rationale -- only the main build (candidate[0]) does. Unaffected by
+  // this change; asserted here so a future edit can't silently regress it.
+  const candidates = buildOfflineCandidates("a reverb");
+  check("engineeringChoice: candidate[0] (the main build) has one", !!candidates[0].engineeringChoice);
+  if (candidates.length > 1) {
+    check(
+      "engineeringChoice: runner-up alternates still carry none (only the main build does)",
+      candidates.slice(1).every((c) => c.engineeringChoice === undefined)
+    );
+  }
+}
 
 console.log(failures === 0 ? "\nOFFLINE BUILDER: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

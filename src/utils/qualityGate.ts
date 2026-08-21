@@ -27,7 +27,7 @@ import { sanitizeDspCode } from "./healthcheckRunner";
 import { PluginFamily } from "./pluginSpec";
 import { UiTheme, buildUiSpec, composeTheme, orderParametersBySpec } from "./uiSpec";
 import { auditDspCode, formatCodeAudit } from "./codeAudit";
-import { ArchetypeId, applyArchetype, inferControlType, pickArchetype } from "./guiArchetypes";
+import { ArchetypeId, applyArchetype, inferControlType, pickArchetype, resolveControlOverlaps, rectsOverlap } from "./guiArchetypes";
 import { measureFeatureDepth } from "./featureManifest";
 import { DSP_RECIPES, DspRecipe } from "./dspRecipes";
 
@@ -2661,6 +2661,16 @@ export function polishPluginVisuals(
   });
 
   const layout = applyArchetype(archetype ?? "grid", typed);
+  // Repairs positions that ALREADY collide -- e.g. a plugin edited multiple
+  // times before this occupied-slot-aware layout shipped, where every
+  // param already has x/y so the "only fill gaps" layout above leaves them
+  // untouched even if they overlap. Runs on every build; a true no-op when
+  // nothing actually overlaps. See guiArchetypes.ts's resolveControlOverlaps.
+  const repairedPositions = resolveControlOverlaps(layout.parameters);
+  if (repairedPositions !== layout.parameters) {
+    changes.push("repositioned overlapping controls that had collided");
+  }
+  layout.parameters = repairedPositions;
 
   // Amp/cab/mic/pad showpiece widgets never get a font override (matches
   // the pre-archetype behavior exactly); every control gets an accent.
@@ -2717,7 +2727,31 @@ export function polishPluginVisuals(
   return { plugin: polished, changes };
 }
 
-function scoreLooks(plugin: AudioPlugin): number {
+/** How many pairs of positioned controls overlap on the faceplate. Used to
+ *  penalize scoreLooks below (a plugin with genuinely overlapping controls
+ *  should not be able to score 100 -- "the controls are usable and
+ *  distinct" is squarely what "looks" already claims to certify) and as
+ *  evidence in measureVisualIntegrity. By the time a build reaches here,
+ *  resolveControlOverlaps (guiArchetypes.ts, run inside
+ *  polishPluginVisuals) has already repaired any collision that occurred
+ *  during layout -- this check is a permanent regression guard on the
+ *  headline score itself, not the primary defense, so a future change that
+ *  breaks the repair pass fails every one of this project's >=97-floor
+ *  tests instead of shipping an unusable, silently-stacked faceplate. */
+function countControlOverlaps(parameters: PluginParameter[]): number {
+  const rects = parameters
+    .filter((p) => p.x !== undefined && p.y !== undefined && p.controlType !== "label")
+    .map((p) => ({ x: p.x as number, y: p.y as number, w: p.w ?? 120, h: p.h ?? 100 }));
+  let count = 0;
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      if (rectsOverlap(rects[i], rects[j])) count++;
+    }
+  }
+  return count;
+}
+
+export function scoreLooks(plugin: AudioPlugin): number {
   let score = 100;
   for (const p of plugin.parameters) {
     if (!p.controlType) score -= 8;
@@ -2725,7 +2759,84 @@ function scoreLooks(plugin: AudioPlugin): number {
     if (!p.accentColor) score -= 2;
   }
   if (!plugin.customSkin) score -= 10;
+  // Heavier than the structural checks above -- overlapping controls are
+  // unusable, not merely unstyled -- and enough on its own to guarantee a
+  // plugin with even one collision can never reach 100.
+  const overlaps = countControlOverlaps(plugin.parameters);
+  if (overlaps > 0) score -= 15 + overlaps * 10;
   return Math.max(0, score);
+}
+
+/* ------------------------------------------------------------------ */
+/* Visual integrity: WCAG contrast -- the "does this look legible"     */
+/* dimension none of the four headline scores or scoreLooks measure.   */
+/* ------------------------------------------------------------------ */
+
+export interface VisualIntegrity {
+  /** 0-100, informational. */
+  score: number;
+  metric: string;
+  evidence: string;
+}
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function relativeLuminance([r, g, b]: [number, number, number]): number {
+  const f = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+
+/** Standard WCAG 2.1 contrast ratio (1:1 to 21:1). Returns null when either
+ *  color isn't a parsable 6-digit hex. */
+function contrastRatio(hexA: string, hexB: string): number | null {
+  const a = hexToRgb(hexA);
+  const b = hexToRgb(hexB);
+  if (!a || !b) return null;
+  const [l1, l2] = [relativeLuminance(a), relativeLuminance(b)];
+  const [hi, lo] = l1 > l2 ? [l1, l2] : [l2, l1];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+const WCAG_AA_NORMAL_TEXT = 4.5;
+
+/**
+ * Real "does this look legible" checks that neither the four headline
+ * dimensions nor scoreLooks's structural presence checks cover: WCAG
+ * contrast between the faceplate's text/accent colors and its own
+ * background. Informational only -- ranks candidates in refinementScore(),
+ * never gates the >=97 floor. Unlike overlap (a plain usability defect),
+ * contrast is a real design-taste dimension where a legitimately bold,
+ * high-contrast-BY-DESIGN theme should never be blocked from shipping over
+ * a borderline number -- see CLAUDE.md's "four headline dimensions
+ * saturate; new measurements rank, never lower the floor" rule.
+ *
+ * Returns null when there's no custom skin at all (nothing to measure) or
+ * neither text nor accent color parses as a plain 6-digit hex.
+ */
+export function measureVisualIntegrity(plugin: AudioPlugin): VisualIntegrity | null {
+  const skin = plugin.customSkin;
+  if (!skin?.bgColor) return null;
+  const checks: Array<{ label: string; ratio: number | null }> = [];
+  if (skin.textColor) checks.push({ label: "text", ratio: contrastRatio(skin.textColor, skin.bgColor) });
+  if (skin.accentColor) checks.push({ label: "accent", ratio: contrastRatio(skin.accentColor, skin.bgColor) });
+  const valid = checks.filter((c): c is { label: string; ratio: number } => c.ratio !== null);
+  if (valid.length === 0) return null;
+  const worst = valid.reduce((min, c) => (c.ratio < min.ratio ? c : min));
+  const overlaps = countControlOverlaps(plugin.parameters);
+  const score = Math.max(0, Math.min(100, Math.round((worst.ratio / WCAG_AA_NORMAL_TEXT) * 100)));
+  return {
+    score,
+    metric: "visual integrity",
+    evidence: `worst contrast is ${worst.label}-vs-background at ${worst.ratio.toFixed(2)}:1 (WCAG AA wants >= ${WCAG_AA_NORMAL_TEXT}:1)${overlaps > 0 ? `; ${overlaps} control pair(s) still overlap` : ""}`,
+  };
 }
 
 function scoreLatency(generationMs?: number): number {
@@ -3063,6 +3174,14 @@ export function runQualityGate(
         .filter((v): v is VoicingDifferentiation => v !== null);
   voicingDifferentiation?.forEach((v) => notes.push(`${v.metric} ${v.score}/100: ${v.evidence}.`));
 
+  // --- Visual integrity: WCAG contrast on the final, polished faceplate --
+  //     the "does this look legible" dimension scoreLooks's structural
+  //     checks don't cover. Informational only. ---
+  const visualIntegrity = measureVisualIntegrity(polished);
+  if (visualIntegrity) {
+    notes.push(`Visual integrity ${visualIntegrity.score}/100: ${visualIntegrity.evidence}.`);
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -3092,6 +3211,7 @@ export function runQualityGate(
     cpuCost: cpuCost ?? undefined,
     referenceDeviation: referenceDeviation ?? undefined,
     voicingDifferentiation: voicingDifferentiation && voicingDifferentiation.length > 0 ? voicingDifferentiation : undefined,
+    visualIntegrity: visualIntegrity ?? undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

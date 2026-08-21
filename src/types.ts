@@ -205,6 +205,16 @@ export interface BuildReport {
    * >=97 headline floor. Absent when the build has no "select" parameters.
    */
   voicingDifferentiation?: { score: number; metric: string; evidence: string }[];
+  /**
+   * WCAG contrast between the faceplate's text/accent colors and its own
+   * background -- the "does this look legible" dimension neither the four
+   * headline scores nor scoreLooks's structural presence checks (does
+   * every param have a controlType/x/y/accentColor?) cover. Informational
+   * — ranks candidates in refinementScore(), never gates the >=97 floor.
+   * Absent when there's no custom skin, or neither color parses as a
+   * plain 6-digit hex.
+   */
+  visualIntegrity?: { score: number; metric: string; evidence: string };
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

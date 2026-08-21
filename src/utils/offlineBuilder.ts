@@ -736,6 +736,24 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     `Not quite it? Say ${moves.map((m) => `**"${m}"**`).join(", ")} — or describe the change and I'll rebuild.`
   );
 
+  // "Why this design" on EVERY build, not just the ones where the wording
+  // drove a requirement-based override -- previously this field only
+  // appeared when competing topologies existed AND the prompt's wording
+  // clearly favored one, so the vast majority of builds shipped with no
+  // explanation at all. A build that hit no special-case branch above
+  // still has a real, honest answer to "why this design": `structure`
+  // (the recipe/topology's own title) and `friendly` (its one-line
+  // description) are set by every branch, so this fallback is never a
+  // fabrication -- just a lower-detail version of the same explanation
+  // the requirement-driven branches already give.
+  const finalEngineeringChoice = engineeringChoice
+    ? {
+        topology: engineeringChoice.tags.topology,
+        rationale: engineeringChoice.rationale,
+        evidence: hasRequirements(requirements) ? requirements.evidence : [`matched "${structure}" in your wording`],
+      }
+    : { topology: structure, rationale: friendly, evidence: [] as string[] };
+
   return {
     name,
     category: familyToCategory(spec.family),
@@ -744,10 +762,7 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     dspFunction,
     family: spec.family,
     summary: summaryLines.join("\n"),
-    engineeringChoice:
-      engineeringChoice && hasRequirements(requirements)
-        ? { topology: engineeringChoice.tags.topology, rationale: engineeringChoice.rationale, evidence: requirements.evidence }
-        : undefined,
+    engineeringChoice: finalEngineeringChoice,
   };
 }
 

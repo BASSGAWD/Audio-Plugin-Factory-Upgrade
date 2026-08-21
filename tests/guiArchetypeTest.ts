@@ -7,8 +7,8 @@
  * polishPluginVisuals() output (the invariant that matters most --
  * generations that never opt into an archetype must not change at all).
  */
-import { ArchetypeId, BUILTIN_ARCHETYPES, applyArchetype, pickArchetype } from "../src/utils/guiArchetypes";
-import { polishPluginVisuals, runQualityGate } from "../src/utils/qualityGate";
+import { ArchetypeId, BUILTIN_ARCHETYPES, applyArchetype, pickArchetype, resolveControlOverlaps } from "../src/utils/guiArchetypes";
+import { polishPluginVisuals, runQualityGate, scoreLooks, measureVisualIntegrity } from "../src/utils/qualityGate";
 import { classifyPluginIntent } from "../src/utils/pluginSpec";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { AudioPlugin, PluginParameter } from "../src/types";
@@ -37,6 +37,21 @@ const P = (id: string, controlType?: PluginParameter["controlType"]): PluginPara
   check("unknown uiMetaphor + unknown family falls back to grid", pickArchetype("nonsense", null) === "grid");
   check("no uiMetaphor, family=amp_sim -> showpiece", pickArchetype(null, "amp_sim") === "showpiece");
   check("no uiMetaphor, family=dynamics -> strip", pickArchetype(null, "dynamics") === "strip");
+
+  // Loose uiMetaphor matching: a model that phrases a known metaphor with
+  // different casing/spacing/hyphenation, or wraps it in extra descriptive
+  // words, still gets recognized -- previously only an EXACT string match
+  // worked, silently discarding real signal the model provided.
+  check("uiMetaphor: different casing still matches", pickArchetype("Parametric EQ", null) === "eq_focus");
+  check("uiMetaphor: hyphenated still matches", pickArchetype("parametric-eq", null) === "eq_focus");
+  check("uiMetaphor: extra words around a known metaphor still match", pickArchetype("a modern parametric eq design", null) === "eq_focus");
+  check("uiMetaphor: extra spacing still matches", pickArchetype("  channel   strip  ", null) === "strip");
+  // A short known key must not accidentally match on an unrelated phrase
+  // that merely shares one of its tokens -- "parametric_eq" needs BOTH
+  // "parametric" and "eq" present, so a bare "eq" alone (missing
+  // "parametric") correctly falls through to the family/grid default
+  // instead of loose-matching.
+  check("uiMetaphor: a single shared token alone does not false-positive", pickArchetype("eq", null) === "grid");
 }
 
 /* ---- 2. Every archetype produces a sane, non-overlapping layout ---- */
@@ -118,6 +133,141 @@ const P = (id: string, controlType?: PluginParameter["controlType"]): PluginPara
   check("end-to-end: eq prompt ships with eq_focus archetype", gate.plugin.uiArchetype === "eq_focus", `got ${gate.plugin.uiArchetype}`);
   const hero = gate.plugin.parameters.find((p) => p.controlType === "eq");
   check("end-to-end: eq_focus generation gets a real eq curve widget", !!hero, "no controlType=eq param found");
+}
+
+/* ---- 7. "only fill gaps" layout never places a fresh param on top of one
+   that ALREADY has a position -- the exact bug found live: loaded a real
+   generated amp into the designer and measured, via getBoundingClientRect,
+   THREE controls sitting at the pixel-identical position of other controls
+   ("Drive" exactly on top of "Preamp Gain"; two more "Drive" duplicates
+   exactly on top of each other and on top of "Amp Voicing"). Root cause was
+   idx-based `col = idx % cols` placement with zero awareness of which cells
+   were already claimed -- reproduced here directly: an existing param
+   already sits in the very first grid cell a naive index-0 param would
+   also want. ---- */
+{
+  const existing: PluginParameter = { ...P("gain", "knob"), x: 40, y: 70, w: 120, h: 100 };
+  const needsLayout = P("drive", "knob"); // no x/y -- array index 0 among "needs layout"
+  const layout = applyArchetype("grid", [existing, needsLayout], false);
+  const gain = layout.parameters.find((p) => p.id === "gain")!;
+  const drive = layout.parameters.find((p) => p.id === "drive")!;
+  check("gap-fill layout: pre-existing param keeps its exact position", gain.x === 40 && gain.y === 70);
+  check(
+    "gap-fill layout: a fresh param is never placed on the pre-existing one's cell",
+    !(drive.x === gain.x && drive.y === gain.y),
+    `drive=(${drive.x},${drive.y}) gain=(${gain.x},${gain.y})`
+  );
+
+  // The multi-duplicate version of the same scenario, matching the live
+  // finding almost exactly: one existing param plus THREE more needing
+  // layout (as chainStage's id-collision suffixing would produce:
+  // drive, drive_2, drive_3) must all land on DISTINCT cells, none of
+  // them coinciding with the pre-existing one or each other.
+  const existing2: PluginParameter = { ...P("headType", "knob"), x: 300, y: 331, w: 120, h: 100 };
+  const dupes = [P("drive", "knob"), P("drive_2", "knob"), P("drive_3", "knob")];
+  const layout2 = applyArchetype("grid", [existing2, ...dupes], false);
+  const seen = new Map<string, number>();
+  for (const p of layout2.parameters) {
+    const k = `${p.x},${p.y}`;
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+  }
+  const collisions = [...seen.values()].filter((n) => n > 1).length;
+  check("gap-fill layout: three duplicate-ish params + one pre-existing all land on distinct cells", collisions === 0, JSON.stringify([...seen.entries()]));
+}
+
+/* ---- 8. resolveControlOverlaps repairs a plugin whose positions ALREADY
+   collide (e.g. one built before this fix shipped) -- the retroactive
+   half of the same fix. An older param keeps its exact position; a later
+   one occupying the same rect gets nudged clear. A layout with no overlap
+   at all is returned completely untouched (true no-op, not just "no visible
+   difference"). ---- */
+{
+  const clean: PluginParameter[] = [
+    { ...P("a", "knob"), x: 40, y: 70, w: 120, h: 100 },
+    { ...P("b", "knob"), x: 180, y: 70, w: 120, h: 100 },
+  ];
+  const repairedClean = resolveControlOverlaps(clean);
+  check("resolveControlOverlaps: a non-overlapping layout is returned as the SAME array (true no-op)", repairedClean === clean);
+
+  const broken: PluginParameter[] = [
+    { ...P("gain", "knob"), x: 40, y: 330, w: 120, h: 100 },
+    { ...P("drive", "knob"), x: 40, y: 330, w: 120, h: 100 }, // exact duplicate of gain's position
+    { ...P("headType", "knob"), x: 300, y: 330, w: 120, h: 100 },
+    { ...P("drive_2", "knob"), x: 300, y: 330, w: 120, h: 100 }, // exact duplicate of headType's position
+  ];
+  const repaired = resolveControlOverlaps(broken);
+  const byId = (id: string) => repaired.find((p) => p.id === id)!;
+  check("resolveControlOverlaps: the first claimant keeps its exact position", byId("gain").x === 40 && byId("gain").y === 330);
+  check("resolveControlOverlaps: the second claimant keeps its exact position", byId("headType").x === 300 && byId("headType").y === 330);
+  check(
+    "resolveControlOverlaps: the duplicate stacked on gain is moved off it",
+    !(byId("drive").x === byId("gain").x && byId("drive").y === byId("gain").y)
+  );
+  check(
+    "resolveControlOverlaps: the duplicate stacked on headType is moved off it",
+    !(byId("drive_2").x === byId("headType").x && byId("drive_2").y === byId("headType").y)
+  );
+  // And the repaired duplicates don't just collide with EACH OTHER instead.
+  check(
+    "resolveControlOverlaps: the two repaired duplicates don't collide with each other either",
+    !(byId("drive").x === byId("drive_2").x && byId("drive").y === byId("drive_2").y)
+  );
+}
+
+/* ---- 9. scoreLooks: a plugin with genuinely overlapping controls can
+   never reach 100 -- "the controls are usable and distinct" is squarely
+   what "looks" already claims to certify. Tested directly (bypassing
+   polishPluginVisuals/resolveControlOverlaps, which repair overlaps
+   before scoreLooks would ever see them in the real pipeline) so this is
+   a real, standalone regression guard on the scoring function itself: if
+   the repair pass ever regresses, THIS is what still catches it, since
+   every one of this project's tests asserts the >=97 floor. A clean,
+   fully-styled, non-overlapping layout is unaffected. ---- */
+{
+  const fullyStyled = (id: string, x: number, y: number): PluginParameter =>
+    ({ id, name: id, min: 0, max: 1, defaultValue: 0.5, value: 0.5, unit: "", controlType: "knob", x, y, w: 120, h: 100, accentColor: "#f97316" } as PluginParameter);
+  const cleanPlugin: AudioPlugin = {
+    id: "t", name: "t", category: "filter", description: "", dspFunction: "return inputSample;", faustCode: "", cppJuceCode: "", createdAt: "",
+    parameters: [fullyStyled("a", 40, 70), fullyStyled("b", 180, 70)],
+    customSkin: { bgColor: "#0d0a1a", textColor: "#ede9fe", accentColor: "#a78bfa" },
+  };
+  check("scoreLooks: a clean, fully-styled, non-overlapping plugin scores 100", scoreLooks(cleanPlugin) === 100, `got ${scoreLooks(cleanPlugin)}`);
+
+  const overlappingPlugin: AudioPlugin = {
+    ...cleanPlugin,
+    parameters: [fullyStyled("a", 40, 70), fullyStyled("b", 40, 70)], // identical position -> one real overlap
+  };
+  check("scoreLooks: even ONE overlapping pair of controls can never score 100", scoreLooks(overlappingPlugin) < 100, `got ${scoreLooks(overlappingPlugin)}`);
+
+  // And the real pipeline is what actually prevents this from ever
+  // happening -- runQualityGate repairs positions before scoring, so the
+  // SAME structurally-overlapping input still ships at 100 once it goes
+  // through the real gate (proof that the repair pass and the scoring
+  // guard are two independent, both-working layers, not one broken and
+  // the other quietly picking up the slack).
+  const gated = runQualityGate(overlappingPlugin, { family: "filter" });
+  check("scoreLooks: the SAME overlapping input still ships clean through the real gate (repair pass fixes it first)", gated.scores.looks === 100, `got ${gated.scores.looks}`);
+}
+
+/* ---- 10. measureVisualIntegrity: WCAG contrast, informational ---- */
+{
+  const base: AudioPlugin = {
+    id: "t", name: "t", category: "filter", description: "", dspFunction: "return inputSample;", faustCode: "", cppJuceCode: "", createdAt: "",
+    parameters: [],
+  };
+  check("measureVisualIntegrity: no customSkin -> null (nothing to measure)", measureVisualIntegrity(base) === null);
+
+  const highContrast: AudioPlugin = { ...base, customSkin: { bgColor: "#0d0a1a", textColor: "#ede9fe", accentColor: "#a78bfa" } };
+  const hc = measureVisualIntegrity(highContrast);
+  check("measureVisualIntegrity: a real (CATEGORY_THEMES-shaped) high-contrast skin scores well", !!hc && hc.score >= 90, `score=${hc?.score}`);
+
+  const lowContrast: AudioPlugin = { ...base, customSkin: { bgColor: "#111111", textColor: "#141414", accentColor: "#151515" } };
+  const lc = measureVisualIntegrity(lowContrast);
+  check(
+    "measureVisualIntegrity: near-invisible text-on-background scores decisively lower than a real theme",
+    !!lc && !!hc && lc.score < hc.score - 50,
+    `low=${lc?.score} high=${hc?.score}`
+  );
 }
 
 console.log(failures === 0 ? "\nGUI ARCHETYPE: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);

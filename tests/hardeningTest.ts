@@ -60,6 +60,51 @@ const rawNewlineAndMissingBrace = '{"dspFunction":"line one\nline two"';
 const parsedCombined = parseModelJson(rawNewlineAndMissingBrace);
 check("json: raw newline + missing brace together still recovers", parsedCombined.dspFunction === "line one\nline two", JSON.stringify(parsedCombined));
 
+// Thinking-mode local models (Qwen3 with thinking enabled instead of the
+// disabled mode this project's own base model was trained for; DeepSeek-R1
+// distills, QwQ, and other popular local Ollama/LM Studio models) emit a
+// <think>...</think> reasoning preamble before the actual JSON answer. A
+// model reasoning about the JS/JSON it's about to write is very likely to
+// mention {/} characters WITHIN that preamble -- the decisive-gap proof:
+// without stripping, the naive "find the first { and its balanced closing
+// }" scan locks onto the thinking block's own braces instead of the real
+// answer, or fails outright.
+const thinkingWrapped = '<think>\nOkay, the user wants a plugin. Let me think about the JSON shape: { "not": "the real answer" }. Now I will write it.\n</think>\n{"a":42,"b":"real answer"}';
+const parsedThinking = parseModelJson(thinkingWrapped);
+check(
+  "json: a <think> preamble with stray braces inside it does not corrupt extraction",
+  parsedThinking.a === 42 && parsedThinking.b === "real answer",
+  JSON.stringify(parsedThinking)
+);
+// Without the fix, this exact input would have locked onto the FIRST brace
+// pair inside <think> and returned { not: "the real answer" } instead --
+// the decisive-gap comparison proving the fix does something real.
+check("json: the stray brace pair inside <think> is NOT what gets returned", parsedThinking.not === undefined);
+
+// <reasoning> is treated the same way; <thinking> (the non-standard but
+// occasionally-seen variant) too. Case-insensitive, since models are not
+// consistent about tag casing.
+check(
+  "json: <reasoning> preamble is also stripped",
+  parseModelJson('<reasoning>thoughts with { curly } bits</reasoning>\n{"ok":true}').ok === true
+);
+check(
+  "json: <THINK> (different case) is also stripped",
+  parseModelJson('<THINK>stray { brace }</THINK>\n{"ok":true}').ok === true
+);
+
+// An UNCLOSED <think> block means the response is genuinely truncated
+// mid-thought -- a different failure this fix must not paper over by
+// inventing where the thinking would have ended. Left alone, this still
+// throws (no valid JSON reachable), same as before the fix existed.
+let unclosedThinkThrew = false;
+try {
+  parseModelJson('<think>\nstill reasoning, never closed, no JSON follows at all');
+} catch {
+  unclosedThinkThrew = true;
+}
+check("json: an unclosed <think> block (genuine truncation) is NOT silently papered over", unclosedThinkThrew);
+
 // --- extremes instability detection ---
 const params: PluginParameter[] = [
   { id: "feedback", name: "Feedback", min: 0, max: 1.0, defaultValue: 0.4, value: 0.4, unit: "ratio" },

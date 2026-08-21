@@ -195,6 +195,101 @@ export function pickAdditionStage(prompt: string): (typeof ADDABLE_STAGES)[numbe
   return ADDABLE_STAGES.find((s) => (ADDITION_NOUNS[s.id] ?? s.match).test(prompt)) ?? null;
 }
 
+/* ------------------------------------------------------------------ */
+/* 2.5 Additive voicing-option extension                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The "extend a discrete option set" primitive: no earlier tool in this file
+ * could do "add another cabinet" as an in-place edit -- chainStage appends a
+ * whole new DSP STAGE after the signal path, which is the wrong shape for
+ * "give this existing selector one more choice." This is what makes that a
+ * true additive edit (same plugin id, existing choices untouched, one new
+ * branch appended) instead of forcing a full rebuild for a one-word request,
+ * per the standing "additive refinement, not regeneration" rule.
+ *
+ * Deterministic, not model-authored: each target ships exactly one
+ * pre-verified next voicing (matching the project's "adapt a proven
+ * template" precedent), the same way a promoted research-corpus module is a
+ * fixed, tested body rather than freeform generation.
+ */
+interface VoicingExtension {
+  paramId: string;
+  paramName: string;
+  choiceLabel: string;
+  /** The literal text of the chain's current topmost branch header, used
+   *  both to detect eligibility and as the anchor for the text-surgical
+   *  insertion below (e.g. "if (headType >= 2.5) {"). */
+  topBranchAnchor: (currentMax: number) => string;
+  /** The new topmost branch's coefficient-assignment lines (no braces). */
+  branchBody: string;
+}
+
+const VOICING_EXTENSIONS: Record<"head" | "cab", VoicingExtension> = {
+  head: {
+    paramId: "headType",
+    paramName: "Amp Voicing",
+    choiceLabel: "Boost",
+    topBranchAnchor: (max) => `if (headType >= ${(max - 1 + 0.5).toFixed(1)}) {`,
+    branchBody: `hDriveMul = 1.8; hToneTiltBass = 0.65; hToneTiltTreble = 1.4; hClipHardness = 1.5;`,
+  },
+  cab: {
+    paramId: "cabType",
+    paramName: "Cabinet",
+    choiceLabel: "8x10",
+    topBranchAnchor: (max) => `if (cabType >= ${(max - 1 + 0.5).toFixed(1)}) {`,
+    branchBody: `cabLp = 6200.0; cabHp = 110.0; cabRes = 98.0; cabComb = 40;`,
+  },
+};
+
+const ADD_CAB_OPTION = /\badd(?:s|ing)?\s+(?:another|a\s+new|an?|more)\s*cab(?:inet)?\s*(?:option|size|voicing|choice)?s?\b|\bmore\s+cab(?:inet)?\s+options?\b/i;
+const ADD_HEAD_OPTION = /\badd(?:s|ing)?\s+(?:another|a\s+new|an?|more)\s*(?:amp\s+)?(?:head|channel|voicing)\s*(?:option|choice)?s?\b|\bmore\s+(?:amp\s+)?(?:head|channel)\s+options?\b|\badd\s+a\s+boost\s+channel\b/i;
+
+/** Which voicing axis (if any) this prompt is asking to extend, given what
+ *  the CURRENTLY LOADED plugin actually has -- family-agnostic on purpose
+ *  (checks for the real headType/cabType select param directly, since
+ *  category collapses amp_sim to "distortion" and can't distinguish it). */
+export function pickVoicingExtension(prompt: string, parameters: PluginParameter[]): "head" | "cab" | null {
+  if (ADD_CAB_OPTION.test(prompt) && parameters.some((p) => p.id === "cabType" && p.controlType === "select")) return "cab";
+  if (ADD_HEAD_OPTION.test(prompt) && parameters.some((p) => p.id === "headType" && p.controlType === "select")) return "head";
+  return null;
+}
+
+/** Appends one new topmost choice to a "select" param's discrete option set:
+ *  widens `max` by 1, appends the choice label, and inserts one new branch
+ *  at the top of the DSP body's existing if/else-if chain (the original
+ *  topmost branch becomes the next `else if` down -- every other branch is
+ *  untouched since the comparisons are relative, not renumbered). Returns
+ *  null if the anchor text isn't found (the body was hand-edited away from
+ *  the shape this primitive expects -- fails closed rather than mangling
+ *  code it doesn't recognize). */
+export function extendVoicingOption(
+  dspBody: string,
+  parameters: PluginParameter[],
+  which: "head" | "cab"
+): { body: string; parameters: PluginParameter[]; note: string } | null {
+  const ext = VOICING_EXTENSIONS[which];
+  const target = parameters.find((p) => p.id === ext.paramId);
+  if (!target) return null;
+  const anchor = ext.topBranchAnchor(target.max);
+  const idx = dspBody.indexOf(anchor);
+  if (idx === -1) return null;
+
+  const newThreshold = (target.max + 0.5).toFixed(1);
+  const replacement =
+    `if (${ext.paramId} >= ${newThreshold}) { // ${ext.choiceLabel}: added voicing\n` +
+    `  ${ext.branchBody}\n` +
+    `} else ${anchor}`;
+  const body = dspBody.slice(0, idx) + replacement + dspBody.slice(idx + anchor.length);
+
+  const newParameters = parameters.map((p) =>
+    p.id === ext.paramId
+      ? { ...p, max: p.max + 1, choices: p.choices ? [...p.choices, ext.choiceLabel] : p.choices }
+      : p
+  );
+  return { body, parameters: newParameters, note: `added a new "${ext.choiceLabel}" ${ext.paramName} option (${target.max + 1} choices now)` };
+}
+
 /** Convert a single-trailing-return body into a block that assigns `outVar`. */
 function toAssignedBlock(body: string, outVar: string): string | null {
   if ((body.match(/\breturn\b/g) || []).length !== 1) return null; // early returns can't be block-scoped safely
@@ -320,6 +415,28 @@ export async function runEditPass(base: AudioPlugin, opts: EditPassOptions): Pro
 
   let working: AudioPlugin = { ...base, parameters };
   let gate = gateOf(working);
+
+  // 2.5: extend a discrete option set ("add another cabinet"), evidence-
+  // gated with rollback -- same contract as chainStage below, just the
+  // right shape for widening an existing select param instead of appending
+  // a whole new signal-path stage.
+  const voicingAxis = pickVoicingExtension(opts.prompt, working.parameters);
+  if (voicingAxis) {
+    const extended = extendVoicingOption(working.dspFunction, working.parameters, voicingAxis);
+    if (extended) {
+      const candidate: AudioPlugin = { ...working, parameters: extended.parameters, dspFunction: extended.body };
+      const candidateGate = gateOf(candidate);
+      if (acceptableEdit(candidateGate, gate)) {
+        working = candidateGate.plugin;
+        gate = candidateGate;
+        changes.push(extended.note);
+      } else {
+        unhandled.push(`extending the ${voicingAxis === "head" ? "amp voicing" : "cabinet"} options didn't clear the quality gate, so it was rolled back`);
+      }
+    } else {
+      unhandled.push(`the current DSP's ${voicingAxis === "head" ? "headType" : "cabType"} branch chain wasn't in the shape this edit expects, so it was skipped`);
+    }
+  }
 
   // 3: additive chaining, evidence-gated with rollback.
   const stage = pickAdditionStage(opts.prompt);

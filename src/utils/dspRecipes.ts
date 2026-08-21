@@ -23,7 +23,7 @@ export interface DspRecipe {
   title: string;
   /** Matched against the user's natural-language request. */
   match: RegExp;
-  parameters: Array<Pick<PluginParameter, "id" | "name" | "min" | "max" | "defaultValue" | "unit">>;
+  parameters: Array<Pick<PluginParameter, "id" | "name" | "min" | "max" | "defaultValue" | "unit" | "controlType" | "choices">>;
   body: string;
   pitfalls: string[];
 }

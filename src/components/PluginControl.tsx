@@ -705,6 +705,49 @@ function SliderControl({ param, onChange }: ControlProps) {
   );
 }
 
+/** A discrete swatch/segmented-button control for a "select" param -- real
+ *  value/onChange, unlike the cosmetic amp/cab customizer swatches in
+ *  UIDesigner.tsx (those set only a decorative label field no DSP ever
+ *  reads). Each button snaps the param to an exact integer step; the DSP
+ *  body branches on that same integer (see e.g. AMP_CHANNEL's headType/
+ *  cabType in offlineBuilder.ts), so what you click is what changes the
+ *  sound -- not a label next to an unwired knob. */
+function SelectControl({ param, onChange }: ControlProps) {
+  const accent = param.accentColor || ACCENT_FALLBACK;
+  const steps = param.max - param.min + 1;
+  const choices = param.choices && param.choices.length === steps ? param.choices : Array.from({ length: steps }, (_, i) => String(param.min + i));
+  const current = Math.round(clampToRange(param.value, param.min, param.max));
+
+  return (
+    <div className="block select-none">
+      <div className="text-[11px] font-semibold text-neutral-200 truncate pr-2 tracking-tight mb-1.5">{param.name}</div>
+      <div className="flex gap-1" role="radiogroup" aria-label={param.name}>
+        {choices.map((label, i) => {
+          const stepValue = param.min + i;
+          const active = stepValue === current;
+          return (
+            <button
+              key={label}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              onClick={() => onChange(param.id, stepValue)}
+              className="flex-1 text-[10px] font-bold py-1.5 rounded-md border transition-colors cursor-pointer"
+              style={
+                active
+                  ? { background: `${accent}26`, borderColor: accent, color: accent }
+                  : { background: "transparent", borderColor: "#27272a", color: "#a1a1aa" }
+              }
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** Dispatches a single parameter to its right-shaped playback control. */
 export const PluginControl: React.FC<ControlProps> = ({ param, allParams, onChange, analyserNode, isPlaying }) => {
   switch (param.controlType) {
@@ -729,6 +772,8 @@ export const PluginControl: React.FC<ControlProps> = ({ param, allParams, onChan
       return <WaveformControl param={param} allParams={allParams} onChange={onChange} />;
     case "label":
       return <div className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wide">{param.customText || param.name}</div>;
+    case "select":
+      return <SelectControl param={param} allParams={allParams} onChange={onChange} />;
     default:
       return <SliderControl param={param} allParams={allParams} onChange={onChange} />;
   }

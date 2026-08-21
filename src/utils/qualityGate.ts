@@ -2052,6 +2052,83 @@ export function measureFunctionalFitness(
   }
 }
 
+export interface VoicingDifferentiation {
+  /** 0-100: how measurably different this control's discrete choices are. */
+  score: number;
+  metric: string;
+  evidence: string;
+}
+
+/**
+ * Renders the DSP once per discrete step of a "select" parameter (e.g.
+ * amp_sim's headType 0..3 or cabType 0..2), holding every other parameter at
+ * its default, and measures how much the output actually differs between
+ * choices on a clean test tone.
+ *
+ * This exists because fitnessDistortion (and every other functional-fitness
+ * probe) only ever renders once, at default parameter values -- it would
+ * happily score a selector wired to nothing exactly as high as a real one,
+ * since it never LOOKS at the other choices. A discrete selector needs its
+ * own decisive-gap test: a do-nothing selector (or one bound only to a
+ * cosmetic label field, never read by the DSP) renders byte-identical
+ * output at every step and measures ~0% difference; real per-branch
+ * coefficients (see AMP_CHANNEL's headType/cabType) produce a clear,
+ * nonzero difference between every pair of choices. Informational only --
+ * ranks candidates in refinementScore(), never gates the >=97 floor.
+ */
+export function measureVoicingDifferentiation(
+  dspFunction: string,
+  parameters: PluginParameter[],
+  paramId: string
+): VoicingDifferentiation | null {
+  const target = parameters.find((p) => p.id === paramId);
+  if (!target) return null;
+  const steps = Math.round(target.max) - Math.round(target.min) + 1;
+  if (steps < 2) return null;
+  const dspFunc = compileDspBody(dspFunction);
+  if (!dspFunc) return null;
+  const baseParams = defaultParamsMap(parameters);
+
+  const renders: Float32Array[] = [];
+  for (let step = 0; step < steps; step++) {
+    const params = { ...baseParams, [paramId]: Math.round(target.min) + step };
+    const out = renderPass(dspFunc, params, 4096, cleanToneAt);
+    if (out.failed) return null;
+    renders.push(out.samples);
+  }
+
+  // Pairwise normalized RMS difference between every pair of choices -- the
+  // WORST (smallest) pair is what matters: a selector that only tells two
+  // of its four choices apart is still a selector that doesn't really work.
+  let minDiff = Infinity;
+  for (let i = 0; i < renders.length; i++) {
+    for (let j = i + 1; j < renders.length; j++) {
+      const a = renders[i];
+      const b = renders[j];
+      let sumSqDiff = 0;
+      let sumSqCombined = 0;
+      for (let k = 0; k < a.length; k++) {
+        const d = a[k] - b[k];
+        sumSqDiff += d * d;
+        sumSqCombined += (a[k] * a[k] + b[k] * b[k]) / 2;
+      }
+      const rmsDiff = Math.sqrt(sumSqDiff / a.length);
+      const rmsCombined = Math.sqrt(sumSqCombined / a.length);
+      const normDiff = rmsCombined > 1e-9 ? rmsDiff / rmsCombined : 0;
+      minDiff = Math.min(minDiff, normDiff);
+    }
+  }
+  // 0.15 (15% normalized RMS difference) is a clearly audible timbral/tonal
+  // shift between two amp voicings or cab sizes; a wired-to-nothing
+  // selector measures ~0% between every pair.
+  const score = Math.max(0, Math.min(100, Math.round((minDiff / 0.15) * 100)));
+  return {
+    score,
+    metric: `${target.name} differentiation`,
+    evidence: `the two most-similar "${target.name}" choices still differ by ${(minDiff * 100).toFixed(1)}% of their combined signal level on a clean test tone (a selector wired to nothing measures ~0%)`,
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* Calibration repair: turn a measured error into a mechanical FIX      */
 /* ------------------------------------------------------------------ */
@@ -2432,20 +2509,43 @@ const CATEGORY_THEMES: Record<
 
 const SAMPLER_PAD_COUNT = 8;
 
-function buildAmpHeadParam(): PluginParameter {
+const HEAD_TYPE_LABELS: Array<{ ampChannelType: "clean" | "crunch" | "lead" | "modern"; customText: string }> = [
+  { ampChannelType: "clean", customText: "CLEAN CH." },
+  { ampChannelType: "crunch", customText: "PLEXI 50W" },
+  { ampChannelType: "lead", customText: "LEAD CH." },
+  { ampChannelType: "modern", customText: "MODERN HI-GAIN" },
+];
+const CAB_TYPE_LABELS: Array<{ cabSize: "1x12" | "2x12" | "4x12"; customText: string }> = [
+  { cabSize: "1x12", customText: "CELESTION G12" },
+  { cabSize: "2x12", customText: "VINTAGE 30 x2" },
+  { cabSize: "4x12", customText: "CELESTION V30" },
+];
+
+/** The showpiece amp-head faceplate is decorative (a big visual, no dspFunction
+ *  ever reads its own value/min/max) -- but its label/channel art should still
+ *  agree with the plugin's REAL headType selection instead of always reading
+ *  "PLEXI 50W / Crunch" regardless of what's actually selected. `headTypeValue`
+ *  is the current real headType param's value, when the plugin has one. */
+function buildAmpHeadParam(headTypeValue?: number): PluginParameter {
+  const idx = Math.max(0, Math.min(HEAD_TYPE_LABELS.length - 1, Math.round(headTypeValue ?? 1)));
+  const label = HEAD_TYPE_LABELS[idx];
   return {
     id: "amp_head_auto", name: "Amp Head", min: 0, max: 10, defaultValue: 5, value: 5, unit: "gain",
-    controlType: "amp", customText: "PLEXI 50W",
-    ampTolexPattern: "carbon", ampKnobStyle: "chickenhead", ampChannelType: "crunch", ampTubeGlow: true,
+    controlType: "amp", customText: label.customText,
+    ampTolexPattern: "carbon", ampKnobStyle: "chickenhead", ampChannelType: label.ampChannelType, ampTubeGlow: true,
     w: 340, h: 150,
   };
 }
 
-function buildCabinetParam(): PluginParameter {
+/** Same as buildAmpHeadParam: decorative faceplate, but its label/cab-size
+ *  art agrees with the real cabType selection instead of always "4x12". */
+function buildCabinetParam(cabTypeValue?: number): PluginParameter {
+  const idx = Math.max(0, Math.min(CAB_TYPE_LABELS.length - 1, Math.round(cabTypeValue ?? 2)));
+  const label = CAB_TYPE_LABELS[idx];
   return {
     id: "cabinet_auto", name: "Cabinet", min: 0, max: 10, defaultValue: 5, value: 5, unit: "vol",
-    controlType: "cab", customText: "CELESTION V30",
-    cabGrillStyle: "metalgrid", cabSize: "4x12", cabMicModel: "SM57",
+    controlType: "cab", customText: label.customText,
+    cabGrillStyle: "metalgrid", cabSize: label.cabSize, cabMicModel: "SM57",
     w: 240, h: 240,
   };
 }
@@ -2494,11 +2594,11 @@ function enforceFamilyRequirements(plugin: AudioPlugin, family: PluginFamily | n
 
   if (family === "amp_sim") {
     if (!params.some((p) => p.controlType === "amp")) {
-      params.push(buildAmpHeadParam());
+      params.push(buildAmpHeadParam(params.find((p) => p.id === "headType")?.value));
       changes.push("added the amp head faceplate (every amp sim gets one)");
     }
     if (!params.some((p) => p.controlType === "cab")) {
-      params.push(buildCabinetParam());
+      params.push(buildCabinetParam(params.find((p) => p.id === "cabType")?.value));
       changes.push("added the speaker cabinet (every amp sim gets one)");
     }
     if (!params.some((p) => p.controlType === "mic")) {
@@ -2950,6 +3050,19 @@ export function runQualityGate(
     notes.push(`Reference deviation ${referenceDeviation.score}/100: ${referenceDeviation.evidence}.`);
   }
 
+  // --- Voicing differentiation: any "select" param (a discrete voicing
+  //     switch like amp_sim's headType/cabType) gets its own decisive-gap
+  //     check -- does the DSP actually branch per choice, or is the
+  //     selector wired to nothing? Informational, one entry per select
+  //     param present; never touches the >=97 headline floor. ---
+  const voicingDifferentiation = m.fatal
+    ? undefined
+    : plugin.parameters
+        .filter((p) => p.controlType === "select")
+        .map((p) => measureVoicingDifferentiation(workingDsp, plugin.parameters, p.id))
+        .filter((v): v is VoicingDifferentiation => v !== null);
+  voicingDifferentiation?.forEach((v) => notes.push(`${v.metric} ${v.score}/100: ${v.evidence}.`));
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -2978,6 +3091,7 @@ export function runQualityGate(
     calibrationRepairs: calibrationRepairs.length > 0 ? calibrationRepairs.map((r) => ({ paramId: r.paramId, factor: r.factor, metric: r.metric, before: r.before, after: r.after })) : undefined,
     cpuCost: cpuCost ?? undefined,
     referenceDeviation: referenceDeviation ?? undefined,
+    voicingDifferentiation: voicingDifferentiation && voicingDifferentiation.length > 0 ? voicingDifferentiation : undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

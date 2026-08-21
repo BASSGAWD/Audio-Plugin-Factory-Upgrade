@@ -62,6 +62,7 @@ const TEST_FILES = [
   "accentNormalizationTest.ts",
   "liveBuildDiscoveryTest.ts",
   "sidechainEngineTest.ts",
+  "ampVoicingTest.ts",
 ];
 
 let failed = 0;

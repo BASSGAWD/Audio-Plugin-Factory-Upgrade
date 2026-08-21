@@ -6,7 +6,11 @@ export interface PluginParameter {
   defaultValue: number;
   value: number; // Active live value
   unit: string;
-  controlType?: "slider" | "knob" | "toggle" | "button" | "number" | "label" | "meter" | "eq" | "waveform" | "pad" | "amp" | "cab" | "mic" | "mic_stand";
+  controlType?: "slider" | "knob" | "toggle" | "button" | "number" | "label" | "meter" | "eq" | "waveform" | "pad" | "amp" | "cab" | "mic" | "mic_stand" | "select";
+  /** Display labels for a "select" control's discrete steps, index-aligned to
+   *  Math.round(value) across [min, max] (e.g. headType 0..3 -> ["Clean",
+   *  "Crunch", "Lead", "Modern"]). Required for "select"; ignored otherwise. */
+  choices?: string[];
   width?: "full" | "half" | "third";
   x?: number;
   y?: number;
@@ -191,6 +195,16 @@ export interface BuildReport {
    * (multiband_saturator, hybrid_other, utility) with no single reference.
    */
   referenceDeviation?: { referenceId: string; deviation: number; score: number; evidence: string };
+  /**
+   * One entry per discrete "select" parameter present (e.g. amp_sim's
+   * headType/cabType) — does the DSP actually branch per choice, rendered
+   * once per step and compared pairwise, or is the selector wired to
+   * nothing (or only to a cosmetic label no DSP reads)? A do-nothing
+   * selector scores ~0; real per-branch coefficients score high.
+   * Informational — ranks candidates in refinementScore(), never gates the
+   * >=97 headline floor. Absent when the build has no "select" parameters.
+   */
+  voicingDifferentiation?: { score: number; metric: string; evidence: string }[];
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

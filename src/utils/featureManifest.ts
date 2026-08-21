@@ -216,6 +216,10 @@ export const FEATURE_MANIFEST: Partial<Record<PluginFamily, FeatureSpec[]>> = {
   amp_sim: [
     { id: "gain", name: "Gain", tier: "required", match: /gain|drive|preamp/i, min: 0, max: 24, defaultValue: 12, unit: "dB",
       purpose: "Preamp drive — clean through fully saturated." },
+    { id: "headType", name: "Amp Voicing", tier: "required", match: /head.?type|voicing|channel|clean.?crunch.?lead/i, min: 0, max: 3, defaultValue: 1, unit: "type",
+      purpose: "Selectable channel (clean/crunch/lead/modern) with genuinely different drive and tone-stack coefficients per choice — not a cosmetic label over one fixed circuit." },
+    { id: "cabType", name: "Cabinet", tier: "required", match: /cab.?type|cabinet|speaker.?size|1x12|2x12|4x12/i, min: 0, max: 2, defaultValue: 2, unit: "type",
+      purpose: "Selectable cabinet size (1x12/2x12/4x12) with its own lowpass/highpass/resonance/reflection voicing — not just a speaker icon." },
     { id: "bass", name: "Bass", tier: "required", match: /bass|^low$/i, min: -12, max: 12, defaultValue: 0, unit: "dB",
       purpose: "Low end of the tone stack — chug and weight." },
     { id: "mid", name: "Mid", tier: "required", match: /^mid$|midrange/i, min: -12, max: 12, defaultValue: 0, unit: "dB",

@@ -162,10 +162,16 @@ const AMP_CHANNEL: DspRecipe = {
   parameters: [
     { id: "gain", name: "Preamp Gain", min: 1.0, max: 12.0, defaultValue: 6.5, unit: "x" },
     { id: "gate", name: "Noise Gate", min: 0.0, max: 10.0, defaultValue: 3.5, unit: "dB" },
+    // Real per-voicing DSP branching (thresholded like AeroTune's `scale`
+    // param): each step drives genuinely different drive/tone-stack
+    // coefficients in the body below, not just a cosmetic label. Choices
+    // are index-aligned to Math.round(value) across [min, max].
+    { id: "headType", name: "Amp Voicing", min: 0, max: 3, defaultValue: 1, unit: "type", controlType: "select", choices: ["Clean", "Crunch", "Lead", "Modern"] },
     { id: "bass", name: "Bass", min: 0.0, max: 10.0, defaultValue: 6.0, unit: "dB" },
     { id: "mid", name: "Mid", min: 0.0, max: 10.0, defaultValue: 4.0, unit: "dB" },
     { id: "treble", name: "Treble", min: 0.0, max: 10.0, defaultValue: 6.5, unit: "dB" },
     { id: "presence", name: "Presence", min: 0.0, max: 10.0, defaultValue: 7.0, unit: "kHz" },
+    { id: "cabType", name: "Cabinet", min: 0, max: 2, defaultValue: 2, unit: "type", controlType: "select", choices: ["1x12", "2x12", "4x12"] },
   ],
   body: `if (!state.init) {
   state.gate_env = 0.0;
@@ -191,6 +197,40 @@ let mid = params.mid !== undefined ? params.mid : 4.0;
 let treble = params.treble !== undefined ? params.treble : 6.5;
 let presence = params.presence !== undefined ? params.presence : 7.0;
 let gate = params.gate !== undefined ? params.gate : 3.5;
+let headType = params.headType !== undefined ? params.headType : 1;
+let cabType = params.cabType !== undefined ? params.cabType : 2;
+
+// Head voicing: real drive/tone-stack coefficients per channel, not a
+// cosmetic label. Thresholded the same way AeroTune's scale param picks a
+// scale -- each discrete step is a real branch, not an interpolation.
+// Tone-tilt swings are deliberately wide (not just the drive/clip
+// multipliers): once the preamp is already driven hard (this channel's
+// default ~34dB preGaindB routinely saturates the cascaded tanh/exp
+// stages regardless of hDriveMul), further gain differences compress
+// toward the same clipped waveform -- but an EQ-shape difference survives
+// saturation, so it's what actually keeps all four channels sounding
+// distinct rather than converging once everything's already clipping.
+let hDriveMul = 1.0, hToneTiltBass = 1.0, hToneTiltTreble = 1.0, hClipHardness = 1.0;
+if (headType >= 2.5) { // Modern: tight/scooped low end, boosted top, hardest clip
+  hDriveMul = 1.5; hToneTiltBass = 0.55; hToneTiltTreble = 1.5; hClipHardness = 1.6;
+} else if (headType >= 1.5) { // Lead: most gain, creamy scooped-treble sustain
+  hDriveMul = 2.0; hToneTiltBass = 1.3; hToneTiltTreble = 0.6; hClipHardness = 1.4;
+} else if (headType >= 0.5) { // Crunch: the channel's original voicing
+  hDriveMul = 1.0; hToneTiltBass = 1.0; hToneTiltTreble = 1.0; hClipHardness = 1.0;
+} else { // Clean: minimal drive, scooped mids, glassy top end
+  hDriveMul = 0.28; hToneTiltBass = 1.3; hToneTiltTreble = 0.65; hClipHardness = 0.5;
+}
+
+// Cabinet voicing: lowpass/highpass/resonance frequencies and the comb
+// reflection delay all move together per cab size, not just a speaker icon.
+let cabLp = 4800.0, cabHp = 75.0, cabRes = 85.0, cabComb = 74;
+if (cabType >= 1.5) { // 4x12: darkest, deepest, biggest
+  cabLp = 4200.0; cabHp = 60.0; cabRes = 82.0; cabComb = 95;
+} else if (cabType >= 0.5) { // 2x12: the channel's original voicing
+  cabLp = 4800.0; cabHp = 75.0; cabRes = 85.0; cabComb = 74;
+} else { // 1x12: brightest, thinnest, most resonant peak
+  cabLp = 5600.0; cabHp = 95.0; cabRes = 92.0; cabComb = 50;
+}
 
 let preGaindB = (gain - 1.0) * 4.0 + 12.0;
 let gainFactor = Math.pow(10, preGaindB / 20.0);
@@ -215,29 +255,29 @@ let ts_out = 0.93 * gatedInput - 0.93 * state.ts_x1 + 0.86 * state.ts_y1;
 state.ts_x1 = gatedInput;
 state.ts_y1 = ts_out;
 let midHump = Math.sin(1.5 * ts_out);
-let preDriven = (ts_out * 1.4 + midHump * 0.6) * gainFactor * 0.12;
+let preDriven = (ts_out * 1.4 + midHump * 0.6) * gainFactor * hDriveMul * 0.12;
 
 // Cascaded triode stages (asymmetric tanh/exp waveshapers with coupling caps)
-let stage1 = Math.tanh(preDriven + 0.12);
+let stage1 = Math.tanh(preDriven * hClipHardness + 0.12);
 let stage1_hf = stage1 - state.c1_x1 + 0.992 * state.c1_y1;
 state.c1_x1 = stage1;
 state.c1_y1 = stage1_hf;
 
-let s2_in = stage1_hf * 2.8;
+let s2_in = stage1_hf * 2.8 * hClipHardness;
 let stage2 = s2_in > 0.0 ? (1.0 - Math.exp(-s2_in)) : -(1.0 - Math.exp(s2_in * 0.85));
 let stage2_hf = stage2 - state.c2_x1 + 0.992 * state.c2_y1;
 state.c2_x1 = stage2;
 state.c2_y1 = stage2_hf;
 
-let stage3 = Math.tanh((stage2_hf * 3.4 - 0.28) * 1.25);
+let stage3 = Math.tanh((stage2_hf * 3.4 - 0.28) * 1.25 * hClipHardness);
 let stage3_hf = stage3 - state.c3_x1 + 0.992 * state.c3_y1;
 state.c3_x1 = stage3;
 state.c3_y1 = stage3_hf;
 
 // Tone stack: bass shelf, mid scoop biquad, treble + presence shelves
-let g_bass = (bass / 10.0) * 2.0;
+let g_bass = (bass / 10.0) * 2.0 * hToneTiltBass;
 let g_mid = Math.pow(10, ((mid - 10.0) * 3.6) / 20.0);
-let g_treble = (treble / 10.0) * 2.2;
+let g_treble = (treble / 10.0) * 2.2 * hToneTiltTreble;
 let g_presence = (presence / 10.0) * 1.8;
 
 let eq_bass = stage3_hf + (0.12 * g_bass) * state.lp_y1;
@@ -263,14 +303,16 @@ let pr_diff = eq_treble - state.presence_y1;
 let presence_sig = eq_treble + (g_presence - 1.0) * pr_diff * 0.65;
 state.presence_y1 = state.presence_y1 + 0.38 * pr_diff;
 
-// Cabinet: 4.8 kHz lowpass, 75 Hz highpass, 85 Hz chassis resonance, comb reflections
-let lp_coeff = 1.0 - Math.exp(-2.0 * Math.PI * 4800.0 / 44100.0);
+// Cabinet: lowpass, highpass, chassis resonance, and comb reflection delay
+// all move per cabType (see the branch above) -- 4.8/75/85 kHz/Hz and a
+// 74-sample comb were the 2x12's own values, now one voicing among three.
+let lp_coeff = 1.0 - Math.exp(-2.0 * Math.PI * cabLp / 44100.0);
 state.cab_lh = state.cab_lh + lp_coeff * (presence_sig - state.cab_lh);
-let cab_hp_coeff = 1.0 - Math.exp(-2.0 * Math.PI * 75.0 / 44100.0);
+let cab_hp_coeff = 1.0 - Math.exp(-2.0 * Math.PI * cabHp / 44100.0);
 state.cab_hh = state.cab_hh + cab_hp_coeff * (state.cab_lh - state.cab_hh);
 let filtered_cab = state.cab_lh - state.cab_hh;
 
-let r_omega = (2.0 * Math.PI * 85.0) / 44100.0;
+let r_omega = (2.0 * Math.PI * cabRes) / 44100.0;
 let r_alpha = Math.sin(r_omega) / 3.6;
 let r_a0 = 1.0 + r_alpha;
 let res_out = (r_alpha / r_a0) * filtered_cab + (-r_alpha / r_a0) * state.cab_res_y2 - ((-2.0 * Math.cos(r_omega)) / r_a0) * state.cab_res_y1 - ((1.0 - r_alpha) / r_a0) * state.cab_res_y2;
@@ -278,7 +320,7 @@ state.cab_res_y2 = state.cab_res_y1;
 state.cab_res_y1 = res_out;
 
 let speaker_tone = filtered_cab * 0.82 + res_out * 0.45;
-let comb_rd = (state.comb_ptr - 74 + 512) % 512;
+let comb_rd = (state.comb_ptr - cabComb + 512) % 512;
 let comb_delayed = state.comb_line[comb_rd] || 0.0;
 state.comb_line[state.comb_ptr] = speaker_tone;
 state.comb_ptr = (state.comb_ptr + 1) % 512;

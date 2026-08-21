@@ -136,7 +136,19 @@ export function refinementScore(gate: QualityGateResult): number {
   // between fitness and depth: a real signal about wrongness fitness alone
   // can miss, but still secondary to whether the build is correct at all.
   const referenceBonus = 0.2 * (gate.report.referenceDeviation?.score ?? 100);
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus;
+  // VOICING DIFFERENTIATION — a discrete selector (amp_sim's headType/
+  // cabType) that doesn't actually branch is a hidden defect none of the
+  // other terms above would catch (fitness/depth/reference all render at
+  // DEFAULTS only, never sweep a select param's other choices). Averaged
+  // across every select param present so a build with several behaves like
+  // one signal, not N. Absent entirely (not just 0) when the build has no
+  // select params, so a non-amp build is never penalized for lacking one.
+  const voicingEntries = gate.report.voicingDifferentiation;
+  const voicingBonus =
+    voicingEntries && voicingEntries.length > 0
+      ? 0.2 * (voicingEntries.reduce((sum, v) => sum + v.score, 0) / voicingEntries.length)
+      : 0;
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus;
 }
 
 /* ------------------------------------------------------------------ */
@@ -162,6 +174,13 @@ function isNudgeable(p: PluginParameter): boolean {
   if (p.id.startsWith("pad_")) return false;
   if (p.controlType && DECORATIVE_CONTROLS.has(p.controlType)) return false;
   if (/bypass|enable|power|on_off/i.test(p.id)) return false;
+  // "select" (e.g. amp_sim's headType/cabType) is functional, not
+  // decorative -- it just isn't CONTINUOUS. The fractional NUDGE_FRACTIONS
+  // scaling is built for a knob you can dial anywhere in its range; applied
+  // to a discrete choice it produces values like headType=1.36 that don't
+  // correspond to any real named voicing. Leave the user's exact choice
+  // alone during voicing search; the continuous tone knobs still vary.
+  if (p.controlType === "select") return false;
   return true;
 }
 

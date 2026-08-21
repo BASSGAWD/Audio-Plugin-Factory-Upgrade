@@ -56,6 +56,10 @@ interface FactoryCanvasProps {
   /** Perfecting passes per build (shared app setting). */
   refineLoops: number;
   refineControl?: React.ReactNode;
+  /** Fired at most once per mount the first time a workspace save fails
+   *  (localStorage full/unavailable) -- lets the app surface a real toast
+   *  instead of the failure being invisible (console.warn only). */
+  onPersistFailure?: () => void;
 }
 
 const ZOOM_MIN = 0.3;
@@ -394,13 +398,23 @@ const CanvasPluginCard: React.FC<CardProps> = ({
         </button>
       </div>
 
-      {plugin && card.status === "ready" ? (
-        <GenerativeFaceplate plugin={plugin} analyserNode={isLive ? analyserNode : null} isPlaying={live}>
-          {body}
-        </GenerativeFaceplate>
-      ) : (
-        body
-      )}
+      {/* Height-capped with internal scroll: a card's content is unbounded
+          (param count, whether "Quality evidence" is expanded, whether the
+          engineering-choice/functional-fitness callouts are present), but
+          placeNewCard's collision-avoidance spacing has to assume SOME
+          fixed worst-case height to keep neighboring cards apart. Without
+          this cap, a card that grows past that assumption visually
+          overlaps text in the next card instead of just... growing.
+          Scrolling inside the card keeps every fact reachable either way. */}
+      <div className="max-h-[440px] overflow-y-auto overflow-x-hidden scrollbar-thin" onWheel={(e) => e.stopPropagation()}>
+        {plugin && card.status === "ready" ? (
+          <GenerativeFaceplate plugin={plugin} analyserNode={isLive ? analyserNode : null} isPlaying={live}>
+            {body}
+          </GenerativeFaceplate>
+        ) : (
+          body
+        )}
+      </div>
 
       {/* Footer actions */}
       {card.status === "ready" && plugin && (
@@ -459,6 +473,7 @@ export default function FactoryCanvas({
   analyserNode,
   refineLoops,
   refineControl,
+  onPersistFailure,
 }: FactoryCanvasProps) {
   const initial = useMemo(() => loadCanvasWorkspace(), []);
   const [cards, setCards] = useState<CanvasCard[]>(initial.cards);
@@ -472,17 +487,30 @@ export default function FactoryCanvas({
   viewRef.current = view;
   const cardsRef = useRef(cards);
   cardsRef.current = cards;
+  // Fire onPersistFailure at most once per mount -- a failing save repeats
+  // on every debounced write (pan, drag, param tweak); one toast is a
+  // useful warning, a toast per keystroke is spam.
+  const persistFailureReportedRef = useRef(false);
+  const reportPersistFailure = useCallback(() => {
+    if (persistFailureReportedRef.current) return;
+    persistFailureReportedRef.current = true;
+    onPersistFailure?.();
+  }, [onPersistFailure]);
 
   /* ---- persistence (debounced, flushed on leave) ---- */
   useEffect(() => {
-    const t = setTimeout(() => saveCanvasWorkspace({ cards, view }), 350);
+    const t = setTimeout(() => {
+      if (!saveCanvasWorkspace({ cards, view })) reportPersistFailure();
+    }, 350);
     return () => clearTimeout(t);
-  }, [cards, view]);
+  }, [cards, view, reportPersistFailure]);
   useEffect(() => {
     // The debounce loses the newest state if the tab closes/reloads (or the
     // user switches modes) inside the 350 ms window — flush from refs on
     // pagehide and on unmount so a just-spawned card always survives.
-    const flush = () => saveCanvasWorkspace({ cards: cardsRef.current, view: viewRef.current });
+    const flush = () => {
+      if (!saveCanvasWorkspace({ cards: cardsRef.current, view: viewRef.current })) reportPersistFailure();
+    };
     window.addEventListener("pagehide", flush);
     return () => {
       window.removeEventListener("pagehide", flush);

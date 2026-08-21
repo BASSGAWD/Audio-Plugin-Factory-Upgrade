@@ -1071,7 +1071,10 @@ export default function App() {
         minScore,
         createdAt: Date.now(),
       };
-      saveCanvasWorkspace({ cards: [...ws.cards, card], view: ws.view });
+      const persisted = saveCanvasWorkspace({ cards: [...ws.cards, card], view: ws.view });
+      if (!persisted) {
+        triggerToast("⚠️ Canvas storage is full — this build's card may not survive a reload. Open Canvas and remove a few old cards to free space.");
+      }
     } catch (e) {
       console.warn("Could not record this build to the Canvas history:", e);
     }
@@ -3543,6 +3546,9 @@ Return ONLY a JSON object with this exact shape, no other text:
           analyserNode={analyserNodeRef.current}
           refineLoops={refineLoops}
           refineControl={<RefineControl loops={refineLoops} onChange={setRefineLoops} variant="simple" />}
+          onPersistFailure={() =>
+            triggerToast("⚠️ Canvas storage is full — recent cards may not survive a reload. Remove a few old cards, or a custom faceplate image, to free space.")
+          }
         />
         {toastMessage && (
           <div className="fixed bottom-24 right-6 z-100 bg-neutral-900 border border-neutral-800 text-white font-bold text-xs px-4 py-3.5 rounded-xl shadow-xl flex items-center gap-2 animate-slideUp">

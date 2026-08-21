@@ -114,6 +114,95 @@ const store = new Map<string, string>();
   const junk = loadCanvasWorkspace();
   check("persist: corrupted storage falls back to an empty canvas", junk.cards.length === 0 && junk.view.zoom === 1);
 
+  /* 7. Heavy embedded blobs (custom faceplate images, uploaded IR files) are
+   *    stripped before persisting -- a handful of cards carrying multi-MB
+   *    base64 images used to blow the ~5-10MB localStorage quota, silently
+   *    failing the ENTIRE save (see check 8) and reverting the whole card
+   *    list to whatever was last written successfully -- reported as
+   *    "cards keep erasing". Everything except the cosmetic blob survives. */
+  const skinned = {
+    ...a.plugin,
+    customSkin: { ...(a.plugin.customSkin || {}), bgImage: "data:image/png;base64," + "A".repeat(2000) },
+    parameters: [
+      ...a.plugin.parameters,
+      { id: "irtest", name: "IR", min: 0, max: 1, defaultValue: 0, value: 0, unit: "", irFiles: [{ id: "f1", name: "hall.wav", size: "2MB", data: "B".repeat(2000) }] },
+    ],
+  };
+  saveCanvasWorkspace({
+    cards: [{ id: "skin1", prompt: "custom skin test", x: 0, y: 0, status: "ready", plugin: skinned as any, createdAt: 1 }],
+    view: { x: 0, y: 0, zoom: 1 },
+  });
+  const skinRestored = loadCanvasWorkspace().cards.find((c) => c.id === "skin1");
+  check(
+    "persist: heavy customSkin.bgImage is stripped, everything else survives",
+    !!skinRestored && skinRestored.plugin?.dspFunction === a.plugin.dspFunction && !skinRestored.plugin?.customSkin?.bgImage
+  );
+  check(
+    "persist: heavy irFiles[].data is stripped, file identity survives",
+    skinRestored?.plugin?.parameters.find((p) => p.id === "irtest")?.irFiles?.[0]?.name === "hall.wav" &&
+      skinRestored?.plugin?.parameters.find((p) => p.id === "irtest")?.irFiles?.[0]?.data === ""
+  );
+
+  /* 8. A save that genuinely can't fit reports failure instead of pretending
+   *    to succeed -- this is what lets the app toast a real warning instead
+   *    of the failure being invisible (the old behavior: console.warn only,
+   *    caller had no idea anything went wrong). */
+  const realSetItem = (globalThis as any).localStorage.setItem;
+  (globalThis as any).localStorage.setItem = () => {
+    throw new Error("QuotaExceededError (simulated)");
+  };
+  const okResult = saveCanvasWorkspace({ cards: [], view: { x: 0, y: 0, zoom: 1 } });
+  check("persist: a failing write reports false instead of silently succeeding", okResult === false);
+  (globalThis as any).localStorage.setItem = realSetItem;
+
+  /* 9. placeNewCard's spacing matches FactoryCanvas.tsx's actual card
+   *    geometry (header + max-h-[440px] scrollable body + footer), not the
+   *    old H=240 guess that real ready-state cards routinely blew past by
+   *    hundreds of pixels -- which is what let one card's expanded content
+   *    visually overlap a neighboring card's title text. */
+  const realistic: CanvasCard[] = [];
+  const centers = [
+    { x: 500, y: 300 },
+    { x: 560, y: 340 },
+    { x: 440, y: 260 },
+  ];
+  for (const c of centers) {
+    const pos = placeNewCard(realistic, c.x, c.y);
+    realistic.push({ id: `real-${realistic.length}`, prompt: "x", x: pos.x, y: pos.y, status: "ready", createdAt: 0 });
+  }
+  const REAL_CARD_W = 360;
+  const REAL_CARD_H = 536; // header + capped 440px body + footer, matching FactoryCanvas.tsx
+  const realisticOverlap = realistic.some((c, i) =>
+    realistic.some(
+      (d, j) => j > i && Math.abs(c.x - d.x) < REAL_CARD_W && Math.abs(c.y - d.y) < REAL_CARD_H
+    )
+  );
+  check("placement: spacing holds against realistic (post-fix) card dimensions, not just a token 40px probe", !realisticOverlap);
+
+  /* 10. Legacy layouts saved before this spacing fix (or before the card
+   *     body was height-capped) get repaired on load, not just prevented
+   *     going forward -- this is what makes the fix visible immediately on
+   *     a canvas that already has overlapping cards, instead of only
+   *     protecting cards built after the fix ships. */
+  saveCanvasWorkspace({
+    cards: [
+      { id: "legacy-old", prompt: "older card", x: 100, y: 100, status: "ready", plugin: a.plugin, createdAt: 1 },
+      { id: "legacy-new", prompt: "newer card placed too close under the old H=240 rule", x: 110, y: 110, status: "ready", plugin: a.plugin, createdAt: 2 },
+    ],
+    view: { x: 0, y: 0, zoom: 1 },
+  });
+  const repaired = loadCanvasWorkspace();
+  const older = repaired.cards.find((c) => c.id === "legacy-old");
+  const newer = repaired.cards.find((c) => c.id === "legacy-new");
+  check(
+    "repair: an old card keeps its exact saved position",
+    !!older && older.x === 100 && older.y === 100
+  );
+  check(
+    "repair: a colliding newer card gets nudged clear of it on load",
+    !!newer && !(Math.abs(newer.x - 100) < 360 + 24 && Math.abs(newer.y - 100) < 536 + 24)
+  );
+
   console.log(failures === 0 ? "\nCANVAS FACTORY: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
 })();

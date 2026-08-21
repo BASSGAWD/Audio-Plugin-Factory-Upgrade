@@ -191,6 +191,48 @@ export interface CanvasWorkspace {
 
 export const CANVAS_STORAGE_KEY = "audio_factory_canvas_v1";
 
+/** Shared no-overlap footprint for a canvas card, used by both placeNewCard
+ *  (new cards) and resolveOverlaps (repairing legacy layouts on load). H
+ *  matches FactoryCanvas.tsx's actual worst-case rendered height: header
+ *  (~52px) + the scrollable body's max-h-[440px] cap + footer (~44px). Keep
+ *  these three in sync with that cap if it ever changes. */
+const CARD_FOOTPRINT_W = 360;
+const CARD_FOOTPRINT_H = 536;
+const CARD_FOOTPRINT_GAP = 24;
+
+/** Nudges any card that violates the current no-overlap spacing away from
+ *  cards already placed, in array order (oldest cards keep their spot;
+ *  later ones move). Canvases created before the card body was height-
+ *  capped and before placeNewCard's spacing matched it can have cards saved
+ *  close enough to visually overlap -- this repairs that the next time the
+ *  workspace loads, the same way loadCanvasWorkspace already repairs other
+ *  stale shapes (interrupted builds, corrupt JSON). Deterministic and a
+ *  no-op when nothing actually overlaps: a reload never moves a card that
+ *  doesn't need to move. */
+function resolveOverlaps(cards: CanvasCard[]): CanvasCard[] {
+  const placed: CanvasCard[] = [];
+  let changed = false;
+  for (const c of cards) {
+    const collidesWithPlaced = (x: number, y: number) =>
+      placed.some((p) => Math.abs(p.x - x) < CARD_FOOTPRINT_W + CARD_FOOTPRINT_GAP && Math.abs(p.y - y) < CARD_FOOTPRINT_H + CARD_FOOTPRINT_GAP);
+    if (!collidesWithPlaced(c.x, c.y)) {
+      placed.push(c);
+      continue;
+    }
+    let x = c.x;
+    let y = c.y;
+    let step = 0;
+    while (collidesWithPlaced(x, y) && step < 40) {
+      step++;
+      x += 48;
+      y += 40;
+    }
+    changed = true;
+    placed.push({ ...c, x, y });
+  }
+  return changed ? placed : cards;
+}
+
 export function loadCanvasWorkspace(): CanvasWorkspace {
   const fallback: CanvasWorkspace = { cards: [], view: { x: 0, y: 0, zoom: 1 } };
   try {
@@ -220,13 +262,41 @@ export function loadCanvasWorkspace(): CanvasWorkspace {
     const view = parsed.view && Number.isFinite(parsed.view.x) && Number.isFinite(parsed.view.y) && Number.isFinite(parsed.view.zoom)
       ? { x: parsed.view.x, y: parsed.view.y, zoom: Math.max(0.3, Math.min(1.75, parsed.view.zoom)) }
       : fallback.view;
-    return { cards, view };
+    return { cards: resolveOverlaps(cards), view };
   } catch {
     return fallback;
   }
 }
 
-export function saveCanvasWorkspace(ws: CanvasWorkspace): void {
+/** Strips the heavy, purely-cosmetic embedded blobs (custom faceplate
+ *  background images, uploaded impulse-response files) a plugin can carry
+ *  before it goes into the canvas workspace's localStorage entry. These are
+ *  base64 data URLs that can run into the hundreds of KB to several MB each
+ *  -- with a handful of cards carrying them, the combined payload routinely
+ *  blows past the ~5-10MB localStorage quota. A quota failure used to mean
+ *  the ENTIRE save silently failed (see the try/catch below), so the whole
+ *  card list would revert to whatever was last written successfully on the
+ *  next reload -- reported by users as "cards keep erasing". Losing one
+ *  card's custom skin image/IR on reload is a fair trade for never losing
+ *  the card itself (name, DSP, params, scores all survive intact).*/
+function stripHeavyBlobsForPersistence(plugin: AudioPlugin): AudioPlugin {
+  if (!plugin.customSkin?.bgImage && !plugin.parameters.some((p) => p.irFiles?.length)) {
+    return plugin;
+  }
+  return {
+    ...plugin,
+    customSkin: plugin.customSkin ? { ...plugin.customSkin, bgImage: undefined } : plugin.customSkin,
+    parameters: plugin.parameters.map((p) =>
+      p.irFiles?.length ? { ...p, irFiles: p.irFiles.map((f) => ({ ...f, data: "" })) } : p
+    ),
+  };
+}
+
+/** Returns true on a successful write, false if localStorage rejected it
+ *  (quota exceeded, unavailable, or the payload still didn't fit even after
+ *  stripping heavy blobs) so callers can tell the user instead of the save
+ *  failing invisibly. */
+export function saveCanvasWorkspace(ws: CanvasWorkspace): boolean {
   try {
     // Building/queued cards persist without transient stage fields.
     const cards = ws.cards.map((c) => ({
@@ -235,28 +305,36 @@ export function saveCanvasWorkspace(ws: CanvasWorkspace): void {
       x: c.x,
       y: c.y,
       status: c.status === "building" ? "queued" : c.status,
-      plugin: c.status === "ready" ? c.plugin : undefined,
+      plugin: c.status === "ready" && c.plugin ? stripHeavyBlobsForPersistence(c.plugin) : undefined,
       minScore: c.minScore,
       versionsTried: c.versionsTried,
       error: c.error,
       createdAt: c.createdAt,
     }));
     localStorage.setItem(CANVAS_STORAGE_KEY, JSON.stringify({ cards, view: ws.view }));
+    return true;
   } catch (err) {
-    // localStorage full or unavailable: the canvas keeps working in memory.
+    // localStorage full or unavailable: the canvas keeps working in memory
+    // for this tab, but the caller should know the save didn't stick.
     console.warn("Canvas workspace could not be persisted:", err);
+    return false;
   }
 }
 
 /** Free spot for a new card near the viewport center: march down-right in
- *  half-card steps until nothing overlaps. Deterministic, no RNG jitter. */
+ *  half-card steps until nothing overlaps. Deterministic, no RNG jitter.
+ *  Uses the same CARD_FOOTPRINT_* spacing as resolveOverlaps (see above) so
+ *  a freshly-placed card and a legacy-layout repair agree on what "no
+ *  overlap" means. Before the card body was height-capped, cards could
+ *  render far taller than the old H=240 assumption (knobs + evidence
+ *  drawer + engineering-choice callout easily exceeded 600px), so this
+ *  spacing check let an expanded card's content visibly overlap the
+ *  header/title of whatever card sat 216-240px below or beside it. */
 export function placeNewCard(cards: CanvasCard[], centerX: number, centerY: number): { x: number; y: number } {
-  const W = 360;
-  const H = 240;
-  let x = Math.round(centerX - W / 2);
-  let y = Math.round(centerY - H / 2);
+  let x = Math.round(centerX - CARD_FOOTPRINT_W / 2);
+  let y = Math.round(centerY - CARD_FOOTPRINT_H / 2);
   const collides = (cx: number, cy: number) =>
-    cards.some((c) => Math.abs(c.x - cx) < W * 0.9 && Math.abs(c.y - cy) < H * 0.9);
+    cards.some((c) => Math.abs(c.x - cx) < CARD_FOOTPRINT_W + CARD_FOOTPRINT_GAP && Math.abs(c.y - cy) < CARD_FOOTPRINT_H + CARD_FOOTPRINT_GAP);
   let step = 0;
   while (collides(x, y) && step < 40) {
     step++;

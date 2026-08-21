@@ -64,21 +64,30 @@ function check(label: string, ok: boolean, detail = "") {
     check("phaser gap disappears from the gap list",
       await page.locator("li", { hasText: "Phaser (allpass cascade)" }).count().then((n) => n === 0));
 
-    // ---- Blocked concept: external sidechain, approval must be disabled ----
-    const scGap = page.locator("li", { hasText: "Sidechain input (external key)" }).first();
+    // ---- Blocked concept: a permanent synthetic fixture, approval must stay
+    // disabled forever. Was "Sidechain input (external key)" -- that shipped
+    // a real fix (inputKey) and left the gap list entirely, the same way
+    // "Phaser (allpass cascade)" just did two lines up, so this now targets
+    // researchCorpus.ts's TEST-ONLY test-lifecycle-blocked-fixture (surfaced
+    // via knowledgeAudit.ts's "Test invariants" area) instead of another
+    // real concept that could get fixed out from under this test again. ----
+    const scGap = page.locator("li", { hasText: "Reserved: permanently-blocked research demo" }).first();
     await scGap.locator("button", { hasText: "Research" }).click();
-    const approveSc = page.locator('button[aria-label="Approve research on sidechain-input"]');
+    const approveSc = page.locator('button[aria-label="Approve research on test-lifecycle-blocked-fixture"]');
     await approveSc.waitFor({ state: "visible", timeout: 10000 });
     check("blocked concept's Approve button is disabled", await approveSc.isDisabled());
-    check("structural constraint is explained", await page.locator("text=second bus").first().isVisible().catch(() => false));
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, "22-research-blocked.png") });
 
-    // ---- Formerly blocked, now approvable: convolution (block/FFT processing) ----
-    const convGap = page.locator("li", { hasText: "Convolution / impulse responses" }).first();
+    // ---- Formerly blocked, now approvable: same reasoning -- was
+    // convolution, which stopped being a gap the moment reverb_convolution
+    // shipped as a topology. Retargeted at test-lifecycle-fixture-a, which
+    // is deliberately never promoted, so this positive-case demo stays
+    // valid indefinitely instead of needing yet another concept swap. ----
+    const convGap = page.locator("li", { hasText: "Reserved: approvable research demo" }).first();
     await convGap.locator("button", { hasText: "Research" }).click();
-    const approveConv = page.locator('button[aria-label="Approve research on convolution"]');
+    const approveConv = page.locator('button[aria-label="Approve research on test-lifecycle-fixture-a"]');
     await approveConv.waitFor({ state: "visible", timeout: 10000 });
-    check("convolution Approve is ENABLED (block processing landed)", await approveConv.isEnabled());
+    check("fixture-a Approve is ENABLED (a real, gate-verified pending module)", await approveConv.isEnabled());
 
     check("no console/page errors across the whole run", consoleErrors.length === 0, consoleErrors.slice(0, 5).join(" | "));
   } catch (err: any) {

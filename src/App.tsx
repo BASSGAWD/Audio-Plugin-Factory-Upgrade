@@ -894,9 +894,10 @@ export default function App() {
   const compileDsp = (codeString: string) => {
     try {
       const sanitized = sanitizeDspCode(codeString);
-      // Create a fresh clean executable function: function(inputSample, params, state, inputR) { ... }
-      // (inputR is the opt-in stereo contract; mono DSP never references it)
-      const compiled = new Function("inputSample", "params", "state", "inputR", sanitized);
+      // Create a fresh clean executable function: function(inputSample, params, state, inputR, inputKey) { ... }
+      // (inputR is the opt-in stereo contract; inputKey is the opt-in external
+      // sidechain key -- mono/non-keyed DSP never references either)
+      const compiled = new Function("inputSample", "params", "state", "inputR", "inputKey", sanitized);
       compiledFunctionRef.current = compiled;
       setDspError(null);
       if (workletNodeRef.current) {
@@ -930,7 +931,7 @@ export default function App() {
           // This prevents a broken/corrupt localStorage state from bricking the startup experience.
           try {
             const testSanitized = sanitizeDspCode(parsed.dspFunction);
-            new Function("inputSample", "params", "state", "inputR", testSanitized);
+            new Function("inputSample", "params", "state", "inputR", "inputKey", testSanitized);
             setPlugin(parsed);
             setScratchCode(parsed.dspFunction);
           } catch (compileErr) {
@@ -1241,7 +1242,7 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
       if (data.type === "code") {
         try {
           const sanitized = sanitizeDspCode(data.code);
-          this.dspFunc = new Function("inputSample", "params", "state", "inputR", sanitized);
+          this.dspFunc = new Function("inputSample", "params", "state", "inputR", "inputKey", sanitized);
         } catch (e) {
           this.port.postMessage({ type: "error", message: "Compile error in Worklet: " + e.message });
         }

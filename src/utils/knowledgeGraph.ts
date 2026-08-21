@@ -100,6 +100,7 @@ const TOPOLOGY_CONCEPTS: Record<string, { concept: string; related: string[] }> 
   // this correctly closes knowledgeAudit.ts's real
   // satisfiedBy: ["stereo-linking", "mid-side"] gap.
   comp_midside: { concept: "compressor", related: ["mid-side", "stereo-linking", "width-control"] },
+  comp_sidechain_ext: { concept: "compressor", related: ["sidechain-input", "external-key", "ducking"] },
   reverb_schroeder: { concept: "reverb", related: ["comb-filter", "allpass", "damping"] },
   reverb_fdn_plate: { concept: "reverb", related: ["feedback-delay-network", "hadamard-matrix", "plate-reverb", "damping"] },
   reverb_room_er: { concept: "reverb", related: ["early-reflections", "room-simulation", "damping"] },

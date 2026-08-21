@@ -71,10 +71,14 @@ check("search terms fall back to slug words for unknown concepts", searchTermsFo
   check("references did NOT replace the gate-verified corpus module", conv.proposedModule?.verification.passes === true);
   check("injection reference is inert (still gate+human gated)", isApprovable(conv) === (conv.proposedModule?.verification.passes === true));
 
-  /* ---- a blocked concept can carry references but stays blocked ---- */
-  const sidechain = await runResearch("sidechain-input", { webFetcher: indexFetcher });
-  check("blocked concept stays blocked even with references", sidechain.conflicts.some((c) => c.severity === "blocking") && !isApprovable(sidechain));
-  check("references never create a module", !sidechain.proposedModule);
+  /* ---- a blocked concept can carry references but stays blocked ----
+   * Was sidechain-input; that shipped a real fix (inputKey) and stopped
+   * being blocked, so this now runs against a permanent synthetic fixture
+   * (researchCorpus.ts's TEST-ONLY FIXTURES block) instead of another real
+   * concept that could get fixed out from under the test again. */
+  const blockedFixture = await runResearch("test-lifecycle-blocked-fixture", { webFetcher: indexFetcher });
+  check("blocked concept stays blocked even with references", blockedFixture.conflicts.some((c) => c.severity === "blocking") && !isApprovable(blockedFixture));
+  check("references never create a module", !blockedFixture.proposedModule);
 
   /* ---- 4. No fetcher = no references ---- */
   const noWeb = await runResearch("reverb");

@@ -180,14 +180,19 @@ const TEST_SIGNALS: { name: string; at: (i: number) => number }[] = [
 ];
 const PRIMARY_SIGNAL = TEST_SIGNALS[0];
 
-function compileDspBody(dspFunction: string): ((i: number, p: any, s: any, r?: number) => number) | null {
+function compileDspBody(dspFunction: string): ((i: number, p: any, s: any, r?: number, k?: number) => number) | null {
   try {
     const sanitized = sanitizeDspCode(dspFunction);
     // "inputR" is the OPT-IN stereo contract: mono bodies never reference it
     // and behave exactly as before; stereo bodies read it (guarded with
     // `inputR !== undefined ? inputR : inputSample`) and write their right
-    // channel to state.outR each sample, returning the left.
-    return new Function("inputSample", "params", "state", "inputR", sanitized) as any;
+    // channel to state.outR each sample, returning the left. "inputKey" is
+    // the OPT-IN external sidechain key, same guarded-optional shape --
+    // every existing render path leaves it undefined, so a sidechain body's
+    // own `inputKey !== undefined ? inputKey : inputSample` fallback makes
+    // it measure as an ordinary self-detecting compressor everywhere except
+    // the dedicated dual-signal test that actually supplies a key.
+    return new Function("inputSample", "params", "state", "inputR", "inputKey", sanitized) as any;
   } catch {
     return null;
   }

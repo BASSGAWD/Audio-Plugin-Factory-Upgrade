@@ -1,17 +1,17 @@
 # OrangeJuce Knowledge Audit
 
-Generated 2026-08-21T13:35:53.275Z — every number below is measured, not claimed.
+Generated 2026-08-21T14:15:22.421Z — every number below is measured, not claimed.
 
 ## 1. Inventory
 
 - Golden recipes: **13**
 - Composable primitives: **10**
-- Topology variants (engineering choices): **27**
-- Graph nodes: **50**, reachable concepts: **127**
+- Topology variants (engineering choices): **28**
+- Graph nodes: **51**, reachable concepts: **130**
 
-## 2. Curriculum coverage — overall 97%
+## 2. Curriculum coverage — overall 95%
 
-`█████████░` **Compressors** 93% (13/14)
+`██████████` **Compressors** 100% (14/14)
 `██████████` **Reverbs** 100% (7/7)
 `██████████` **Delays** 100% (6/6)
 `██████████` **Distortion** 100% (7/7)
@@ -20,16 +20,15 @@ Generated 2026-08-21T13:35:53.275Z — every number below is measured, not claim
 `██████████` **Pitch & Time** 100% (5/5)
 `██████████` **Synthesis** 100% (5/5)
 `██████████` **Engineering hygiene** 100% (8/8)
-`░░░░░░░░░░` **Test invariants** 0% (0/1)
+`░░░░░░░░░░` **Test invariants** 0% (0/3)
 
 ### Gap report (the shopping list)
 
-- **Compressors**: Sidechain input (external key)
-- **Test invariants**: Reserved: audit-honesty anchor (not a real capability — see knowledgeAuditTest.ts)
+- **Test invariants**: Reserved: audit-honesty anchor (not a real capability — see knowledgeAuditTest.ts); Reserved: permanently-blocked research demo (not a real capability — see researchCorpus.ts); Reserved: approvable research demo (not a real capability — see researchCorpus.ts)
 
 ## 3. Balance (modules per concept)
 
-- **compressor** ×11: dynamics (recipe), comp_ff_rms (topology), comp_peak_punch (topology), comp_feedback_glue (topology), comp_lookahead_master (topology), comp_opto (topology), comp_fet_1176 (topology), comp_multiband_2band (topology), comp_deesser (topology), comp_parallel (topology), comp_midside (topology)
+- **compressor** ×12: dynamics (recipe), comp_ff_rms (topology), comp_peak_punch (topology), comp_feedback_glue (topology), comp_lookahead_master (topology), comp_opto (topology), comp_fet_1176 (topology), comp_multiband_2band (topology), comp_deesser (topology), comp_parallel (topology), comp_midside (topology), comp_sidechain_ext (topology)
 - **delay** ×6: delay (recipe), echo (primitive), delay_tape (topology), delay_digital (topology), delay_pingpong (topology), delay_multitap (topology)
 - **reverb** ×5: reverb (recipe), reverb_schroeder (topology), reverb_fdn_plate (topology), reverb_room_er (topology), reverb_convolution (topology)
 - **distortion** ×5: distortion (recipe), dist_softclip (topology), dist_tube_asym (topology), dist_fuzz (topology), dist_dynamic_sat (topology)

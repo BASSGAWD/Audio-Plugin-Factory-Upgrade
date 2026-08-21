@@ -518,10 +518,24 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
   // "convolution" concept match verbatim.
   const wantsConvolution = /convolution|impulse\s*response|\bir\b\s*(?:reverb|loader)|convolv/i.test(prompt) && spec.family === "reverb";
 
+  // Same gap again, for the external sidechain compressor: "sidechain"/
+  // "duck" already route to the dynamics family (dspRecipes.ts's own match
+  // regex), but requirements.ts has no dimension recognizing WHICH
+  // compressor design that implies, so without this it silently built
+  // comp_ff_rms (an ordinary self-detecting compressor with no key input at
+  // all) instead of the one topology that actually reads inputKey.
+  // Deliberately WIDER than researchCorpus.ts's own "sidechain-input" match
+  // (which requires "sidechain" immediately followed by "input"/"key", and
+  // "duck" immediately followed by "from"/"to") -- caught empirically that
+  // real phrasing like "a sidechain compressor" or "ducking the bass from
+  // the kick" has other words in between and didn't match that narrower
+  // shape at all.
+  const wantsSidechain = /sidechain\s*(?:input|key|comp)|external\s*(?:key|sidechain)|duck(?:s|ing)?\b.*\b(?:from|to)\b/i.test(prompt) && spec.family === "dynamics";
+
   // Human-approved research first: a gate-verified module the user approved
   // in the Research Lab whose concept wording matches this prompt beats the
   // generic banks -- that's the whole point of researching a gap.
-  const researched = spec.family === "amp_sim" || wantsShimmer || wantsMultiTap || wantsConvolution ? null : findApprovedModuleForPrompt(prompt);
+  const researched = spec.family === "amp_sim" || wantsShimmer || wantsMultiTap || wantsConvolution || wantsSidechain ? null : findApprovedModuleForPrompt(prompt);
 
   if (researched?.proposedModule) {
     const m = researched.proposedModule;
@@ -572,6 +586,13 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     structure = convolution.title;
     friendly = "a direct FIR convolution against a synthesized room impulse response, instead of a comb/FDN network";
     engineeringChoice = convolution;
+  } else if (wantsSidechain) {
+    const sidechain = DSP_TOPOLOGIES.find((t) => t.id === "comp_sidechain_ext")!;
+    parameters = toLiveParams(sidechain.parameters);
+    dspFunction = sidechain.body;
+    structure = sidechain.title;
+    friendly = "an external sidechain compressor -- its detector follows a separate key input instead of the main signal";
+    engineeringChoice = sidechain;
   } else if (scored.length >= 2 && (spec.hybrid || spec.family === "multiband_saturator")) {
     const composed = composeRecipes(scored[0].recipe, scored[1].recipe);
     parameters = toLiveParams(composed.parameters);

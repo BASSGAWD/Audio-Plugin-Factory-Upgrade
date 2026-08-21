@@ -123,6 +123,20 @@ export const CURRICULUM: CurriculumItem[] = [
   // can ever tag, by construction, so this item can never close and the
   // auditor can never claim a perfect curriculum.
   { area: "Test invariants", concept: "Reserved: audit-honesty anchor (not a real capability — see knowledgeAuditTest.ts)", satisfiedBy: ["__test_anchor_never_satisfied__"] },
+  // A second permanent item, satisfied by researchCorpus.ts's matching
+  // "test-lifecycle-blocked-fixture" concept -- gives the gap-list UI (and
+  // e2eResearchTest.ts, which clicks "Research" from that list) a stable,
+  // always-present, permanently-blocked row to demonstrate "Approve stays
+  // disabled" on, the same job sidechain-input used to do before it shipped
+  // a real fix and left the gap list for good.
+  { area: "Test invariants", concept: "Reserved: permanently-blocked research demo (not a real capability — see researchCorpus.ts)", satisfiedBy: ["test-lifecycle-blocked-fixture"] },
+  // A third permanent item, satisfied by "test-lifecycle-fixture-a" -- gives
+  // the gap-list UI (and e2eResearchTest.ts) a stable "click Research, then
+  // Approve, confirm it becomes buildable" positive-case row that -- unlike
+  // every real concept this scenario has been pointed at in turn (phaser,
+  // convolution) -- never gets promoted out from under the demo, because
+  // fixture-a is deliberately never promoted into dspTopologies.ts.
+  { area: "Test invariants", concept: "Reserved: approvable research demo (not a real capability — see researchCorpus.ts)", satisfiedBy: ["test-lifecycle-fixture-a"] },
 ];
 
 /** Concepts the quality gate itself implements (verified by its test suite).

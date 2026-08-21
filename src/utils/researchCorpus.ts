@@ -537,10 +537,15 @@ return Math.tanh(osc * level * 0.8);`,
     },
   },
 
-  /* ================================================================ */
-  /* Structurally blocked concepts — the finding IS the constraint     */
-  /* ================================================================ */
   {
+    // Formerly blocked concept: the engine's DSP function used to receive
+    // exactly one input signal, with no second bus to key a detector from.
+    // Closed the same way mid-side/convolution/spectral were before it --
+    // an opt-in 5th argument (inputKey), guarded exactly like inputR, so
+    // every existing mono/stereo body is unaffected. See comp_sidechain_ext
+    // in dspTopologies.ts (the promoted, always-available topology this
+    // proposedModule mirrors) and dspPromptKit.ts's DSP_CODING_RULES for the
+    // contract every generation path now documents.
     concept: "sidechain-input",
     area: "Compressors",
     match: /sidechain\s*(?:input|key)|external\s*(?:key|sidechain)|duck\s*(?:from|to)\s/i,
@@ -549,9 +554,41 @@ return Math.tanh(osc * level * 0.8);`,
         text: "An external sidechain feeds a DIFFERENT signal into the compressor's detector (kick ducking a bass, voiceover ducking music) while the audio path processes the main input.",
         citation: { title: "Sidechain keying", source: "U. Zölzer (ed.), DAFX: Digital Audio Effects, 2nd ed.", authority: 90 },
       },
+      {
+        text: "The detector envelope should track the key signal's amplitude, while the gain reduction it computes is applied to the main program material -- the key itself is never heard in the output.",
+        citation: { title: "Sidechain compression technique", source: "Wikipedia: Dynamic range compression (sidechain)", url: "https://en.wikipedia.org/wiki/Dynamic_range_compression", authority: 75 },
+      },
     ],
-    blocked:
-      "The engine's DSP function receives exactly one input signal, so there is no second bus to key the detector from. INTERNAL sidechain filtering IS available — research 'sidechain-filter' (de-esser) for that. Prerequisite for external keying: a second input bus through audioEngine, the gate's renderer, and the plugin signature.",
+    proposedModule: {
+      family: "dynamics",
+      title: "External sidechain compressor (peak detector keyed from a separate input, gain reduction applied to the main signal)",
+      parameters: [
+        { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -22, unit: "dB" },
+        { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 8, unit: ":1" },
+        { id: "attack", name: "Attack", min: 0.05, max: 30, defaultValue: 2, unit: "ms" },
+        { id: "release", name: "Release", min: 10, max: 500, defaultValue: 120, unit: "ms" },
+        { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+        { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+      ],
+      body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -22;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 8);
+let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 2);
+let release = params.release !== undefined ? params.release : 120;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let mix = params.mix !== undefined ? params.mix : 1;
+let key = inputKey !== undefined ? inputKey : inputSample;
+let x = Math.abs(key);
+let aC = 1 - Math.exp(-1 / (attack * 44.1));
+let rC = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aC : rC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (gainDb + makeup) / 20);
+let comp = Math.tanh(inputSample * g);
+return comp * mix + inputSample * (1 - mix);`,
+    },
   },
   {
     concept: "convolution",
@@ -823,15 +860,17 @@ return Math.tanh(inputSample * (1 - mix) + y * mix);`,
   /* users, never meant to be promoted into dspTopologies.ts.           */
   /*                                                                    */
   /* researchEngineTest.ts's "pending research changes nothing / approval */
-  /* extends coverage / rejection changes nothing" lifecycle checks used  */
-  /* to borrow a real-but-temporary corpus gap (phaser, then parallel-    */
-  /* compression, then multi-tap) and each one broke the moment that       */
-  /* concept legitimately shipped as a topology. These two fixtures decouple */
-  /* "does the approval boundary work correctly" (an evergreen engine        */
-  /* behavior) from "which real DSP concepts are still missing" (a moving   */
-  /* target that shrinks as the corpus matures) -- they can never be         */
-  /* promoted out from under the test because nothing real ever matches     */
-  /* their deliberately synthetic concept names or match regexes.           */
+  /* extends coverage / rejection changes nothing" lifecycle checks (fixtures */
+  /* a/b), plus researchIndexTest.ts/researchWebTest.ts's "references never  */
+  /* unblock a structurally-impossible concept" check (fixture-blocked), used */
+  /* to borrow real-but-temporary corpus gaps (phaser, parallel-compression,  */
+  /* multi-tap, sidechain-input in turn) and each one broke the moment that   */
+  /* concept legitimately shipped a real fix. These three fixtures decouple   */
+  /* "does the approval boundary/blocked-status work correctly" (evergreen    */
+  /* engine behavior) from "which real DSP concepts are still missing/blocked" */
+  /* (a moving target that shrinks as the corpus matures) -- they can never   */
+  /* be promoted or fixed out from under a test because nothing real ever     */
+  /* matches their deliberately synthetic concept names or match regexes.     */
   /* ================================================================ */
   {
     concept: "test-lifecycle-fixture-a",
@@ -868,6 +907,27 @@ let gain = params.gain !== undefined ? params.gain : 0;
 let g = Math.pow(10, gain / 20);
 return inputSample * g;`,
     },
+  },
+  // A third fixture, permanently BLOCKED rather than pending: researchIndexTest.ts
+  // and researchWebTest.ts both prove that references (OpenAudio matches, live
+  // web fetches, even a prompt-injection attempt) can attach to a concept
+  // without ever unblocking it -- a real invariant to keep testing forever,
+  // now that sidechain-input (the concept these tests used to borrow for
+  // this) shipped a real fix and stopped being blocked.
+  {
+    concept: "test-lifecycle-blocked-fixture",
+    area: "Utility",
+    // Deliberately word-ordered "blocked-fixture", not "fixture-blocked":
+    // corpusEntriesFor's substring matching (concept.includes(needle) /
+    // needle.includes(concept)) means "...fixture-blocked" would collide
+    // with "...fixture-b" (a prefix match against test-lifecycle-fixture-b)
+    // -- caught empirically when researching fixture-b incorrectly picked
+    // up this entry's blocking conflict too.
+    match: /\btest.?lifecycle.?blocked.?fixture\b/i,
+    claims: [
+      { text: "Synthetic test fixture -- exercises the permanently-blocked lifecycle (references must never unblock a structurally-impossible concept). Not a real DSP finding.", citation: { title: "Internal test fixture", source: "tests/researchIndexTest.ts", authority: 100 } },
+    ],
+    blocked: "Deliberately, permanently blocked by construction -- this fixture exists so researchIndexTest.ts/researchWebTest.ts always have a concept to prove references-without-approval on, independent of which real DSP gaps happen to be closed.",
   },
 ];
 

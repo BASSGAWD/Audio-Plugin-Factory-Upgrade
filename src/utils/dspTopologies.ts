@@ -397,6 +397,50 @@ state.outR = Math.tanh(m2 - s2);
 return Math.tanh(m2 + s2);`,
     tags: { topology: "mid-side-linked", character: ["transparent"], sources: ["mix_bus", "master"], latency: "zero", cpu: "light" },
   },
+  {
+    // Closes the knowledge audit's last real gap ("Sidechain input (external
+    // key)") -- the one prerequisite every other promoted concept didn't
+    // need: a genuinely independent key signal, not a channel of the same
+    // source (that's what inputR/mid-side already are). Adapted from
+    // comp_peak_punch's own peak-detector shape: identical attack/release/
+    // knee/makeup math, the only change is WHAT the detector listens to.
+    id: "comp_sidechain_ext",
+    family: "dynamics",
+    title: "External sidechain compressor (peak detector keyed from a separate input, gain reduction applied to the main signal)",
+    rationale: "a real sidechain duck -- the envelope detector follows inputKey (a kick, a voiceover, any independent source) while the gain reduction it computes is applied to inputSample, so the main signal visibly ducks out of the way of the key -- falls back to ordinary self-detecting compression when no key is connected",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -22, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 8, unit: ":1" },
+      { id: "attack", name: "Attack", min: 0.05, max: 30, defaultValue: 2, unit: "ms" },
+      { id: "release", name: "Release", min: 10, max: 500, defaultValue: 120, unit: "ms" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -22;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 8);
+let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 2);
+let release = params.release !== undefined ? params.release : 120;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let mix = params.mix !== undefined ? params.mix : 1;
+// The detector listens to the KEY (falling back to the main input itself
+// when nothing is connected, so this measures as an ordinary compressor on
+// every render path that never supplies one), but every dB of gain
+// reduction it computes is applied to the MAIN signal below -- this is
+// what makes it an external sidechain duck rather than self-compression.
+let key = inputKey !== undefined ? inputKey : inputSample;
+let x = Math.abs(key);
+let aC = 1 - Math.exp(-1 / (attack * 44.1));
+let rC = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aC : rC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (gainDb + makeup) / 20);
+let comp = Math.tanh(inputSample * g);
+return comp * mix + inputSample * (1 - mix);`,
+    tags: { topology: "external-sidechain-peak", character: ["aggressive"], sources: ["drums", "mix_bus"], latency: "zero", cpu: "light" },
+  },
 
   /* ================================================================ */
   /* REVERB: three room designs                                        */

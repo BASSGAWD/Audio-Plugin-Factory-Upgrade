@@ -17,12 +17,18 @@ import { DSP_PRIMITIVES } from "./dspPrimitives";
  * missing state init, unclamped output.
  */
 export const DSP_CODING_RULES = `DSP FUNCTION CONTRACT -- the "dspFunction" string is the BODY of:
-  function(inputSample, params, state, inputR) { ...; return outputSample; }
+  function(inputSample, params, state, inputR, inputKey) { ...; return outputSample; }
 It runs once per audio sample at 44100 Hz in a real-time loop.
 STEREO (opt-in): for mono effects, ignore inputR entirely and just return the sample.
 For genuinely stereo effects (ping-pong, mid-side, width), read the right input as
   let inR = inputR !== undefined ? inputR : inputSample;
 write the right output to state.outR EVERY sample, and return the left output.
+SIDECHAIN KEY (opt-in): for an EXTERNAL sidechain-keyed compressor only (a
+detector that ducks from a DIFFERENT signal, not the main input), read
+  let key = inputKey !== undefined ? inputKey : inputSample;
+and run your envelope detector on key, but apply the computed gain reduction
+to inputSample (never process key itself into the output). Every other
+effect ignores inputKey entirely.
 Never set state.outR from a mono effect. Hard rules:
 1. Initialize ALL persistent state exactly once:
    if (!state.init) { state.buf = new Float32Array(44100); state.ptr = 0; state.y1 = 0; state.init = true; }

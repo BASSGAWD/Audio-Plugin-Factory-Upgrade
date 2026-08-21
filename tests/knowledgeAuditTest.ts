@@ -38,13 +38,14 @@ const allMissing = audit.coverage.flatMap((a) => a.missing);
 // the test, so a single PERMANENT synthetic anchor now does this job
 // instead (knowledgeAudit.ts's "Test invariants" area) -- it can never be
 // promoted out from under the test because nothing real can ever satisfy
-// its deliberately-fake concept string. External sidechain remains the one
-// real, structurally-blocked concept (see researchCorpus.ts) until a second
-// input bus lands.
+// its deliberately-fake concept string. External sidechain closed too, the
+// same way, once comp_sidechain_ext (a real second-input-bus-free design:
+// the detector reads inputKey, gain reduction applies to the main signal)
+// shipped as a topology.
 check("covered: convolution reverb no longer a gap", !allMissing.some((m) => /convolution/i.test(m)));
 check("covered: multi-tap delay no longer a gap", !allMissing.some((m) => /multi.?tap/i.test(m)));
 check("covered: parallel compression no longer a gap", !allMissing.some((m) => /parallel/i.test(m)));
-check("known-missing: external sidechain (structurally blocked) is reported", allMissing.some((m) => /sidechain input/i.test(m)));
+check("covered: external sidechain no longer a gap", !allMissing.some((m) => /sidechain input/i.test(m)));
 check("known-missing: the permanent test-honesty anchor is reported", allMissing.some((m) => /audit-honesty anchor/i.test(m)));
 check("covered: lookahead compression no longer a gap", !allMissing.some((m) => /lookahead/i.test(m)));
 check("covered: FDN no longer a gap", !allMissing.some((m) => /delay network/i.test(m)));

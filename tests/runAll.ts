@@ -61,6 +61,7 @@ const TEST_FILES = [
   "controlInteractionTest.ts",
   "accentNormalizationTest.ts",
   "liveBuildDiscoveryTest.ts",
+  "sidechainEngineTest.ts",
 ];
 
 let failed = 0;

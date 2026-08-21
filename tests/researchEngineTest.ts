@@ -131,16 +131,13 @@ const mem = new Map<string, string>();
   const optoBuild = buildOfflinePlugin("an LA-2A style opto compressor for vocals");
   check("approved opto model is buildable by name", /opto|leveling/i.test(optoBuild.description), optoBuild.description.slice(0, 80));
 
-  /* ---- external sidechain: the last blocked concept — the finding is the constraint ---- */
-  const sidechain = await runResearch("sidechain-input");
-  check("external sidechain reports the single-input constraint", sidechain.conflicts.some((c) => c.severity === "blocking" && /one input|second bus|single/i.test(c.text)));
-  check("external sidechain carries NO proposed module", !sidechain.proposedModule);
-  check("external sidechain cannot be approved", !isApprovable(sidechain) && approveResearch(sidechain.id) === null);
-  check("blocked approval attempt left status pending", readResearchQueue().find((i) => i.id === sidechain.id)?.status === "pending");
   const deEss = await runResearch("sidechain-filter");
   check("internal sidechain (de-esser) IS approvable", isApprovable(deEss) && deEss.proposedModule?.verification.passes === true);
 
-  /* ---- formerly blocked, now buildable: stereo (mid-side) + block/FFT (convolution, spectral) ---- */
+  /* ---- formerly blocked, now buildable: stereo (mid-side), block/FFT
+   *      (convolution, spectral), and external sidechain (a 5th, opt-in
+   *      inputKey argument -- the last concept that used to have no
+   *      prerequisite path at all) ---- */
   const midSide = await runResearch("mid-side");
   check("mid-side is no longer blocked (stereo engine landed)", !midSide.conflicts.some((c) => c.severity === "blocking"));
   check("mid-side module was gate-verified stereo", midSide.proposedModule?.verification.passes === true);
@@ -148,6 +145,11 @@ const mem = new Map<string, string>();
   check("convolution is no longer blocked (block processing landed)", !convolution.conflicts.some((c) => c.severity === "blocking") && convolution.proposedModule?.verification.passes === true);
   const spectral = await runResearch("spectral-processing");
   check("spectral/FFT is no longer blocked (inline FFT landed)", !spectral.conflicts.some((c) => c.severity === "blocking") && spectral.proposedModule?.verification.passes === true);
+  const sidechain = await runResearch("sidechain-input");
+  check("external sidechain is no longer blocked (inputKey landed)", !sidechain.conflicts.some((c) => c.severity === "blocking") && sidechain.proposedModule?.verification.passes === true);
+  approveResearch(sidechain.id);
+  const sidechainBuild = buildOfflinePlugin("a sidechain compressor ducking from an external key");
+  check("approved sidechain compressor is buildable by name", /sidechain|duck|key/i.test(sidechainBuild.description) || sidechainBuild.dspFunction.includes("inputKey"), sidechainBuild.description.slice(0, 80));
 
   /* ---- unknown concept with no model: honest empty result ---- */
   const unknown = await runResearch("quantum yodel translation");

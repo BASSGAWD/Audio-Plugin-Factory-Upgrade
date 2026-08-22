@@ -10,6 +10,7 @@ import {
   placeNewCard,
   loadCanvasWorkspace,
   saveCanvasWorkspace,
+  mergeRebuildChanges,
   CanvasCard,
   CANVAS_STORAGE_KEY,
 } from "../src/utils/canvasFactory";
@@ -155,6 +156,42 @@ const store = new Map<string, string>();
   check("persist: a failing write reports false instead of silently succeeding", okResult === false);
   (globalThis as any).localStorage.setItem = realSetItem;
 
+  /* 8b. The decisive gap this fallback tier exists for: a save that fails
+   *     at full fidelity (simulating quota pressure from many cards' worth
+   *     of accumulated buildReport evidence) must NOT drop the card --
+   *     it should retry with that secondary detail pruned and still land
+   *     in storage. Without the fallback tier, this exact scenario used to
+   *     return false and the card would be gone on next reload; with it,
+   *     the save succeeds and the card survives, just without its
+   *     evidence detail. */
+  {
+    const real = (globalThis as any).localStorage.setItem;
+    let calls = 0;
+    (globalThis as any).localStorage.setItem = (k: string, v: string) => {
+      calls++;
+      if (calls === 1) throw new Error("QuotaExceededError (simulated full-fidelity payload)");
+      real(k, v);
+    };
+    const heavyPlugin = { ...a.plugin, buildReport: a.plugin.buildReport ? { ...a.plugin.buildReport, fixes: Array(50).fill("a fairly long deterministic fix note, repeated") } : undefined };
+    const fallbackResult = saveCanvasWorkspace({
+      cards: [{ id: "fallback1", prompt: "heavy evidence test", x: 0, y: 0, status: "ready", plugin: heavyPlugin as any, createdAt: 1 }],
+      view: { x: 0, y: 0, zoom: 1 },
+    });
+    check("persist fallback: a full-fidelity failure retries and succeeds (does not give up)", fallbackResult === true, `calls=${calls}`);
+    check("persist fallback: it actually retried (2 setItem calls, not 1)", calls === 2, `calls=${calls}`);
+    (globalThis as any).localStorage.setItem = real;
+
+    const fallbackRestored = loadCanvasWorkspace().cards.find((c) => c.id === "fallback1");
+    check(
+      "persist fallback: the CARD survives (plugin, DSP, name all intact) even though the save was pruned",
+      !!fallbackRestored && fallbackRestored.status === "ready" && fallbackRestored.plugin?.dspFunction === a.plugin.dspFunction && fallbackRestored.plugin?.name === a.plugin.name
+    );
+    check(
+      "persist fallback: buildReport (the secondary evidence detail) is what got dropped, not the plugin",
+      !!fallbackRestored?.plugin && fallbackRestored.plugin.buildReport === undefined
+    );
+  }
+
   /* 9. placeNewCard's spacing matches FactoryCanvas.tsx's actual card
    *    geometry (header + max-h-[440px] scrollable body + footer), not the
    *    old H=240 guess that real ready-state cards routinely blew past by
@@ -201,6 +238,30 @@ const store = new Map<string, string>();
   check(
     "repair: a colliding newer card gets nudged clear of it on load",
     !!newer && !(Math.abs(newer.x - 100) < 360 + 24 && Math.abs(newer.y - 100) < 536 + 24)
+  );
+
+  /* 11. mergeRebuildChanges: the rebuild modal's "any changes you'd like
+   *     made?" text gets folded into a fresh rebuild prompt -- a rebuild
+   *     re-runs the whole pipeline from scratch, it isn't an edit pass, so
+   *     the requested changes have to become PART of the prompt text
+   *     itself. Blank input must be a true no-op (a plain "rebuild as
+   *     before" must never grow a stray "(also: )" suffix). */
+  check(
+    "mergeRebuildChanges: blank changes leave the prompt byte-for-byte unchanged",
+    mergeRebuildChanges("a warm tape delay", "") === "a warm tape delay"
+  );
+  check(
+    "mergeRebuildChanges: whitespace-only changes are treated as blank",
+    mergeRebuildChanges("a warm tape delay", "   \n  ") === "a warm tape delay"
+  );
+  check(
+    "mergeRebuildChanges: real changes are folded into the prompt",
+    mergeRebuildChanges("a warm tape delay", "make it wobblier").includes("a warm tape delay") &&
+      mergeRebuildChanges("a warm tape delay", "make it wobblier").includes("make it wobblier")
+  );
+  check(
+    "mergeRebuildChanges: surrounding whitespace on real changes is trimmed",
+    mergeRebuildChanges("x", "  trimmed  ") === "x (also: trimmed)"
   );
 
   console.log(failures === 0 ? "\nCANVAS FACTORY: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);

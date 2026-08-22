@@ -9,12 +9,11 @@ import {
   X,
   Copy,
   RefreshCw,
+  Trash2,
   ExternalLink,
   Sparkles,
   Volume2,
   AlertTriangle,
-  ChevronDown,
-  ChevronUp,
   Loader2,
   CheckCircle2,
   Guitar,
@@ -26,6 +25,7 @@ import {
   loadCanvasWorkspace,
   saveCanvasWorkspace,
   placeNewCard,
+  mergeRebuildChanges,
 } from "../utils/canvasFactory";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
@@ -124,7 +124,12 @@ const CanvasPluginCard: React.FC<CardProps> = ({
   onOpenInStudio,
   onParamChange,
 }) => {
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  // Replaces the old permanently-visible prompt/evidence text and the
+  // click-to-toggle "Quality evidence" drawer: the card's resting state now
+  // shows just the plugin itself (name up top, its own controls, the
+  // action row at bottom) -- all of that explanatory detail lives in one
+  // panel that fades in on hover and fades back out on mouse-leave.
+  const [isHovering, setIsHovering] = useState(false);
   const plugin = card.plugin;
   const live = isLive && enginePlaying;
 
@@ -140,49 +145,108 @@ const CanvasPluginCard: React.FC<CardProps> = ({
   const building = card.status === "building" || card.status === "queued";
   const currentStageIdx = STAGE_SEQUENCE.indexOf((card.stage as (typeof STAGE_SEQUENCE)[number]) ?? "spec");
 
-  const body = (
-    <div className="px-4 pb-3 pt-2 space-y-3">
-      {/* Prompt the card was built from */}
-      <p className="text-[10.5px] leading-relaxed text-neutral-400 line-clamp-2" title={card.prompt}>
-        “{card.prompt}”
-      </p>
+  // Everything explanatory (the prompt it was built from, the measured
+  // functional-fitness evidence, the "why this design" rationale, and the
+  // four quality scores + refinement/fixes notes) lives in ONE panel that
+  // fades/expands in on hover and collapses back out on mouse-leave --
+  // replacing both the old permanently-visible callouts and the separate
+  // click-to-toggle "Quality evidence" drawer. Rendered above the knobs (in
+  // normal document flow, not an absolute overlay), so it never competes
+  // with dragging a knob for the same pixels the way a floating overlay
+  // covering the controls would.
+  const infoPanel = (
+    <div
+      className={`overflow-hidden transition-all duration-200 ease-out ${
+        isHovering ? "max-h-[640px] opacity-100 mb-3" : "max-h-0 opacity-0"
+      }`}
+    >
+      <div className="space-y-2.5 pt-0.5">
+        <p className="text-[10.5px] leading-relaxed text-neutral-400 line-clamp-2" title={card.prompt}>
+          “{card.prompt}”
+        </p>
 
-      {/* Proven: the build measurably does its family's job. The four gate
-          scores say it's correct; this says it WORKS, with real numbers. */}
-      {card.plugin?.buildReport?.functionalFitness && (
-        <div
-          className="flex items-start gap-1.5 rounded-lg border border-emerald-900/40 bg-emerald-950/20 px-2.5 py-1.5"
-          title={`Measured ${card.plugin.buildReport.functionalFitness.metric}: ${card.plugin.buildReport.functionalFitness.evidence}`}
-        >
-          <CheckCircle2 className="w-3 h-3 mt-px shrink-0 text-emerald-400" />
-          <div className="min-w-0">
-            <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-400/90">
-              Proven · {card.plugin.buildReport.functionalFitness.metric}
-            </span>
-            <p className="text-[10px] leading-relaxed text-neutral-300 line-clamp-2">
-              {card.plugin.buildReport.functionalFitness.evidence}
+        {/* Measured: the build measurably does its family's job. The four
+            gate scores say it's correct; this says it WORKS, with real
+            numbers. */}
+        {card.plugin?.buildReport?.functionalFitness && (
+          <div
+            className="flex items-start gap-1.5 rounded-lg border border-emerald-900/40 bg-emerald-950/20 px-2.5 py-1.5"
+            title={`Measured ${card.plugin.buildReport.functionalFitness.metric}: ${card.plugin.buildReport.functionalFitness.evidence}`}
+          >
+            <CheckCircle2 className="w-3 h-3 mt-px shrink-0 text-emerald-400" />
+            <div className="min-w-0">
+              <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-400/90">
+                Measured · {card.plugin.buildReport.functionalFitness.metric}
+              </span>
+              <p className="text-[10px] leading-relaxed text-neutral-300 line-clamp-2">
+                {card.plugin.buildReport.functionalFitness.evidence}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Why this design — the engineering brain made visible */}
+        {card.plugin?.buildReport?.engineeringChoice && (
+          <div
+            className="rounded-lg border border-orange-900/40 bg-orange-950/20 px-2.5 py-2"
+            title={`Read from your wording: ${card.plugin.buildReport.engineeringChoice.evidence.join("; ")}`}
+          >
+            <div className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-orange-400/90">
+              <Sparkles className="w-2.5 h-2.5" />
+              Why this design
+            </div>
+            <p className="mt-1 text-[10px] leading-relaxed text-neutral-300">
+              <span className="font-mono text-orange-300">{card.plugin.buildReport.engineeringChoice.topology}</span>
+              {" — "}
+              {card.plugin.buildReport.engineeringChoice.rationale}
             </p>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Why this design — the engineering brain made visible */}
-      {card.plugin?.buildReport?.engineeringChoice && (
-        <div
-          className="rounded-lg border border-orange-900/40 bg-orange-950/20 px-2.5 py-2"
-          title={`Read from your wording: ${card.plugin.buildReport.engineeringChoice.evidence.join("; ")}`}
-        >
-          <div className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-orange-400/90">
-            <Sparkles className="w-2.5 h-2.5" />
-            Why this design
+        {/* Quality evidence: the four scores + refinement trace -- no
+            longer click-to-expand, it's part of the same hover reveal. */}
+        {plugin && plugin.quality && (
+          <div className="rounded-lg border border-neutral-800/80 bg-neutral-950/60 px-2.5 py-2 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold text-neutral-400">
+              <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+              Quality evidence
+              {card.versionsTried ? ` · ${card.versionsTried} versions gated` : ""}
+            </div>
+            <div className="grid grid-cols-4 gap-1.5">
+              {(
+                [
+                  ["Looks", plugin.quality.looks],
+                  ["Perf", plugin.quality.performance],
+                  ["Latency", plugin.quality.latency],
+                  ["Musical", plugin.quality.musicality],
+                ] as const
+              ).map(([label, v]) => (
+                <div key={label} className="text-center rounded-md bg-neutral-900 border border-neutral-800 py-1">
+                  <div className={`text-[11px] font-bold ${v >= 97 ? "text-emerald-400" : v >= 90 ? "text-amber-400" : "text-rose-400"}`}>{v}</div>
+                  <div className="text-[8px] uppercase tracking-wider text-neutral-500">{label}</div>
+                </div>
+              ))}
+            </div>
+            {plugin.buildReport?.refinement && plugin.buildReport.refinement.length > 0 && (
+              <div className="text-[9.5px] text-neutral-500 leading-relaxed">
+                Perfecting loop: {plugin.buildReport.refinement.filter((r) => r.accepted).length} of{" "}
+                {plugin.buildReport.refinement.length} rework passes scored strictly higher and were kept.
+              </div>
+            )}
+            {plugin.buildReport && plugin.buildReport.fixes.length > 0 && (
+              <div className="text-[9.5px] text-neutral-500 leading-relaxed">
+                {plugin.buildReport.fixes.length} deterministic fixes/notes applied by the gate.
+              </div>
+            )}
           </div>
-          <p className="mt-1 text-[10px] leading-relaxed text-neutral-300">
-            <span className="font-mono text-orange-300">{card.plugin.buildReport.engineeringChoice.topology}</span>
-            {" — "}
-            {card.plugin.buildReport.engineeringChoice.rationale}
-          </p>
-        </div>
-      )}
+        )}
+      </div>
+    </div>
+  );
+
+  const body = (
+    <div className="px-4 pb-3 pt-2 space-y-3">
+      {infoPanel}
 
       {card.status === "failed" && (
         <div className="rounded-lg border border-rose-900/60 bg-rose-950/30 p-3 space-y-2">
@@ -278,52 +342,6 @@ const CanvasPluginCard: React.FC<CardProps> = ({
               Full rig &amp; showpiece controls in Studio →
             </button>
           )}
-
-          {/* Evidence drawer: the four scores + refinement trace */}
-          <div className="rounded-lg border border-neutral-800/80 bg-neutral-950/60">
-            <button
-              onClick={() => setDetailsOpen((v) => !v)}
-              className="w-full flex items-center justify-between px-2.5 py-1.5 text-[10px] font-semibold text-neutral-400 hover:text-neutral-200 cursor-pointer"
-              aria-expanded={detailsOpen}
-            >
-              <span className="flex items-center gap-1.5">
-                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-                Quality evidence
-                {card.versionsTried ? ` · ${card.versionsTried} versions gated` : ""}
-              </span>
-              {detailsOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
-            {detailsOpen && plugin.quality && (
-              <div className="px-2.5 pb-2.5 space-y-1.5 animate-fadeIn">
-                <div className="grid grid-cols-4 gap-1.5">
-                  {(
-                    [
-                      ["Looks", plugin.quality.looks],
-                      ["Perf", plugin.quality.performance],
-                      ["Latency", plugin.quality.latency],
-                      ["Musical", plugin.quality.musicality],
-                    ] as const
-                  ).map(([label, v]) => (
-                    <div key={label} className="text-center rounded-md bg-neutral-900 border border-neutral-800 py-1">
-                      <div className={`text-[11px] font-bold ${v >= 97 ? "text-emerald-400" : v >= 90 ? "text-amber-400" : "text-rose-400"}`}>{v}</div>
-                      <div className="text-[8px] uppercase tracking-wider text-neutral-500">{label}</div>
-                    </div>
-                  ))}
-                </div>
-                {plugin.buildReport?.refinement && plugin.buildReport.refinement.length > 0 && (
-                  <div className="text-[9.5px] text-neutral-500 leading-relaxed">
-                    Perfecting loop: {plugin.buildReport.refinement.filter((r) => r.accepted).length} of{" "}
-                    {plugin.buildReport.refinement.length} rework passes scored strictly higher and were kept.
-                  </div>
-                )}
-                {plugin.buildReport && plugin.buildReport.fixes.length > 0 && (
-                  <div className="text-[9.5px] text-neutral-500 leading-relaxed">
-                    {plugin.buildReport.fixes.length} deterministic fixes/notes applied by the gate.
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
         </>
       )}
     </div>
@@ -336,6 +354,8 @@ const CanvasPluginCard: React.FC<CardProps> = ({
         e.stopPropagation();
         onSelect();
       }}
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => setIsHovering(false)}
       className={`absolute rounded-2xl border bg-neutral-900 shadow-xl shadow-black/50 transition-shadow select-none ${
         selected ? "border-orange-600 ring-2 ring-orange-600/30" : "border-neutral-800 hover:border-neutral-700"
       } ${live ? "shadow-orange-950/40" : ""}`}
@@ -445,6 +465,14 @@ const CanvasPluginCard: React.FC<CardProps> = ({
           >
             <RefreshCw className="w-3 h-3" />
             Rebuild
+          </button>
+          <button
+            onClick={onDelete}
+            className="flex items-center gap-1 text-[10px] font-semibold text-neutral-300 hover:text-rose-300 px-2 py-1 rounded-md hover:bg-rose-950/40 transition-colors cursor-pointer"
+            title="Delete this card"
+          >
+            <Trash2 className="w-3 h-3" />
+            Delete
           </button>
           {live && (
             <span className="ml-auto flex items-center gap-1 text-[9.5px] font-bold text-orange-300">
@@ -626,16 +654,38 @@ export default function FactoryCanvas({
     setSelectedId(copy.id);
   };
 
-  const rebuildCard = (id: string) => {
+  const rebuildCard = (id: string, changes: string = "") => {
     if (liveCardId === id) {
       onStopAudition();
       setLiveCardId(null);
     }
     setCards((prev) =>
       prev.map((c) =>
-        c.id === id ? { ...c, status: "queued", plugin: undefined, minScore: undefined, versionsTried: undefined, error: undefined } : c
+        c.id === id
+          ? {
+              ...c,
+              prompt: mergeRebuildChanges(c.prompt, changes),
+              status: "queued",
+              plugin: undefined,
+              minScore: undefined,
+              versionsTried: undefined,
+              error: undefined,
+            }
+          : c
       )
     );
+  };
+
+  /* ---- rebuild confirmation modal: "any changes you'd like made?" ---- */
+  const [rebuildModalCardId, setRebuildModalCardId] = useState<string | null>(null);
+  const [rebuildChangesText, setRebuildChangesText] = useState("");
+  const openRebuildModal = (id: string) => {
+    setRebuildChangesText("");
+    setRebuildModalCardId(id);
+  };
+  const confirmRebuild = () => {
+    if (rebuildModalCardId) rebuildCard(rebuildModalCardId, rebuildChangesText);
+    setRebuildModalCardId(null);
   };
 
   const toggleAudition = async (id: string) => {
@@ -853,7 +903,7 @@ export default function FactoryCanvas({
               onDragStart={onCardDragStart(card.id)}
               onDelete={() => deleteCard(card.id)}
               onDuplicate={() => duplicateCard(card.id)}
-              onRebuild={() => rebuildCard(card.id)}
+              onRebuild={() => openRebuildModal(card.id)}
               onToggleAudition={() => toggleAudition(card.id)}
               onOpenInStudio={() => card.plugin && onLoadInStudio(card.plugin)}
               onParamChange={(pid, v) => cardParamChange(card.id, pid, v)}
@@ -953,6 +1003,66 @@ export default function FactoryCanvas({
           </p>
         </div>
       </div>
+
+      {/* Rebuild confirmation modal: re-running the full pipeline is a
+          from-scratch build (not an incremental edit), so this is the
+          moment to ask whether the user wants anything different this
+          time -- rather than silently reproducing the exact same plugin. */}
+      {rebuildModalCardId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+          onPointerDown={(e) => {
+            if (e.target === e.currentTarget) setRebuildModalCardId(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl p-5 space-y-4"
+            onPointerDown={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Rebuild confirmation"
+          >
+            <div>
+              <h2 className="text-sm font-semibold text-neutral-100">
+                Rebuild {cards.find((c) => c.id === rebuildModalCardId)?.plugin?.name ?? "this plugin"}?
+              </h2>
+              <p className="text-[11px] text-neutral-500 mt-1 leading-relaxed">
+                Any changes you'd like made this time? Leave it blank to rebuild exactly as before.
+              </p>
+            </div>
+            <textarea
+              autoFocus
+              rows={3}
+              value={rebuildChangesText}
+              onChange={(e) => setRebuildChangesText(e.target.value)}
+              placeholder="e.g. make the drive knob more aggressive, add a mix control…"
+              className="w-full resize-none bg-neutral-950 border border-neutral-800 focus:border-neutral-600 rounded-lg px-3 py-2 text-xs text-neutral-100 placeholder-neutral-600 outline-none transition-colors"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  confirmRebuild();
+                }
+                if (e.key === "Escape") setRebuildModalCardId(null);
+              }}
+            />
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setRebuildModalCardId(null)}
+                className="text-xs text-neutral-400 hover:text-neutral-100 px-3 py-1.5 rounded-lg border border-neutral-800 hover:border-neutral-700 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRebuild}
+                className="flex items-center gap-1.5 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-500 px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Rebuild
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

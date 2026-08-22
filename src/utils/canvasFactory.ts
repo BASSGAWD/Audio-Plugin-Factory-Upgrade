@@ -292,12 +292,46 @@ function stripHeavyBlobsForPersistence(plugin: AudioPlugin): AudioPlugin {
   };
 }
 
-/** Returns true on a successful write, false if localStorage rejected it
- *  (quota exceeded, unavailable, or the payload still didn't fit even after
- *  stripping heavy blobs) so callers can tell the user instead of the save
- *  failing invisibly. */
+/**
+ * A card's plugin with its buildReport dropped -- the secondary EVIDENCE
+ * detail (semantic checks, code-audit findings, the refinement trace,
+ * the deterministic fixes list, functionalFitness/engineeringChoice prose)
+ * that explains WHY a plugin scored what it did, as opposed to the plugin
+ * ITSELF (name, category, parameters with their live values, the actual
+ * DSP, its skin, and the top-level `quality` scores badge -- all untouched
+ * here). None of the dropped detail is needed to restore a working,
+ * playable card on reload; it only feeds the card's hover-info panel and
+ * the Studio's own evidence views, which degrade to "not available" for a
+ * pruned card exactly like they already do for any plugin with no
+ * buildReport at all (a pre-existing, already-handled case, not a new one
+ * this introduces).
+ */
+function toMinimalPersistedPlugin(plugin: AudioPlugin): AudioPlugin {
+  const stripped = stripHeavyBlobsForPersistence(plugin);
+  return { ...stripped, buildReport: undefined };
+}
+
+/**
+ * Returns true on a successful write, false if localStorage rejected it
+ * even after every fallback tier below (unavailable entirely, or the
+ * payload still didn't fit at its smallest) -- so callers can tell the
+ * user instead of the save failing invisibly.
+ *
+ * Two tiers, most-faithful first: (1) the full save, as before, and (2) a
+ * PRUNED save (every ready plugin's buildReport dropped via
+ * toMinimalPersistedPlugin) tried only if (1) throws -- e.g. a quota
+ * exceeded by many cards' accumulated evidence text. Without this, a
+ * single quota failure meant the ENTIRE save silently failed and the whole
+ * card list reverted to whatever was last written successfully on the
+ * next reload (the "cards keep erasing" failure mode `stripHeavyBlobsFor
+ * Persistence` above already exists to prevent for embedded images/IRs).
+ * This tier does the same thing one layer further out: the informational
+ * detail sheds under pressure so the CARDS themselves -- the thing "saving
+ * indefinitely" actually means to a user growing a large canvas over many
+ * sessions -- keep landing in storage rather than being lost outright.
+ */
 export function saveCanvasWorkspace(ws: CanvasWorkspace): boolean {
-  try {
+  const buildPayload = (minimal: boolean) => {
     // Building/queued cards persist without transient stage fields.
     const cards = ws.cards.map((c) => ({
       id: c.id,
@@ -305,20 +339,55 @@ export function saveCanvasWorkspace(ws: CanvasWorkspace): boolean {
       x: c.x,
       y: c.y,
       status: c.status === "building" ? "queued" : c.status,
-      plugin: c.status === "ready" && c.plugin ? stripHeavyBlobsForPersistence(c.plugin) : undefined,
+      plugin:
+        c.status === "ready" && c.plugin
+          ? minimal
+            ? toMinimalPersistedPlugin(c.plugin)
+            : stripHeavyBlobsForPersistence(c.plugin)
+          : undefined,
       minScore: c.minScore,
       versionsTried: c.versionsTried,
       error: c.error,
       createdAt: c.createdAt,
     }));
-    localStorage.setItem(CANVAS_STORAGE_KEY, JSON.stringify({ cards, view: ws.view }));
+    return JSON.stringify({ cards, view: ws.view });
+  };
+
+  try {
+    localStorage.setItem(CANVAS_STORAGE_KEY, buildPayload(false));
     return true;
-  } catch (err) {
-    // localStorage full or unavailable: the canvas keeps working in memory
-    // for this tab, but the caller should know the save didn't stick.
-    console.warn("Canvas workspace could not be persisted:", err);
-    return false;
+  } catch (fullErr) {
+    try {
+      localStorage.setItem(CANVAS_STORAGE_KEY, buildPayload(true));
+      console.warn(
+        "Canvas workspace exceeded storage quota at full fidelity -- saved in reduced form (per-card evidence detail dropped, cards themselves intact):",
+        fullErr
+      );
+      return true;
+    } catch (minimalErr) {
+      // localStorage full/unavailable even at minimum size: the canvas
+      // keeps working in memory for this tab, but the caller should know
+      // the save didn't stick at all.
+      console.warn("Canvas workspace could not be persisted even in reduced form:", minimalErr);
+      return false;
+    }
   }
+}
+
+/**
+ * Merges optional user-requested changes into a card's original prompt for
+ * a rebuild. A rebuild re-runs the FULL deterministic pipeline from a fresh
+ * prompt (spec -> build -> gate -> perfect) -- it isn't an incremental edit
+ * against the existing plugin, so any requested changes need to fold into
+ * one combined description rather than apply as a separate edit pass.
+ * Blank/whitespace-only changes return the original prompt completely
+ * unchanged -- "rebuild exactly as before" is a legitimate, common choice
+ * and must not append an empty parenthetical to every plain rebuild.
+ */
+export function mergeRebuildChanges(originalPrompt: string, changes: string): string {
+  const trimmed = changes.trim();
+  if (!trimmed) return originalPrompt;
+  return `${originalPrompt} (also: ${trimmed})`;
 }
 
 /** Free spot for a new card near the viewport center: march down-right in

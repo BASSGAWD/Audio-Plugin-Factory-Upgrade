@@ -44,7 +44,9 @@ export interface ResolvedSkinStyle {
   backgroundImage: string;
   backgroundSize: string;
   backgroundPosition: string;
-  boxShadow?: string;
+  /** Always defined now -- at minimum BEZEL_SHADOW's chassis groove, plus
+   *  whatever glowStyle adds on top. */
+  boxShadow: string;
   fontFamily: string;
 }
 
@@ -67,7 +69,7 @@ function hexToRgba(hex: string, alpha: number): string {
  * those attributes was rendering with no glow treatment at all, contrary to
  * what its own theme declared.
  */
-function resolveGlowBoxShadow(customSkin: CustomSkin | undefined): string | undefined {
+export function resolveGlowBoxShadow(customSkin: CustomSkin | undefined): string | undefined {
   const accent = customSkin?.accentColor || "#10b981";
   switch (customSkin?.glowStyle) {
     case "neon":
@@ -89,14 +91,25 @@ function resolveGlowBoxShadow(customSkin: CustomSkin | undefined): string | unde
 }
 
 /**
+ * Every faceplate gets this, unconditionally, on top of whatever glow it
+ * has (or doesn't) -- a subtle inset groove reading as "recessed into a
+ * housing" rather than "a flat card floating on the page". This is the
+ * chassis-identity fix: before it, a plugin with glowStyle "none" had
+ * literally zero shadow of any kind, indistinguishable from a plain web
+ * div. Deliberately faint (this is a bezel, not a glow) so it never
+ * competes with the actual glow treatment stacked on top of it.
+ */
+const BEZEL_SHADOW = "inset 0 0 0 1px rgba(255,255,255,0.05), inset 0 0 16px rgba(0,0,0,0.35)";
+
+/**
  * Resolves a plugin's customSkin into a plain CSS style object. Always
  * fully-defaulted (never returns undefined fields except boxShadow) --
  * matching the artboard's own historical behavior of forcing a coherent dark
  * baseline (#111116 / #1f1f29 / #ffffff / Inter) even with no customSkin set
  * at all, so refactoring the artboard to call this helper is byte-for-byte
- * behavior-preserving there. boxShadow is the one genuinely optional field:
- * it stays undefined unless glowStyle resolves to a real treatment (see
- * resolveGlowBoxShadow).
+ * behavior-preserving there. boxShadow is now ALWAYS defined (at minimum,
+ * BEZEL_SHADOW's chassis groove) -- glowStyle only controls what's stacked
+ * ON TOP of that baseline, not whether a shadow exists at all.
  *
  * `bgOpacity` ("overlay alpha" per its own doc comment in types.ts) controls
  * how strongly a `bgImage` shows through, by layering a same-color scrim
@@ -124,7 +137,7 @@ export function resolveCustomSkinStyle(customSkin: CustomSkin | undefined): Reso
     backgroundImage,
     backgroundSize: "cover",
     backgroundPosition: "center",
-    boxShadow: resolveGlowBoxShadow(customSkin),
+    boxShadow: [resolveGlowBoxShadow(customSkin), BEZEL_SHADOW].filter(Boolean).join(", "),
     fontFamily: resolveSkinFontFamily(customSkin?.fontStyle),
   };
 }

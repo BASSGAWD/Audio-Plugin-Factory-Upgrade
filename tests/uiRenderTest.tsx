@@ -41,6 +41,16 @@ const html3 = renderToStaticMarkup(<GenerativeFaceplate plugin={distGate.plugin}
 check("aggressive -> stripes (rects)", (html3.match(/<rect/g) || []).length >= 5);
 check("different plugins -> different art", html1 !== html3);
 
+/* ---- Chassis details: corner screws + nameplate (the "this is hardware,  */
+/* not a web card" cue) and the real seeded material filter, both actually */
+/* present in the rendered markup, not just constructed and discarded.     */
+{
+  check("faceplate mounts a real material <filter> (feTurbulence/lighting, not just gradients)", html1.includes("<filter") && html1.includes("feTurbulence") && html1.includes("feDiffuseLighting") && html1.includes("feSpecularLighting"));
+  check("faceplate renders 4 corner screws", (html1.match(/rounded-full pointer-events-none/g) || []).length === 4);
+  check("faceplate renders its plugin's name as an engraved nameplate", html1.includes(gate.plugin.name));
+  check("different plugins -> different material filter ids (not the same recipe reused verbatim)", (html1.match(/id="material-[^"]+"/) || [])[0] !== (html3.match(/id="material-[^"]+"/) || [])[0]);
+}
+
 const off = renderToStaticMarkup(<RefineControl loops={0} onChange={() => {}} />);
 const on = renderToStaticMarkup(<RefineControl loops={4} onChange={() => {}} />);
 check("refine off: no number input", !off.includes("type=\"number\""));

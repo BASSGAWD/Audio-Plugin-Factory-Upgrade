@@ -221,6 +221,81 @@ function buildArtwork(plugin: AudioPlugin): Artwork {
   return { node, movers, elementRefs };
 }
 
+/** Corner screw rotation angles -- fixed, not seeded: a slightly-imperfect
+ *  "hand-tightened" look reads as authentic on every plugin without needing
+ *  its own RNG plumbing (screws don't need to vary meaningfully by plugin
+ *  identity the way the material/background art does). */
+const SCREW_ANGLES = [18, -22, 32, -12] as const;
+
+function ScrewHead({ corner, angle }: { corner: "tl" | "tr" | "bl" | "br"; angle: number }) {
+  const pos: React.CSSProperties =
+    corner === "tl" ? { top: 7, left: 7 } : corner === "tr" ? { top: 7, right: 7 } : corner === "bl" ? { bottom: 7, left: 7 } : { bottom: 7, right: 7 };
+  return (
+    <div
+      aria-hidden="true"
+      className="absolute rounded-full pointer-events-none"
+      style={{
+        ...pos,
+        width: 9,
+        height: 9,
+        background: "radial-gradient(circle at 35% 30%, #86868f, #303036 65%, #131315)",
+        boxShadow: "0 1px 2px rgba(0,0,0,0.65), inset 0 0.5px 1px rgba(255,255,255,0.18)",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: "18%",
+          width: "64%",
+          height: 1.1,
+          background: "rgba(0,0,0,0.6)",
+          borderRadius: 1,
+          transform: `translateY(-50%) rotate(${angle}deg)`,
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * Four corner screws + a small engraved nameplate -- the "this is a piece
+ * of hardware, not a web card" cue virtually every skeuomorphic plugin
+ * faceplate leans on (Neural DSP, Waves, and every rack/pedal emulation
+ * puts real or implied fasteners at the corners and a brand/model plate
+ * somewhere on the unit). Purely decorative -- pointer-events: none
+ * throughout, so it never intercepts clicks meant for the actual controls
+ * rendered on top of it.
+ */
+function ChassisDetails({ plugin, fontFamily, textColor }: { plugin: AudioPlugin; fontFamily: string; textColor: string }) {
+  return (
+    <>
+      <ScrewHead corner="tl" angle={SCREW_ANGLES[0]} />
+      <ScrewHead corner="tr" angle={SCREW_ANGLES[1]} />
+      <ScrewHead corner="bl" angle={SCREW_ANGLES[2]} />
+      <ScrewHead corner="br" angle={SCREW_ANGLES[3]} />
+      <div
+        aria-hidden="true"
+        className="absolute pointer-events-none select-none"
+        style={{
+          bottom: 9,
+          right: 22,
+          fontSize: 8.5,
+          fontWeight: 700,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+          color: textColor,
+          opacity: 0.4,
+          fontFamily,
+          textShadow: "0 1px 0 rgba(255,255,255,0.07), 0 -1px 0 rgba(0,0,0,0.55)",
+        }}
+      >
+        {plugin.name}
+      </div>
+    </>
+  );
+}
+
 export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, className = "", style, children }: GenerativeFaceplateProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   // borderColor is read inside buildArtwork() (used for some stroke colors)
@@ -302,6 +377,7 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
           background: `radial-gradient(ellipse at 50% 115%, ${accent}55 0%, ${accent}18 40%, transparent 65%)`,
         }}
       />
+      <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} />
       <MaterialContext.Provider value={materialCtx}>
         <div className="relative">{children}</div>
       </MaterialContext.Provider>

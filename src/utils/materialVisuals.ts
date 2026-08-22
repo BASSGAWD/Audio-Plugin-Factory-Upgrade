@@ -77,22 +77,36 @@ interface MaterialRecipe {
   baseFrequency: string;
   numOctaves: number;
   /** feDiffuseLighting/feSpecularLighting surfaceScale -- how deep the
-   *  embossed relief reads. Metal/wood want visible texture; plastic wants
-   *  it nearly flat. */
+   *  embossed relief reads. Raised substantially from this recipe's first
+   *  version: at the original values (well under 2.5) the relief was too
+   *  faint to read as a material at normal viewing size -- confirmed by
+   *  actually looking at a rendered knob, not just checking the filter
+   *  compiled. Metal/wood want strong, unmistakable texture; plastic wants
+   *  a lighter touch but still visibly non-flat. */
   surfaceScale: number;
-  litColor: string;
   specColor: string;
   specConstant: number;
   specExponent: number;
 }
 
 const MATERIAL_RECIPES: Record<MaterialId, MaterialRecipe> = {
-  "brushed-metal": { baseFrequency: "0.9 0.02", numOctaves: 2, surfaceScale: 2.2, litColor: "#4a4a54", specColor: "#ffffff", specConstant: 0.9, specExponent: 14 },
-  "anodized-aluminum": { baseFrequency: "0.02 0.02", numOctaves: 3, surfaceScale: 1.1, litColor: "#5b6b82", specColor: "#eaf2ff", specConstant: 0.85, specExponent: 18 },
-  "wood-panel": { baseFrequency: "0.015 0.15", numOctaves: 4, surfaceScale: 1.8, litColor: "#6b3f22", specColor: "#ffdca8", specConstant: 0.35, specExponent: 8 },
-  "matte-plastic": { baseFrequency: "0.06 0.06", numOctaves: 2, surfaceScale: 0.6, litColor: "#3a3a3f", specColor: "#ffffff", specConstant: 0.25, specExponent: 6 },
-  "vintage-cream": { baseFrequency: "0.04 0.04", numOctaves: 3, surfaceScale: 0.9, litColor: "#c9b789", specColor: "#fff6df", specConstant: 0.4, specExponent: 8 },
+  "brushed-metal": { baseFrequency: "0.9 0.02", numOctaves: 2, surfaceScale: 6, specColor: "#ffffff", specConstant: 1.1, specExponent: 16 },
+  "anodized-aluminum": { baseFrequency: "0.02 0.02", numOctaves: 3, surfaceScale: 3.2, specColor: "#eaf2ff", specConstant: 1, specExponent: 20 },
+  "wood-panel": { baseFrequency: "0.015 0.15", numOctaves: 4, surfaceScale: 4.5, specColor: "#ffdca8", specConstant: 0.5, specExponent: 9 },
+  "matte-plastic": { baseFrequency: "0.06 0.06", numOctaves: 2, surfaceScale: 1.8, specColor: "#ffffff", specConstant: 0.35, specExponent: 7 },
+  "vintage-cream": { baseFrequency: "0.04 0.04", numOctaves: 3, surfaceScale: 2.4, specColor: "#fff6df", specConstant: 0.5, specExponent: 9 },
 };
+
+/** Contrast boost applied to the turbulence's alpha channel (the height map
+ *  feDiffuseLighting/feSpecularLighting actually read) before lighting.
+ *  feTurbulence's raw noise clusters too tightly around mid-value to
+ *  produce a strong directional gradient on its own -- surfaceScale alone
+ *  scales an already-shallow height map, it can't manufacture contrast that
+ *  isn't there. This linear stretch (slope*x + intercept, midpoint-anchored
+ *  at 0.5) is what actually makes the relief read as real material instead
+ *  of a faint smudge. */
+const CONTRAST_SLOPE = 2.1;
+const CONTRAST_INTERCEPT = -0.55;
 
 /** Fixed light direction (upper-left, matching KnobControl's existing
  *  radialGradient bias toward cx=38% cy=30%) shared by every material so
@@ -113,20 +127,26 @@ export function materialFilterId(materialId: MaterialId, seedString: string): st
 /**
  * The reusable <filter> definition for one plugin's resolved material.
  * Mount this ONCE per rendered plugin (inside an existing <defs> block --
- * GenerativeFaceplate.tsx's SVG background already has one; the Pro
- * Designer artboard needs its own, see MaterialDefs below) -- every control
- * on that plugin references the same filter id, so the def is not
+ * GenerativeFaceplate.tsx's SVG background already has one) -- every
+ * control on that plugin references the same filter id, so the def is not
  * duplicated per-knob.
  *
- * Chain: feTurbulence generates seeded grain -> feDiffuseLighting +
- * feSpecularLighting emboss it into a real lit relief (not a flat gradient)
- * -> each is feComposite'd with operator="in" against SourceGraphic so the
- * lit texture is clipped to whatever shape the filter is applied to (a
- * circle, a rounded rect) instead of painting a rectangular noise field ->
- * feMerge layers the original shape fill under the lit texture and the
- * specular highlight on top, so accent-colored fills/gradients underneath
- * still show through the material, tinted and relieved rather than
- * replaced.
+ * Chain: feTurbulence generates seeded grain -> feComponentTransfer boosts
+ * its alpha contrast (raw turbulence is too flat for surfaceScale alone to
+ * make a strong relief out of) -> feDiffuseLighting (lit white, i.e. a pure
+ * grayscale AO/relief map, NOT a per-material color) + feSpecularLighting
+ * (lit the material's own specular tint) emboss it into real 3D relief ->
+ * each is feComposite'd with operator="in" against SourceGraphic so the
+ * relief is clipped to whatever shape the filter is applied to (a circle, a
+ * rounded rect) instead of painting a rectangular noise field -> the
+ * grayscale relief is MULTIPLY-blended onto SourceGraphic (darkens/lightens
+ * the knob's own accent-tinted gradient by the bump map, the way real
+ * anodized aluminum keeps its color while showing brushed texture) and the
+ * specular highlight is SCREEN-blended on top (a bright sheen that doesn't
+ * blacken anything under it). This -- not the plain feMerge stack this
+ * recipe started with -- is what keeps a plugin's own accent color/identity
+ * visible THROUGH the material instead of the material opaquely replacing
+ * it with a fixed generic color.
  */
 export function materialFilterDefs(materialId: MaterialId, seedString: string): React.ReactElement {
   const id = materialFilterId(materialId, seedString);
@@ -143,14 +163,19 @@ export function materialFilterDefs(materialId: MaterialId, seedString: string): 
       result: "noise",
     }),
     React.createElement(
+      "feComponentTransfer",
+      { in: "noise", result: "noiseContrast" },
+      React.createElement("feFuncA", { type: "linear", slope: CONTRAST_SLOPE, intercept: CONTRAST_INTERCEPT })
+    ),
+    React.createElement(
       "feDiffuseLighting",
-      { in: "noise", surfaceScale: r.surfaceScale, diffuseConstant: 1, lightingColor: r.litColor, result: "diffuse" },
+      { in: "noiseContrast", surfaceScale: r.surfaceScale, diffuseConstant: 1, lightingColor: "#ffffff", result: "diffuse" },
       React.createElement("feDistantLight", { azimuth: LIGHT_AZIMUTH, elevation: LIGHT_ELEVATION })
     ),
     React.createElement(
       "feSpecularLighting",
       {
-        in: "noise",
+        in: "noiseContrast",
         surfaceScale: r.surfaceScale,
         specularConstant: r.specConstant,
         specularExponent: r.specExponent,
@@ -159,15 +184,10 @@ export function materialFilterDefs(materialId: MaterialId, seedString: string): 
       },
       React.createElement("feDistantLight", { azimuth: LIGHT_AZIMUTH, elevation: LIGHT_ELEVATION })
     ),
-    React.createElement("feComposite", { in: "diffuse", in2: "SourceGraphic", operator: "in", result: "litClipped" }),
+    React.createElement("feComposite", { in: "diffuse", in2: "SourceGraphic", operator: "in", result: "diffuseClipped" }),
     React.createElement("feComposite", { in: "spec", in2: "SourceGraphic", operator: "in", result: "specClipped" }),
-    React.createElement(
-      "feMerge",
-      null,
-      React.createElement("feMergeNode", { in: "SourceGraphic" }),
-      React.createElement("feMergeNode", { in: "litClipped" }),
-      React.createElement("feMergeNode", { in: "specClipped" })
-    )
+    React.createElement("feBlend", { in: "SourceGraphic", in2: "diffuseClipped", mode: "multiply", result: "shaded" }),
+    React.createElement("feBlend", { in: "shaded", in2: "specClipped", mode: "screen" })
   );
 }
 
@@ -188,8 +208,9 @@ export function materialTextureDataUri(materialId: MaterialId, seedString: strin
   const seedNum = hashString(seedString) % 5000;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">` +
-    `<filter id="t"><feTurbulence type="fractalNoise" baseFrequency="${r.baseFrequency}" numOctaves="${r.numOctaves}" seed="${seedNum}"/>` +
-    `<feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.55 0"/></filter>` +
+    `<filter id="t"><feTurbulence type="fractalNoise" baseFrequency="${r.baseFrequency}" numOctaves="${r.numOctaves}" seed="${seedNum}" result="n"/>` +
+    `<feComponentTransfer in="n" result="nc"><feFuncA type="linear" slope="${CONTRAST_SLOPE}" intercept="${CONTRAST_INTERCEPT}"/></feComponentTransfer>` +
+    `<feColorMatrix in="nc" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.85 0"/></filter>` +
     `<rect width="64" height="64" filter="url(#t)"/></svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }

@@ -302,14 +302,22 @@ const P = (id: string, controlType?: PluginParameter["controlType"]): PluginPara
 {
   const skinWith = (glowStyle: string) => resolveCustomSkinStyle({ glowStyle: glowStyle as any, accentColor: "#f97316" });
 
-  check("resolveCustomSkinStyle: glowStyle 'none' -> no boxShadow", skinWith("none").boxShadow === undefined);
-  check("resolveCustomSkinStyle: glowStyle 'neon' -> real boxShadow", skinWith("neon").boxShadow !== undefined);
+  // boxShadow is now ALWAYS defined -- every faceplate gets a baseline
+  // chassis bezel groove even with glowStyle "none" (previously: literally
+  // no shadow at all, indistinguishable from a flat web div). "none" must
+  // still be visually LIGHTER than a real glow -- just the bezel, nothing
+  // stacked on top of it.
+  const noneShadow = skinWith("none").boxShadow;
+  const neonShadow = skinWith("neon").boxShadow;
+  check("resolveCustomSkinStyle: glowStyle 'none' -> still has the chassis bezel (not literally no shadow)", noneShadow.length > 0 && !noneShadow.includes("30px"));
+  check("resolveCustomSkinStyle: glowStyle 'neon' -> real glow ON TOP OF the same bezel, strictly longer", neonShadow.includes("30px") && neonShadow.length > noneShadow.length);
   // The actual regression this session found and fixed: these 3 used to
-  // silently resolve to undefined even though 5 of ATTRIBUTE_THEMES' 8
-  // entries assign one of them. A revert of the fix would fail these.
-  check("resolveCustomSkinStyle: glowStyle 'vintage' -> real boxShadow (was silently dropped before this fix)", skinWith("vintage").boxShadow !== undefined);
-  check("resolveCustomSkinStyle: glowStyle 'flat' -> real boxShadow (was silently dropped before this fix)", skinWith("flat").boxShadow !== undefined);
-  check("resolveCustomSkinStyle: glowStyle 'shadow' -> real boxShadow (was silently dropped before this fix)", skinWith("shadow").boxShadow !== undefined);
+  // silently resolve to undefined (or, now, JUST the bare bezel) even
+  // though 5 of ATTRIBUTE_THEMES' 8 entries assign one of them. A revert of
+  // the fix would make these collapse back to noneShadow's length.
+  check("resolveCustomSkinStyle: glowStyle 'vintage' -> real glow beyond the bare bezel (was silently dropped before this fix)", skinWith("vintage").boxShadow.length > noneShadow.length);
+  check("resolveCustomSkinStyle: glowStyle 'flat' -> real glow beyond the bare bezel (was silently dropped before this fix)", skinWith("flat").boxShadow.length > noneShadow.length);
+  check("resolveCustomSkinStyle: glowStyle 'shadow' -> real glow beyond the bare bezel (was silently dropped before this fix)", skinWith("shadow").boxShadow.length > noneShadow.length);
 
   // Each of the 4 non-"none" treatments must be genuinely distinct -- not
   // 4 names collapsing onto one identical CSS value.

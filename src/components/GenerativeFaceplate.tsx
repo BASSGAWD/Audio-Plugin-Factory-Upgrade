@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AudioPlugin } from "../types";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
 import { resolveMaterial, materialFilterDefs, MaterialContext } from "../utils/materialVisuals";
+import { buildPluginManual, hasSeenGuide, markGuideSeen, ManualContext } from "../utils/featureManifest";
 
 /**
  * Interactive generative faceplate: every plugin gets a UNIQUE, procedurally
@@ -360,6 +361,34 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
     () => ({ materialId: resolveMaterial(plugin), seedString: pluginSeedString(plugin) }),
     [plugin.name, plugin.category, plugin.parameters.length, plugin.buildReport?.attributes]
   );
+
+  // Per-plugin manual + first-launch guide mode -- resolved once per plugin
+  // (buildPluginManual is pure/cheap) and provided the same way materialCtx
+  // is: computed here, consumed via useContext by PluginControl.tsx's
+  // individual controls, so neither this file nor its callers need new
+  // prop-drilling.
+  const manualEntries = useMemo(() => buildPluginManual(plugin.parameters, plugin.family), [plugin.parameters, plugin.family]);
+  const [guideActive, setGuideActive] = useState(() => !hasSeenGuide(plugin.id));
+  const [dismissedParamIds, setDismissedParamIds] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    // A different plugin loaded into the same faceplate instance -- guide
+    // state is per-plugin-id, re-evaluate rather than carry over stale
+    // dismissals from whatever was here before.
+    setGuideActive(!hasSeenGuide(plugin.id));
+    setDismissedParamIds(new Set());
+  }, [plugin.id]);
+  const dismissGuide = (paramId: string) => setDismissedParamIds((prev) => new Set(prev).add(paramId));
+  const dismissAllGuide = () => {
+    markGuideSeen(plugin.id);
+    setGuideActive(false);
+  };
+  const manualCtx = useMemo(
+    () => ({ entries: manualEntries, guideActive, dismissedParamIds, dismissGuide }),
+    [manualEntries, guideActive, dismissedParamIds]
+  );
+  const anyGuideBadgeShowing =
+    guideActive &&
+    manualEntries.some((e) => (e.tier === "required" || e.tier === "expected") && !dismissedParamIds.has(e.paramId));
   // The plugin's own configured skin -- background, border, font, static
   // glow. Unconditional (no theme gate the way the Pro artboard preview has
   // one): this is "the plugin" everywhere outside that preview, so whatever
@@ -429,7 +458,20 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
       <TopRail />
       <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} />
       <MaterialContext.Provider value={materialCtx}>
-        <div className="relative">{children}</div>
+        <ManualContext.Provider value={manualCtx}>
+          <div className="relative">{children}</div>
+          {anyGuideBadgeShowing && (
+            <button
+              type="button"
+              onClick={dismissAllGuide}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="absolute bottom-2 right-2 z-10 text-[9px] font-bold uppercase tracking-wide text-neutral-950 bg-white/90 hover:bg-white px-2 py-1 rounded-full shadow-md transition-colors cursor-pointer"
+              title="Hide the first-time control tips for this plugin"
+            >
+              Got it
+            </button>
+          )}
+        </ManualContext.Provider>
       </MaterialContext.Provider>
     </div>
   );

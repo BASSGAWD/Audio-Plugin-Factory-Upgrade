@@ -87,6 +87,14 @@ export interface AudioPlugin {
    *  by the user via the archetype picker in the Pro UI Designer. */
   uiArchetype?: string;
 
+  /** The PluginFamily (pluginSpec.ts) this plugin was classified/built as,
+   *  stamped by runQualityGate at build time. Plain string (not the
+   *  PluginFamily literal union) so types.ts doesn't import pluginSpec.ts.
+   *  Lets anything working with an already-built plugin -- the
+   *  auto-generated manual, in-plugin tooltips, guide-mode badges -- resolve
+   *  FEATURE_MANIFEST entries without re-inferring the family from scratch. */
+  family?: string;
+
   // Overall faceplate skin configuration properties
   customSkin?: {
     bgImage?: string; // Base64 dataURL or background image URL

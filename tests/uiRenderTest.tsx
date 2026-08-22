@@ -5,8 +5,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import GenerativeFaceplate, { evaluateMover } from "../src/components/GenerativeFaceplate";
 import RefineControl from "../src/components/RefineControl";
 import { CustomKnob } from "../src/components/UIDesigner";
+import { PluginManual, PluginManualContent } from "../src/components/PluginManual";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { runQualityGate } from "../src/utils/qualityGate";
+import { buildPluginManual } from "../src/utils/featureManifest";
 import { PluginParameter } from "../src/types";
 
 const b = buildOfflinePlugin("make a dreamy shimmer reverb");
@@ -51,6 +53,28 @@ check("different plugins -> different art", html1 !== html3);
   check("different plugins -> different material filter ids (not the same recipe reused verbatim)", (html1.match(/id="material-[^"]+"/) || [])[0] !== (html3.match(/id="material-[^"]+"/) || [])[0]);
   check("faceplate silhouette is chamfered (clip-path polygon), not a plain rectangle", html1.includes("clip-path") && html1.includes("polygon("));
   check("faceplate renders a top rail/fascia band with vent holes", (html1.match(/border-radius:50%/g) || []).length >= 5);
+}
+
+/* ---- PluginManual: the auto-generated per-plugin manual actually renders */
+/* real per-control purpose text from FEATURE_MANIFEST -- not placeholder */
+/* copy, and not just constructed and discarded.                          */
+{
+  const manualEntries = buildPluginManual(gate.plugin.parameters, gate.plugin.family);
+  const realEntry = manualEntries.find((e) => e.tier !== "custom");
+  const contentHtml = renderToStaticMarkup(<PluginManualContent plugin={gate.plugin} />);
+  check("PluginManualContent: renders the plugin's own name and category", contentHtml.includes(gate.plugin.name) && contentHtml.includes(gate.plugin.category));
+  check(
+    "PluginManualContent: renders a REAL manifest purpose sentence, not placeholder text",
+    !!realEntry && contentHtml.includes(realEntry.purpose),
+    realEntry?.purpose
+  );
+
+  const closedHtml = renderToStaticMarkup(<PluginManual plugin={gate.plugin} isOpen={false} onClose={() => {}} />);
+  check("PluginManual: renders nothing while closed", closedHtml === "");
+  const openHtml = renderToStaticMarkup(<PluginManual plugin={gate.plugin} isOpen={true} onClose={() => {}} />);
+  check("PluginManual: renders the modal chrome + content while open", openHtml.includes('role="dialog"') && !!realEntry && openHtml.includes(realEntry.purpose));
+  const noPluginHtml = renderToStaticMarkup(<PluginManual plugin={undefined} isOpen={true} onClose={() => {}} />);
+  check("PluginManual: no plugin -> renders nothing rather than crashing", noPluginHtml === "");
 }
 
 const off = renderToStaticMarkup(<RefineControl loops={0} onChange={() => {}} />);

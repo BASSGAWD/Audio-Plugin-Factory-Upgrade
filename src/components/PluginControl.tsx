@@ -5,6 +5,7 @@ import { applyFineAdjust, wheelStepDelta, wheelDirection, clampToRange } from ".
 import { METER_BALLISTICS, MeterBallistics, ballisticsStep } from "../utils/uiRenderPatterns";
 import { useNonPassiveWheel } from "../hooks/useNonPassiveWheel";
 import { MaterialContext, materialFilterId, materialTextureDataUri } from "../utils/materialVisuals";
+import { ManualContext } from "../utils/featureManifest";
 
 /**
  * Playback-time control rendering shared by Simple Mode. Mirrors the visual
@@ -797,35 +798,72 @@ function SelectControl({ param, onChange }: ControlProps) {
   );
 }
 
-/** Dispatches a single parameter to its right-shaped playback control. */
+/** Dispatches a single parameter to its right-shaped playback control. Also
+ *  where "in-plugin instructions" and first-launch guide badges attach --
+ *  ONE place, so every control kind gets both without touching Knob/Slider/
+ *  Toggle/Meter/etc. individually. */
 export const PluginControl: React.FC<ControlProps> = ({ param, allParams, onChange, analyserNode, isPlaying }) => {
-  switch (param.controlType) {
-    case "knob":
-      return <KnobControl param={param} allParams={allParams} onChange={onChange} />;
-    case "toggle":
-      return <ToggleControl param={param} allParams={allParams} onChange={onChange} />;
-    case "meter":
-      return <MeterControl param={param} allParams={allParams} onChange={onChange} analyserNode={analyserNode} isPlaying={isPlaying} />;
-    case "pad":
-      return <PadControl param={param} allParams={allParams} onChange={onChange} />;
-    case "amp":
-      return <AmpHeadControl param={param} allParams={allParams} onChange={onChange} />;
-    case "cab":
-      return <CabinetControl param={param} allParams={allParams} onChange={onChange} />;
-    case "mic":
-    case "mic_stand":
-      return <MicPositionControl param={param} allParams={allParams} onChange={onChange} />;
-    case "eq":
-      return <EqCurveControl param={param} allParams={allParams} onChange={onChange} />;
-    case "waveform":
-      return <WaveformControl param={param} allParams={allParams} onChange={onChange} />;
-    case "label":
-      return <div className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wide">{param.customText || param.name}</div>;
-    case "select":
-      return <SelectControl param={param} allParams={allParams} onChange={onChange} />;
-    default:
-      return <SliderControl param={param} allParams={allParams} onChange={onChange} />;
-  }
+  // Read unconditionally, before any early return below -- hooks must run
+  // in the same order on every render regardless of which branch a given
+  // parameter's controlType takes (Rules of Hooks).
+  const { entries, guideActive, dismissedParamIds, dismissGuide } = useContext(ManualContext);
+
+  const rendered = (() => {
+    switch (param.controlType) {
+      case "knob":
+        return <KnobControl param={param} allParams={allParams} onChange={onChange} />;
+      case "toggle":
+        return <ToggleControl param={param} allParams={allParams} onChange={onChange} />;
+      case "meter":
+        return <MeterControl param={param} allParams={allParams} onChange={onChange} analyserNode={analyserNode} isPlaying={isPlaying} />;
+      case "pad":
+        return <PadControl param={param} allParams={allParams} onChange={onChange} />;
+      case "amp":
+        return <AmpHeadControl param={param} allParams={allParams} onChange={onChange} />;
+      case "cab":
+        return <CabinetControl param={param} allParams={allParams} onChange={onChange} />;
+      case "mic":
+      case "mic_stand":
+        return <MicPositionControl param={param} allParams={allParams} onChange={onChange} />;
+      case "eq":
+        return <EqCurveControl param={param} allParams={allParams} onChange={onChange} />;
+      case "waveform":
+        return <WaveformControl param={param} allParams={allParams} onChange={onChange} />;
+      case "label":
+        return <div className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wide">{param.customText || param.name}</div>;
+      case "select":
+        return <SelectControl param={param} allParams={allParams} onChange={onChange} />;
+      default:
+        return <SliderControl param={param} allParams={allParams} onChange={onChange} />;
+    }
+  })();
+
+  // Labels are decorative dividers, not real controls -- no manual entry,
+  // no tooltip, no guide badge makes sense on one.
+  if (param.controlType === "label") return rendered;
+
+  const entry = entries.find((e) => e.paramId === param.id);
+  const showGuideBadge =
+    guideActive && !!entry && (entry.tier === "required" || entry.tier === "expected") && !dismissedParamIds.has(param.id);
+
+  return (
+    <div className="relative" title={entry?.purpose}>
+      {rendered}
+      {showGuideBadge && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            dismissGuide(param.id);
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-orange-500 ring-2 ring-neutral-950 animate-pulse cursor-pointer z-10"
+          title={entry?.purpose}
+          aria-label={`Tip for ${entry?.name}: ${entry?.purpose}`}
+        />
+      )}
+    </div>
+  );
 };
 
 /**

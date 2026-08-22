@@ -31,6 +31,7 @@
  * are enforced by two different mechanisms pulling in the same direction.
  */
 
+import React from "react";
 import { PluginParameter } from "../types";
 import { PluginFamily } from "./pluginSpec";
 
@@ -317,3 +318,118 @@ REQUIRED (without these it is not honestly a ${family}):
 EXPECTED (their absence is exactly what makes a plugin feel minimal):
   - ${expected}${advanced ? `\nADVANCED (differentiators — include what fits the request):\n  - ${advanced}` : ""}`;
 }
+
+/* ------------------------------------------------------------------ */
+/* Per-plugin manual + first-launch guide mode                        */
+/*                                                                     */
+/* The manifest above already carries everything a human-readable      */
+/* manual needs (every FeatureSpec's `purpose` was written exactly for  */
+/* this) -- it just never had a consumer that reads it for a person     */
+/* instead of an LLM prompt. This section is that consumer: resolve a   */
+/* plugin's ACTUAL live parameters back to their manifest entries (or a */
+/* safe generic fallback for a custom/model-added control the manifest  */
+/* doesn't know about), and track which plugins a user has already seen */
+/* the first-launch guide badges for.                                  */
+/* ------------------------------------------------------------------ */
+
+export interface ManualEntry {
+  /** The live parameter's own id -- may differ in exact spelling from the
+   *  manifest's canonical id (e.g. a model wrote "atk" for attack); this is
+   *  what a caller matches a control instance back to its entry by. */
+  paramId: string;
+  name: string;
+  tier: FeatureTier | "custom";
+  purpose: string;
+}
+
+const TIER_ORDER: Record<ManualEntry["tier"], number> = { required: 0, expected: 1, advanced: 2, custom: 3 };
+
+/**
+ * Resolves a plugin's actual parameters back to the manifest's `purpose`
+ * text (the inverse direction of `findFeature`, which goes spec -> matching
+ * parameter). A parameter that matches no manifest entry -- a custom or
+ * model-added control the family vocabulary doesn't name -- still gets a
+ * real entry with a generic fallback purpose, tier "custom": nothing is
+ * ever silently left out of the manual just because it wasn't anticipated.
+ * Sorted required -> expected -> advanced -> custom, matching the same
+ * priority order the manifest itself communicates.
+ */
+export function buildPluginManual(parameters: PluginParameter[], family: string | null | undefined): ManualEntry[] {
+  const manifest = (family && FEATURE_MANIFEST[family as PluginFamily]) || [];
+  const entries: ManualEntry[] = parameters
+    .filter((p) => p.controlType !== "label")
+    .map((p) => {
+      const spec = manifest.find((s) => s.match.test(p.id) || s.match.test(p.name));
+      return {
+        paramId: p.id,
+        name: p.name,
+        tier: spec?.tier ?? "custom",
+        purpose: spec?.purpose ?? `Adjusts ${p.name.toLowerCase()}.`,
+      };
+    });
+  return entries.sort((a, b) => TIER_ORDER[a.tier] - TIER_ORDER[b.tier]);
+}
+
+/** Small, capped guide-dismissal ledger so "have I shown this plugin's
+ *  first-launch badges before" survives reloads without growing without
+ *  bound across a long-lived browser profile -- same shape and same
+ *  localStorage idiom canvasFactory.ts's CANVAS_STORAGE_KEY already uses. */
+const GUIDE_SEEN_KEY = "audio_factory_guide_seen_v1";
+const GUIDE_SEEN_CAP = 300;
+
+function readGuideSeen(): string[] {
+  try {
+    const raw = localStorage.getItem(GUIDE_SEEN_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Has this specific plugin's first-launch guide badges already been shown
+ *  (and dismissed, individually or via "Got it")? */
+export function hasSeenGuide(pluginId: string): boolean {
+  return readGuideSeen().includes(pluginId);
+}
+
+/** Records that this plugin's guide has been shown, so it never shows
+ *  again for THIS plugin id. Oldest entries drop once the ledger grows
+ *  past GUIDE_SEEN_CAP -- a hard cap on how much this can ever grow is
+ *  more important than remembering every plugin ever built. */
+export function markGuideSeen(pluginId: string): void {
+  try {
+    const seen = readGuideSeen();
+    if (seen.includes(pluginId)) return;
+    const next = [...seen, pluginId].slice(-GUIDE_SEEN_CAP);
+    localStorage.setItem(GUIDE_SEEN_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage full/unavailable: the guide simply re-shows next
+    // session for this plugin -- a minor repeat, not a functional break.
+  }
+}
+
+/**
+ * What PluginControl.tsx reads to enrich a control's tooltip with its
+ * manifest purpose, and to know whether to show a first-launch guide badge
+ * on it. Provided once by GenerativeFaceplate.tsx (which already computes
+ * per-plugin context once for MaterialContext) and consumed via
+ * `useContext` by individual controls -- same "provide once, consume many"
+ * idiom already proven this session for MaterialContext
+ * (materialVisuals.ts), reused deliberately rather than reinvented.
+ * Defaulted to a fully inert value so a control rendered with no
+ * GenerativeFaceplate ancestor still works, just without a manual/guide.
+ */
+export const ManualContext = React.createContext<{
+  entries: ManualEntry[];
+  /** True until this plugin's guide has been permanently dismissed via
+   *  "Got it" (markGuideSeen) -- individually-dismissed badges (below)
+   *  don't flip this; only "Got it" persists across reloads. */
+  guideActive: boolean;
+  /** Param ids whose badge has been dismissed THIS session (read-clicked,
+   *  or cleared individually) -- session-only, not persisted; only "Got
+   *  it" (markGuideSeen) makes a dismissal permanent. */
+  dismissedParamIds: Set<string>;
+  dismissGuide: (paramId: string) => void;
+}>({ entries: [], guideActive: false, dismissedParamIds: new Set(), dismissGuide: () => {} });

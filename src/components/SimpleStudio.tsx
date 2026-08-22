@@ -14,6 +14,7 @@ import {
   Sparkles,
   Crosshair,
   X,
+  BookOpen,
 } from "lucide-react";
 import { AudioPlugin, ChatMessage, PluginParameter } from "../types";
 import type { ElementNote } from "../utils/editPass";
@@ -21,6 +22,7 @@ import Visualizer from "./Visualizer";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./BuildProgressBar";
+import { PluginManual } from "./PluginManual";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
 
 interface SimpleStudioProps {
@@ -229,6 +231,7 @@ export default function SimpleStudio({
 }: SimpleStudioProps) {
   const [input, setInput] = useState("");
   const [dockOpen, setDockOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
   // This plugin's actual configured skin -- resolved once so the card
   // header font and the faceplate's divider border read from the same
   // numbers as the faceplate itself, instead of each recomputing it.
@@ -586,6 +589,14 @@ export default function SimpleStudio({
                 </button>
               )}
               <button
+                onClick={() => setManualOpen(true)}
+                className="shrink-0 p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
+                title="Open this plugin's manual — every control, explained"
+                aria-label="Open plugin manual"
+              >
+                <BookOpen className="w-4 h-4" />
+              </button>
+              <button
                 onClick={downloadPluginFiles}
                 className="shrink-0 p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
                 title="Download the plugin code (JS, Faust, C++)"
@@ -849,6 +860,7 @@ export default function SimpleStudio({
           {composer}
         </div>
       )}
+      <PluginManual plugin={plugin} isOpen={manualOpen} onClose={() => setManualOpen(false)} />
     </div>
   );
 }

@@ -38,9 +38,11 @@ import {
   X,
   PanelRightClose,
   PanelRightOpen,
-  ImagePlus
+  ImagePlus,
+  BookOpen
 } from "lucide-react";
 import { AudioPlugin, PluginParameter } from "../types";
+import { PluginManualContent } from "./PluginManual";
 import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
 import { ArchetypeId, ARCHETYPE_LABELS, BUILTIN_ARCHETYPES, applyArchetype } from "../utils/guiArchetypes";
 import { KNOB_RECIPES, toCssKnobStyle, resolveKnobStyle, KnobRenderStyle } from "../utils/uiRenderPatterns";
@@ -817,7 +819,7 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
   // The three tool panels are mutually exclusive (only one can cover the
   // canvas at a time); the Inspector is independent because it is the
   // primary work surface and is meant to stay visible alongside them.
-  type PanelId = "tools" | "palette" | "templates";
+  type PanelId = "tools" | "palette" | "templates" | "manual";
   const [activePanel, setActivePanel] = useState<PanelId | null>(null);
   // Starts closed, matching activePanel -- it used to default open and eat
   // 320px of canvas on every load even with nothing selected. Selecting a
@@ -1437,6 +1439,7 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
             { id: "palette" as const, icon: Grid, label: "Add controls" },
             { id: "tools" as const, icon: Wrench, label: "Appearance & mode" },
             { id: "templates" as const, icon: Sparkles, label: "Templates & glossary" },
+            { id: "manual" as const, icon: BookOpen, label: "Manual — every control, explained" },
           ]).map(({ id, icon: Icon, label }) => (
             <button
               key={id}
@@ -4529,6 +4532,33 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
       </div>
 
       </div> {/* Close Bottom Drawer slide-out container */}
+
+        {/* MANUAL PANEL (rail: "manual") -- auto-generated from this
+            plugin's actual parameters via FEATURE_MANIFEST/buildPluginManual
+            (featureManifest.ts). Same panel-positioning idiom as the
+            Templates panel above; pure content reuse (PluginManualContent),
+            no modal chrome needed since this already IS a docked panel. */}
+        <div
+          className={`absolute bottom-0 left-0 right-0 z-40 bg-neutral-900/95 backdrop-blur-md p-4 border-t border-neutral-850 transition-all duration-300 ease-in-out flex flex-col gap-3.5 max-h-[420px] overflow-y-auto ${
+            activePanel === "manual" ? "translate-y-0 opacity-100 shadow-2xl pointer-events-auto" : "translate-y-full opacity-0 pointer-events-none"
+          }`}
+        >
+          <div className="flex items-center justify-between border-b border-neutral-800 pb-2 shrink-0">
+            <span className="text-[10px] font-mono font-bold text-neutral-450 uppercase tracking-widest flex items-center gap-1.5">
+              <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Manual</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setActivePanel(null)}
+              className="p-1 rounded transition text-neutral-500 hover:text-white"
+              title="Close panel"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <PluginManualContent plugin={plugin} />
+        </div>
       </div> {/* Close MAIN VIEWPORT BODY */}
     </div> {/* Close IMMERSIVE HOVER-CONTROLLED WORKSPACE CONTAINER */}
   </div>

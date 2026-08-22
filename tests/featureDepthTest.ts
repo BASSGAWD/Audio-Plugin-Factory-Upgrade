@@ -14,7 +14,7 @@
  * so missing a CORE control hurts more than missing a nice-to-have, and
  * padding a plugin with unrelated knobs must NOT raise the score.
  */
-import { measureFeatureDepth, formatManifestForPrompt, FEATURE_MANIFEST } from "../src/utils/featureManifest";
+import { measureFeatureDepth, formatManifestForPrompt, FEATURE_MANIFEST, buildPluginManual, hasSeenGuide, markGuideSeen } from "../src/utils/featureManifest";
 import { runQualityGate } from "../src/utils/qualityGate";
 import { DSP_RECIPES } from "../src/utils/dspRecipes";
 import { refinementScore } from "../src/utils/refinementLoop";
@@ -148,6 +148,52 @@ const P = (id: string, name = id): PluginParameter =>
   const brokenRich: AudioPlugin = { ...rich, dspFunction: "return 0;" };
   const gBroken = runQualityGate(brokenRich, { family: "dynamics", prompt: "compressor" });
   check("a BROKEN feature-rich build still loses to a correct thin one", refinementScore(gBroken) < refinementScore(gThin), `broken=${refinementScore(gBroken).toFixed(1)} thin=${refinementScore(gThin).toFixed(1)}`);
+}
+
+/* ---- 10. buildPluginManual: resolves live parameters back to the
+   manifest's real purpose text -- the auto-generated per-plugin manual and
+   in-plugin tooltips read straight off this. A parameter with no manifest
+   match must still get a real entry (a generic fallback purpose, tier
+   "custom") rather than being silently left off the manual. ---- */
+{
+  const manual = buildPluginManual([P("threshold"), P("ratio"), P("attack", "Attack"), P("weirdCustomKnob", "Weird Custom Knob")], "dynamics");
+  const threshold = manual.find((e) => e.paramId === "threshold");
+  const custom = manual.find((e) => e.paramId === "weirdCustomKnob");
+  check("buildPluginManual: a matched control gets the manifest's real purpose text", threshold?.tier === "required" && threshold.purpose.length > 20, threshold?.purpose);
+  check("buildPluginManual: an unmatched control is never silently omitted", !!custom, JSON.stringify(manual.map((e) => e.paramId)));
+  check("buildPluginManual: an unmatched control gets tier 'custom' + a generic fallback purpose", custom?.tier === "custom" && custom.purpose.length > 0, custom?.purpose);
+  const tierIndex = (t: string) => ["required", "expected", "advanced", "custom"].indexOf(t);
+  const sorted = manual.every((e, i) => i === 0 || tierIndex(manual[i - 1].tier) <= tierIndex(e.tier));
+  check("buildPluginManual: entries sorted required -> expected -> advanced -> custom", sorted, manual.map((e) => e.tier).join(","));
+
+  check("buildPluginManual: no family (null) still documents every control via the generic fallback", buildPluginManual([P("gain")], null).length === 1);
+}
+
+/* ---- 11. Guide-mode dismissal ledger: persists which plugins have already
+   shown their first-launch badges, capped so it can't grow without bound
+   across a long-lived browser profile. Same mocked-localStorage idiom
+   canvasFactoryTest.ts already uses for its own persistence checks. ---- */
+{
+  const store = new Map<string, string>();
+  (globalThis as any).localStorage = {
+    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+  };
+
+  check("hasSeenGuide: a never-seen plugin id is false", hasSeenGuide("plugin-never-seen") === false);
+  markGuideSeen("plugin-a");
+  check("markGuideSeen -> hasSeenGuide: round-trips true for that plugin id", hasSeenGuide("plugin-a") === true);
+  check("hasSeenGuide: a DIFFERENT plugin id is unaffected", hasSeenGuide("plugin-b") === false);
+
+  markGuideSeen("plugin-a"); // idempotent -- must not duplicate the entry
+  const raw1 = JSON.parse(store.get("audio_factory_guide_seen_v1")!);
+  check("markGuideSeen: marking an already-seen plugin again does not duplicate it", raw1.filter((id: string) => id === "plugin-a").length === 1, JSON.stringify(raw1));
+
+  for (let i = 0; i < 305; i++) markGuideSeen(`bulk-${i}`);
+  const raw2 = JSON.parse(store.get("audio_factory_guide_seen_v1")!);
+  check("markGuideSeen: the ledger is capped, not unbounded", raw2.length <= 300, `length=${raw2.length}`);
+  check("markGuideSeen: capping drops the OLDEST entries, keeping the newest", raw2.includes("bulk-304") && !raw2.includes("plugin-a"), `has bulk-304=${raw2.includes("bulk-304")} has plugin-a=${raw2.includes("plugin-a")}`);
 }
 
 console.log(failures === 0 ? "\nFEATURE DEPTH: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);

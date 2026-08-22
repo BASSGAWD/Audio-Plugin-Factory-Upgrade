@@ -3277,7 +3277,12 @@ export function runQualityGate(
     skeuomorphicFidelity: skeuomorphicFidelity ?? undefined,
   };
 
-  const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };
+  // Stamped so anything working with an already-built plugin later (the
+  // auto-generated manual, in-plugin tooltips, guide-mode badges) can
+  // resolve FEATURE_MANIFEST without re-inferring the family from scratch --
+  // every build path funnels through this one function, so this populates
+  // it everywhere at once.
+  const final: AudioPlugin = { ...polished, quality: scores, buildReport: report, family: opts.family ?? polished.family };
   return { plugin: final, scores, notes, report };
 }
 

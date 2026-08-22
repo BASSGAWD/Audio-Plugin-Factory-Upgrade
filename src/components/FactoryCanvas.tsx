@@ -17,6 +17,7 @@ import {
   Loader2,
   CheckCircle2,
   Guitar,
+  BookOpen,
 } from "lucide-react";
 import { AudioPlugin, PluginParameter } from "../types";
 import {
@@ -29,6 +30,7 @@ import {
 } from "../utils/canvasFactory";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
+import { PluginManual } from "./PluginManual";
 import { resolveSkinFontFamily } from "../utils/customSkin";
 
 /**
@@ -106,6 +108,7 @@ interface CardProps {
   onRebuild: () => void;
   onToggleAudition: () => void;
   onOpenInStudio: () => void;
+  onOpenManual: () => void;
   onParamChange: (paramId: string, value: number) => void;
 }
 
@@ -122,6 +125,7 @@ const CanvasPluginCard: React.FC<CardProps> = ({
   onRebuild,
   onToggleAudition,
   onOpenInStudio,
+  onOpenManual,
   onParamChange,
 }) => {
   // Replaces the old permanently-visible prompt/evidence text and the
@@ -407,6 +411,18 @@ const CanvasPluginCard: React.FC<CardProps> = ({
           {card.minScore !== undefined ? card.minScore : "—"}
         </span>
 
+        {plugin && (
+          <button
+            onClick={onOpenManual}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="shrink-0 p-1 rounded-md text-neutral-500 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
+            title="Open this plugin's manual — every control, explained"
+            aria-label="Open plugin manual"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+          </button>
+        )}
+
         <button
           onClick={onDelete}
           onPointerDown={(e) => e.stopPropagation()}
@@ -676,6 +692,9 @@ export default function FactoryCanvas({
     );
   };
 
+  /* ---- per-plugin manual: one shared modal instance, not one per card ---- */
+  const [manualCardId, setManualCardId] = useState<string | null>(null);
+
   /* ---- rebuild confirmation modal: "any changes you'd like made?" ---- */
   const [rebuildModalCardId, setRebuildModalCardId] = useState<string | null>(null);
   const [rebuildChangesText, setRebuildChangesText] = useState("");
@@ -906,6 +925,7 @@ export default function FactoryCanvas({
               onRebuild={() => openRebuildModal(card.id)}
               onToggleAudition={() => toggleAudition(card.id)}
               onOpenInStudio={() => card.plugin && onLoadInStudio(card.plugin)}
+              onOpenManual={() => setManualCardId(card.id)}
               onParamChange={(pid, v) => cardParamChange(card.id, pid, v)}
             />
           ))}
@@ -1003,6 +1023,12 @@ export default function FactoryCanvas({
           </p>
         </div>
       </div>
+
+      <PluginManual
+        plugin={cards.find((c) => c.id === manualCardId)?.plugin}
+        isOpen={!!manualCardId}
+        onClose={() => setManualCardId(null)}
+      />
 
       {/* Rebuild confirmation modal: re-running the full pipeline is a
           from-scratch build (not an incremental edit), so this is the

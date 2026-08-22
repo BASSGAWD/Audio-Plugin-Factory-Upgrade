@@ -49,6 +49,8 @@ check("different plugins -> different art", html1 !== html3);
   check("faceplate renders 4 corner screws", (html1.match(/rounded-full pointer-events-none/g) || []).length === 4);
   check("faceplate renders its plugin's name as an engraved nameplate", html1.includes(gate.plugin.name));
   check("different plugins -> different material filter ids (not the same recipe reused verbatim)", (html1.match(/id="material-[^"]+"/) || [])[0] !== (html3.match(/id="material-[^"]+"/) || [])[0]);
+  check("faceplate silhouette is chamfered (clip-path polygon), not a plain rectangle", html1.includes("clip-path") && html1.includes("polygon("));
+  check("faceplate renders a top rail/fascia band with vent holes", (html1.match(/border-radius:50%/g) || []).length >= 5);
 }
 
 const off = renderToStaticMarkup(<RefineControl loops={0} onChange={() => {}} />);

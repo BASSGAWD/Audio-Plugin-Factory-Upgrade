@@ -123,6 +123,14 @@ function KnobControl({ param, onChange }: ControlProps) {
   const grooveEnd = polarPoint(CX, CY, 25, valueAngle);
   const grooveStart = polarPoint(CX, CY, 9, valueAngle);
   const tipDot = polarPoint(CX, CY, 26, valueAngle);
+  // Rim bevel: a light arc where the (upper-left) light source would catch
+  // the ring's edge, a dark arc on the opposite side where it falls into
+  // its own shadow -- this is what actually reads as "a curved metal ring",
+  // as distinct from surface grain/texture (which the material filter
+  // already handles). A radial gradient alone is rotationally symmetric and
+  // can't produce this directional light/shadow split on its own.
+  const bevelHighlightPath = knobArcPath(CX, CY, 31, -110, 20);
+  const bevelShadowPath = knobArcPath(CX, CY, 31, 70, 200);
 
   // Tick ring: dim graduations, brightening up to the current value.
   const TICKS = 11;
@@ -187,8 +195,19 @@ function KnobControl({ param, onChange }: ControlProps) {
               <stop offset="100%" stopColor="#0c0c0e" />
             </radialGradient>
             <filter id={`sh-${uid}`} x="-40%" y="-40%" width="180%" height="180%">
-              <feDropShadow dx="0" dy="2.5" stdDeviation="2.5" floodColor="#000" floodOpacity="0.55" />
+              {/* Cast shadow onto the panel -- strengthened (from dy=2.5/
+                  stdDeviation=2.5) so the knob visibly sits ABOVE the
+                  faceplate instead of looking painted flush onto it. */}
+              <feDropShadow dx="0" dy="3.5" stdDeviation="3.2" floodColor="#000" floodOpacity="0.6" />
             </filter>
+            {/* Soft glossy highlight, screen-blended onto the cap so it
+                brightens the material underneath instead of flattening it
+                to solid white -- the "domed, catching the light" pop a
+                textured-but-flat disc doesn't have on its own. */}
+            <radialGradient id={`hl-${uid}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#ffffff" stopOpacity="0.6" />
+              <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+            </radialGradient>
           </defs>
 
           {/* Value track + glowing fill */}
@@ -211,10 +230,16 @@ function KnobControl({ param, onChange }: ControlProps) {
 
           {/* Rim + cap (with elevation shadow) */}
           <circle cx={CX} cy={CY} r="31" fill={`url(#rim-${uid})`} filter={`url(#sh-${uid})`} />
+          {/* Rim bevel: light/shadow arcs give the ring real curvature,
+              independent of the cap's own surface material. */}
+          <path d={bevelHighlightPath} fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1.8" strokeLinecap="round" />
+          <path d={bevelShadowPath} fill="none" stroke="rgba(0,0,0,0.5)" strokeWidth="1.8" strokeLinecap="round" />
           {/* Cap: real seeded material (grain + embossed lighting) painted
-              over the base gradient, replacing the old single static
-              highlight ellipse below with genuine per-material relief. */}
+              over the base gradient. */}
           <circle cx={CX} cy={CY} r="27" fill={`url(#cap-${uid})`} filter={matFilterUrl} />
+          {/* Glossy highlight on top of the material -- screen blend so it
+              pops without erasing the grain/relief underneath. */}
+          <ellipse cx="41" cy="35" rx="12" ry="8" fill={`url(#hl-${uid})`} style={{ mixBlendMode: "screen" }} />
 
           {/* Indicator: dark groove + bright line + accent tip */}
           <line x1={grooveStart.x} y1={grooveStart.y} x2={grooveEnd.x} y2={grooveEnd.y} stroke="#0a0a0c" strokeWidth="4.5" strokeLinecap="round" />

@@ -228,8 +228,11 @@ function buildArtwork(plugin: AudioPlugin): Artwork {
 const SCREW_ANGLES = [18, -22, 32, -12] as const;
 
 function ScrewHead({ corner, angle }: { corner: "tl" | "tr" | "bl" | "br"; angle: number }) {
+  // Inset far enough (14px) to clear CHASSIS_CHAMFER's corner cut (10px)
+  // with margin -- a screw sitting closer to the corner than the chamfer
+  // itself would get its own circle clipped by that cut.
   const pos: React.CSSProperties =
-    corner === "tl" ? { top: 7, left: 7 } : corner === "tr" ? { top: 7, right: 7 } : corner === "bl" ? { bottom: 7, left: 7 } : { bottom: 7, right: 7 };
+    corner === "tl" ? { top: 14, left: 14 } : corner === "tr" ? { top: 14, right: 14 } : corner === "bl" ? { bottom: 14, left: 14 } : { bottom: 14, right: 14 };
   return (
     <div
       aria-hidden="true"
@@ -258,6 +261,48 @@ function ScrewHead({ corner, angle }: { corner: "tl" | "tr" | "bl" | "br"; angle
   );
 }
 
+/** Corner-cut size (px) for the faceplate's own clip-path, below. Kept as a
+ *  named constant since ScrewHead/nameplate insets are sized to clear it
+ *  with margin -- if this changes, those need to grow with it. */
+const CHASSIS_CHAMFER = 10;
+
+/** Octagonal (corners chamfered) clip-path -- a plain rounded rectangle is
+ *  literally what every generic web card looks like; a milled/chamfered
+ *  panel silhouette is a recognizable, deliberate "this is a piece of
+ *  hardware" cue instead. Safe against clipping ancestors (unlike an
+ *  overflowing rack-ear decoration would be) because it only SHRINKS the
+ *  visible area -- it can never be clipped further away in a way that
+ *  loses more than intended. */
+const CHASSIS_CLIP = `polygon(${CHASSIS_CHAMFER}px 0, calc(100% - ${CHASSIS_CHAMFER}px) 0, 100% ${CHASSIS_CHAMFER}px, 100% calc(100% - ${CHASSIS_CHAMFER}px), calc(100% - ${CHASSIS_CHAMFER}px) 100%, ${CHASSIS_CHAMFER}px 100%, 0 calc(100% - ${CHASSIS_CHAMFER}px), 0 ${CHASSIS_CHAMFER}px)`;
+
+/** A thin fascia strip across the very top of the faceplate, with a row of
+ *  small vent-hole dots -- the "control panel"/rack-unit read a plain
+ *  rounded rectangle doesn't have on its own. Entirely within the
+ *  faceplate's existing bounds (no overflow), so it can't be clipped away
+ *  by a scrolling ancestor the way an overflowing rack-ear decoration
+ *  could be (FactoryCanvas.tsx's card body scrolls with overflow-hidden on
+ *  the x-axis -- confirmed earlier this session). */
+function TopRail() {
+  return (
+    <div
+      aria-hidden="true"
+      className="absolute inset-x-0 top-0 pointer-events-none"
+      style={{
+        height: 13,
+        background: "linear-gradient(180deg, rgba(0,0,0,0.34), rgba(0,0,0,0.04))",
+        borderBottom: "1px solid rgba(0,0,0,0.35)",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)",
+      }}
+    >
+      <div className="absolute flex gap-1" style={{ top: 5, left: "50%", transform: "translateX(-50%)" }}>
+        {[0, 1, 2, 3, 4].map((i) => (
+          <div key={i} style={{ width: 2.5, height: 2.5, borderRadius: "50%", background: "rgba(0,0,0,0.5)" }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /**
  * Four corner screws + a small engraved nameplate -- the "this is a piece
  * of hardware, not a web card" cue virtually every skeuomorphic plugin
@@ -278,8 +323,8 @@ function ChassisDetails({ plugin, fontFamily, textColor }: { plugin: AudioPlugin
         aria-hidden="true"
         className="absolute pointer-events-none select-none"
         style={{
-          bottom: 9,
-          right: 22,
+          bottom: 14,
+          right: 24,
           fontSize: 8.5,
           fontWeight: 700,
           letterSpacing: "0.1em",
@@ -367,7 +412,11 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
   }, [analyserNode, isPlaying, artwork]);
 
   return (
-    <div ref={rootRef} className={`relative overflow-hidden ${className}`} style={{ ["--gfp-live" as any]: 0, ...skinStyle, ...style }}>
+    <div
+      ref={rootRef}
+      className={`relative overflow-hidden ${className}`}
+      style={{ ["--gfp-live" as any]: 0, ...skinStyle, clipPath: CHASSIS_CLIP, ...style }}
+    >
       {artwork.node}
       <div
         aria-hidden="true"
@@ -377,6 +426,7 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
           background: `radial-gradient(ellipse at 50% 115%, ${accent}55 0%, ${accent}18 40%, transparent 65%)`,
         }}
       />
+      <TopRail />
       <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} />
       <MaterialContext.Provider value={materialCtx}>
         <div className="relative">{children}</div>

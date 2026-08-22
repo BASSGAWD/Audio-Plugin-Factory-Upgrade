@@ -4147,9 +4147,11 @@ export default function UIDesigner({ plugin, onChange, triggerToast }: UIDesigne
                       }}
                       className="w-full bg-neutral-900 border border-neutral-800 rounded px-1.5 py-1 text-neutral-300 text-[9px] outline-none cursor-pointer"
                     >
-                      <option value="none">Flat/Minimal</option>
+                      <option value="none">None (Plain)</option>
                       <option value="neon">Neon Active Glow</option>
-                      <option value="vintage">Soft Shadow</option>
+                      <option value="vintage">Soft Shadow (Vintage)</option>
+                      <option value="flat">Flat Bevel Highlight</option>
+                      <option value="shadow">Drop Shadow</option>
                     </select>
                   </div>
 

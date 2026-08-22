@@ -215,6 +215,18 @@ export interface BuildReport {
    * plain 6-digit hex.
    */
   visualIntegrity?: { score: number; metric: string; evidence: string };
+  /**
+   * Does the theme's declared visual-craft intent actually render? Mainly:
+   * a non-"none" glowStyle (uiSpec.ts's ATTRIBUTE_THEMES assigns
+   * "shadow"/"flat"/"vintage" to 5 of its 8 entries) must resolve to a real
+   * CSS boxShadow via resolveCustomSkinStyle (customSkin.ts), not silently
+   * no-op. Also records the resolved procedural material (materialVisuals.ts
+   * -- brushed-metal/anodized-aluminum/wood-panel/matte-plastic/
+   * vintage-cream) as evidence. Informational — ranks candidates in
+   * refinementScore(), never gates the >=97 floor. Absent when the plugin
+   * has no customSkin at all.
+   */
+  skeuomorphicFidelity?: { score: number; metric: string; evidence: string };
   /** Deterministic repairs and polish applied by the gate. */
   fixes: string[];
   /**

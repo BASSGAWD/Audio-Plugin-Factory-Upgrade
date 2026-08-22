@@ -30,6 +30,8 @@ import { auditDspCode, formatCodeAudit } from "./codeAudit";
 import { ArchetypeId, applyArchetype, inferControlType, pickArchetype, resolveControlOverlaps, rectsOverlap } from "./guiArchetypes";
 import { measureFeatureDepth } from "./featureManifest";
 import { DSP_RECIPES, DspRecipe } from "./dspRecipes";
+import { resolveCustomSkinStyle } from "./customSkin";
+import { resolveMaterial } from "./materialVisuals";
 
 export interface QualityScores {
   looks: number;
@@ -2839,6 +2841,55 @@ export function measureVisualIntegrity(plugin: AudioPlugin): VisualIntegrity | n
   };
 }
 
+export interface SkeuomorphicFidelity {
+  /** 0-100, informational. */
+  score: number;
+  metric: string;
+  evidence: string;
+}
+
+/**
+ * Does this plugin's declared visual-craft intent actually render, or does
+ * some of it silently no-op? Concretely: `resolveCustomSkinStyle`
+ * (customSkin.ts) is the ONLY place `glowStyle` turns into real CSS -- for a
+ * long time it implemented just the "neon" branch, so 5 of
+ * ATTRIBUTE_THEMES' 8 entries (aggressive/clinical/industrial/vintage/
+ * luxurious -- see uiSpec.ts), which assign "shadow"/"flat"/"vintage", were
+ * rendering with NO glow treatment at all despite the theme declaring one.
+ * This check calls the real resolver against the plugin's actual customSkin
+ * and asserts a non-"none" glowStyle produced a real, non-undefined
+ * boxShadow -- a direct, decisive-gap-testable proof that the fix (not just
+ * the intent) is in place. Also records the resolved material
+ * (resolveMaterial, materialVisuals.ts) as evidence -- always present (it's
+ * a total function with a fallback), so it informs but never gates.
+ * Informational only: ranks candidates in refinementScore(), never moves
+ * the >=97 headline floor, per this project's standing rule for every
+ * measurement added after the original four (see CLAUDE.md).
+ */
+export function measureSkeuomorphicFidelity(plugin: AudioPlugin): SkeuomorphicFidelity | null {
+  const skin = plugin.customSkin;
+  if (!skin) return null;
+  const material = resolveMaterial(plugin);
+  const glowStyle = skin.glowStyle;
+  const expectsGlow = !!glowStyle && glowStyle !== "none";
+  if (!expectsGlow) {
+    return {
+      score: 100,
+      metric: "skeuomorphic fidelity",
+      evidence: `no glow requested (glowStyle="${glowStyle ?? "unset"}"); material=${material}`,
+    };
+  }
+  const resolved = resolveCustomSkinStyle(skin);
+  const glowRendered = resolved.boxShadow !== undefined;
+  return {
+    score: glowRendered ? 100 : 40,
+    metric: "skeuomorphic fidelity",
+    evidence: glowRendered
+      ? `glowStyle="${glowStyle}" resolved to a real CSS effect; material=${material}`
+      : `glowStyle="${glowStyle}" resolved to NO CSS effect -- the theme's declared glow is being silently dropped; material=${material}`,
+  };
+}
+
 function scoreLatency(generationMs?: number): number {
   if (generationMs === undefined) return 100; // deterministic/offline paths are instant
   if (generationMs <= 20000) return 100;
@@ -3182,6 +3233,13 @@ export function runQualityGate(
     notes.push(`Visual integrity ${visualIntegrity.score}/100: ${visualIntegrity.evidence}.`);
   }
 
+  // --- Skeuomorphic fidelity: does the theme's declared glow/material
+  //     intent actually render, or silently no-op? Informational only. ---
+  const skeuomorphicFidelity = measureSkeuomorphicFidelity(polished);
+  if (skeuomorphicFidelity) {
+    notes.push(`Skeuomorphic fidelity ${skeuomorphicFidelity.score}/100: ${skeuomorphicFidelity.evidence}.`);
+  }
+
   const report: BuildReport = {
     intent: (opts.intent || opts.prompt || plugin.description || plugin.name).slice(0, 160),
     attributes: uiSpec.attributes,
@@ -3212,6 +3270,7 @@ export function runQualityGate(
     referenceDeviation: referenceDeviation ?? undefined,
     voicingDifferentiation: voicingDifferentiation && voicingDifferentiation.length > 0 ? voicingDifferentiation : undefined,
     visualIntegrity: visualIntegrity ?? undefined,
+    skeuomorphicFidelity: skeuomorphicFidelity ?? undefined,
   };
 
   const final: AudioPlugin = { ...polished, quality: scores, buildReport: report };

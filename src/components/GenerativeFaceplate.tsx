@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { AudioPlugin } from "../types";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
+import { resolveMaterial, materialFilterDefs, MaterialContext } from "../utils/materialVisuals";
 
 /**
  * Interactive generative faceplate: every plugin gets a UNIQUE, procedurally
@@ -30,7 +31,11 @@ interface GenerativeFaceplateProps {
   children: React.ReactNode;
 }
 
-function hashString(s: string): number {
+// Exported so materialVisuals.ts's seeded turbulence/lighting recipes derive
+// grain from the SAME per-plugin identity hash this file already uses for
+// its background artwork -- one seed source for "this plugin's" procedural
+// look, not two independently-invented ones.
+export function hashString(s: string): number {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
@@ -38,7 +43,7 @@ function hashString(s: string): number {
   }
   return h >>> 0;
 }
-function mulberry32(seed: number): () => number {
+export function mulberry32(seed: number): () => number {
   let a = seed;
   return () => {
     a |= 0; a = (a + 0x6d2b79f5) | 0;
@@ -74,6 +79,14 @@ export function evaluateMover(spec: MoverSpec, tSec: number): { transform?: stri
   return { opacity: spec.minOp + (spec.maxOp - spec.minOp) * w };
 }
 
+/** Same "this plugin's identity" string buildArtwork already seeds its own
+ *  RNG from -- reused verbatim so the background art and the controls'
+ *  material grain/lighting derive from ONE identity concept, not two
+ *  independently-invented ones. */
+export function pluginSeedString(plugin: AudioPlugin): string {
+  return `${plugin.name}::${plugin.category}::${plugin.parameters.length}`;
+}
+
 interface Artwork {
   node: React.ReactNode;
   movers: MoverSpec[];
@@ -96,6 +109,8 @@ function buildArtwork(plugin: AudioPlugin): Artwork {
   const movers: MoverSpec[] = [];
   const gradId = `gfp-g-${hashString(plugin.name) % 99999}`;
   const blurId = `gfp-b-${hashString(plugin.name) % 99999}`;
+  const seedString = pluginSeedString(plugin);
+  const materialId = resolveMaterial(plugin);
 
   els.push(
     <React.Fragment key="base">
@@ -108,6 +123,11 @@ function buildArtwork(plugin: AudioPlugin): Artwork {
         <filter id={blurId} x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="10" />
         </filter>
+        {/* Mounted once per rendered plugin -- every KnobControl/
+            SliderControl/ToggleControl on this faceplate references this
+            SAME filter id via MaterialContext (below), rather than each
+            control re-generating its own copy of the recipe. */}
+        {materialFilterDefs(materialId, seedString)}
       </defs>
       <rect width={W} height={H} fill={`url(#${gradId})`} />
     </React.Fragment>
@@ -212,6 +232,14 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
   );
   const accent = plugin.customSkin?.accentColor || "#f97316";
   const { elementRefs } = artwork;
+  // Same values buildArtwork() already computed for the mounted <defs> --
+  // recomputed here (cheap, pure, deterministic given the same plugin) so
+  // the Context advertises the identical materialId/seed the filter was
+  // actually generated with.
+  const materialCtx = useMemo(
+    () => ({ materialId: resolveMaterial(plugin), seedString: pluginSeedString(plugin) }),
+    [plugin.name, plugin.category, plugin.parameters.length, plugin.buildReport?.attributes]
+  );
   // The plugin's own configured skin -- background, border, font, static
   // glow. Unconditional (no theme gate the way the Pro artboard preview has
   // one): this is "the plugin" everywhere outside that preview, so whatever
@@ -274,7 +302,9 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
           background: `radial-gradient(ellipse at 50% 115%, ${accent}55 0%, ${accent}18 40%, transparent 65%)`,
         }}
       />
-      <div className="relative">{children}</div>
+      <MaterialContext.Provider value={materialCtx}>
+        <div className="relative">{children}</div>
+      </MaterialContext.Provider>
     </div>
   );
 }

@@ -8,10 +8,12 @@
  * generations that never opt into an archetype must not change at all).
  */
 import { ArchetypeId, BUILTIN_ARCHETYPES, applyArchetype, pickArchetype, resolveControlOverlaps } from "../src/utils/guiArchetypes";
-import { polishPluginVisuals, runQualityGate, scoreLooks, measureVisualIntegrity } from "../src/utils/qualityGate";
+import { polishPluginVisuals, runQualityGate, scoreLooks, measureVisualIntegrity, measureSkeuomorphicFidelity } from "../src/utils/qualityGate";
 import { classifyPluginIntent } from "../src/utils/pluginSpec";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { AudioPlugin, PluginParameter } from "../src/types";
+import { resolveMaterial } from "../src/utils/materialVisuals";
+import { resolveCustomSkinStyle } from "../src/utils/customSkin";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -267,6 +269,96 @@ const P = (id: string, controlType?: PluginParameter["controlType"]): PluginPara
     "measureVisualIntegrity: near-invisible text-on-background scores decisively lower than a real theme",
     !!lc && !!hc && lc.score < hc.score - 50,
     `low=${lc?.score} high=${hc?.score}`
+  );
+}
+
+/* ---- 11. resolveMaterial: deterministic per-plugin material dispatch ---- */
+{
+  const withAttr = (attr: string, category: AudioPlugin["category"] = "filter"): AudioPlugin => ({
+    id: "t", name: "t", category, description: "", dspFunction: "return inputSample;", faustCode: "", cppJuceCode: "", createdAt: "",
+    parameters: [],
+    buildReport: { attributes: [attr] } as any,
+  });
+  check("resolveMaterial: aggressive -> brushed-metal", resolveMaterial(withAttr("aggressive")) === "brushed-metal");
+  check("resolveMaterial: vintage -> wood-panel", resolveMaterial(withAttr("vintage")) === "wood-panel");
+  check("resolveMaterial: clinical -> matte-plastic", resolveMaterial(withAttr("clinical")) === "matte-plastic");
+  check("resolveMaterial: futuristic -> anodized-aluminum", resolveMaterial(withAttr("futuristic")) === "anodized-aluminum");
+
+  const noAttrReverb: AudioPlugin = {
+    id: "t", name: "t", category: "reverb", description: "", dspFunction: "return inputSample;", faustCode: "", cppJuceCode: "", createdAt: "",
+    parameters: [],
+  };
+  check("resolveMaterial: no attribute -> falls back to category (reverb -> vintage-cream)", resolveMaterial(noAttrReverb) === "vintage-cream");
+
+  // Same plugin identity -> same material, every call -- no hidden
+  // randomness in the dispatch itself (the *rendering* is seeded/varied,
+  // the *choice of material family* is not).
+  const a1 = resolveMaterial(withAttr("aggressive"));
+  const a2 = resolveMaterial(withAttr("aggressive"));
+  check("resolveMaterial: deterministic across repeated calls", a1 === a2);
+}
+
+/* ---- 12. resolveCustomSkinStyle: all 5 glowStyle values, and bgOpacity ---- */
+{
+  const skinWith = (glowStyle: string) => resolveCustomSkinStyle({ glowStyle: glowStyle as any, accentColor: "#f97316" });
+
+  check("resolveCustomSkinStyle: glowStyle 'none' -> no boxShadow", skinWith("none").boxShadow === undefined);
+  check("resolveCustomSkinStyle: glowStyle 'neon' -> real boxShadow", skinWith("neon").boxShadow !== undefined);
+  // The actual regression this session found and fixed: these 3 used to
+  // silently resolve to undefined even though 5 of ATTRIBUTE_THEMES' 8
+  // entries assign one of them. A revert of the fix would fail these.
+  check("resolveCustomSkinStyle: glowStyle 'vintage' -> real boxShadow (was silently dropped before this fix)", skinWith("vintage").boxShadow !== undefined);
+  check("resolveCustomSkinStyle: glowStyle 'flat' -> real boxShadow (was silently dropped before this fix)", skinWith("flat").boxShadow !== undefined);
+  check("resolveCustomSkinStyle: glowStyle 'shadow' -> real boxShadow (was silently dropped before this fix)", skinWith("shadow").boxShadow !== undefined);
+
+  // Each of the 4 non-"none" treatments must be genuinely distinct -- not
+  // 4 names collapsing onto one identical CSS value.
+  const shadows = ["neon", "vintage", "flat", "shadow"].map((g) => skinWith(g).boxShadow);
+  const distinctCount = new Set(shadows).size;
+  check("resolveCustomSkinStyle: neon/vintage/flat/shadow are 4 DISTINCT boxShadow values, not duplicates", distinctCount === 4, `values=${JSON.stringify(shadows)}`);
+
+  // bgOpacity ("overlay alpha") was a declared type field with zero
+  // consumers before this fix -- now a partial value layers a scrim over
+  // bgImage in the SAME backgroundImage property; unset/1 must stay
+  // byte-for-byte identical to the pre-bgOpacity behavior (plain url()).
+  const fullOpacity = resolveCustomSkinStyle({ bgImage: "x.png", bgColor: "#111116" });
+  check("resolveCustomSkinStyle: unset bgOpacity -> plain url(), unchanged from before this field existed", fullOpacity.backgroundImage === "url(x.png)", fullOpacity.backgroundImage);
+
+  const partialOpacity = resolveCustomSkinStyle({ bgImage: "x.png", bgColor: "#111116", bgOpacity: 0.4 });
+  check(
+    "resolveCustomSkinStyle: bgOpacity < 1 -> a scrim layer is actually added (bgOpacity is no longer dead)",
+    partialOpacity.backgroundImage.includes("linear-gradient") && partialOpacity.backgroundImage.includes("url(x.png)"),
+    partialOpacity.backgroundImage
+  );
+}
+
+/* ---- 13. measureSkeuomorphicFidelity: decisive gap on glow rendering ---- */
+{
+  const base: AudioPlugin = {
+    id: "t", name: "t", category: "filter", description: "", dspFunction: "return inputSample;", faustCode: "", cppJuceCode: "", createdAt: "",
+    parameters: [],
+  };
+  check("measureSkeuomorphicFidelity: no customSkin -> null (nothing to measure)", measureSkeuomorphicFidelity(base) === null);
+
+  const noGlowRequested: AudioPlugin = { ...base, customSkin: { bgColor: "#111116" } };
+  const ng = measureSkeuomorphicFidelity(noGlowRequested);
+  check("measureSkeuomorphicFidelity: no glow requested -> full score (nothing expected)", !!ng && ng.score === 100, `score=${ng?.score}`);
+
+  const realGlow: AudioPlugin = { ...base, customSkin: { bgColor: "#171008", glowStyle: "vintage", accentColor: "#f59e0b" } };
+  const rg = measureSkeuomorphicFidelity(realGlow);
+  check("measureSkeuomorphicFidelity: a glowStyle the resolver actually implements scores full", !!rg && rg.score === 100, `score=${rg?.score}`);
+
+  // The decisive-gap case: a glowStyle value the resolver's switch does NOT
+  // recognize (simulating exactly what "vintage"/"flat"/"shadow" looked
+  // like before this session's fix -- a glow requested but wired to
+  // nothing) must score DECISIVELY lower, proving this metric actually
+  // discriminates rendered-vs-not rather than returning a constant.
+  const unhandledGlow: AudioPlugin = { ...base, customSkin: { bgColor: "#171008", glowStyle: "bogus" as any } };
+  const ug = measureSkeuomorphicFidelity(unhandledGlow);
+  check(
+    "measureSkeuomorphicFidelity: a glow requested but not actually rendered scores decisively lower",
+    !!rg && !!ug && ug.score < rg.score - 30,
+    `rendered=${rg?.score} unrendered=${ug?.score}`
   );
 }
 

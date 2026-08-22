@@ -157,7 +157,12 @@ export function refinementScore(gate: QualityGateResult): number {
   // touches the >=97 floor -- only which of several CORRECT candidates
   // ranks first.
   const visualBonus = 0.1 * (gate.report.visualIntegrity?.score ?? 100);
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus + visualBonus;
+  // SKEUOMORPHIC FIDELITY — does the theme's declared glow/material intent
+  // actually render (see measureSkeuomorphicFidelity)? A lighter weight
+  // than visualBonus since it's a narrower, single-field check rather than
+  // a full contrast measurement; still a pure tie-breaker, never gates.
+  const skeuomorphicBonus = 0.1 * (gate.report.skeuomorphicFidelity?.score ?? 100);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus + visualBonus + skeuomorphicBonus;
 }
 
 /* ------------------------------------------------------------------ */

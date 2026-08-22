@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useContext, useEffect, useRef, useState } from "react";
 import { AudioPlugin, PluginParameter } from "../types";
 import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
 import { applyFineAdjust, wheelStepDelta, wheelDirection, clampToRange } from "../utils/controlInteraction";
 import { METER_BALLISTICS, MeterBallistics, ballisticsStep } from "../utils/uiRenderPatterns";
 import { useNonPassiveWheel } from "../hooks/useNonPassiveWheel";
+import { MaterialContext, materialFilterId, materialTextureDataUri } from "../utils/materialVisuals";
 
 /**
  * Playback-time control rendering shared by Simple Mode. Mirrors the visual
@@ -107,6 +108,12 @@ function KnobControl({ param, onChange }: ControlProps) {
   const accent = param.accentColor || ACCENT_FALLBACK;
   const [isEditingValue, setIsEditingValue] = useState(false);
   const dragRef = useRef<HTMLDivElement | null>(null);
+  // Real seeded material (brushed-metal/anodized-aluminum/wood-panel/
+  // matte-plastic/vintage-cream) instead of a flat gradient-only cap --
+  // the filter def itself is mounted once per plugin by GenerativeFaceplate,
+  // this just references it by the SAME (materialId, seedString) pair.
+  const { materialId, seedString } = useContext(MaterialContext);
+  const matFilterUrl = `url(#${materialFilterId(materialId, seedString)})`;
   const CX = 50;
   const CY = 50;
   const TRACK_R = 44;
@@ -204,9 +211,10 @@ function KnobControl({ param, onChange }: ControlProps) {
 
           {/* Rim + cap (with elevation shadow) */}
           <circle cx={CX} cy={CY} r="31" fill={`url(#rim-${uid})`} filter={`url(#sh-${uid})`} />
-          <circle cx={CX} cy={CY} r="27" fill={`url(#cap-${uid})`} />
-          {/* Specular highlight near the light source */}
-          <ellipse cx="44" cy="37" rx="13" ry="8" fill="#ffffff" opacity="0.1" />
+          {/* Cap: real seeded material (grain + embossed lighting) painted
+              over the base gradient, replacing the old single static
+              highlight ellipse below with genuine per-material relief. */}
+          <circle cx={CX} cy={CY} r="27" fill={`url(#cap-${uid})`} filter={matFilterUrl} />
 
           {/* Indicator: dark groove + bright line + accent tip */}
           <line x1={grooveStart.x} y1={grooveStart.y} x2={grooveEnd.x} y2={grooveEnd.y} stroke="#0a0a0c" strokeWidth="4.5" strokeLinecap="round" />
@@ -249,6 +257,15 @@ function KnobControl({ param, onChange }: ControlProps) {
 
 function ToggleControl({ param, onChange }: ControlProps) {
   const on = param.value > param.min;
+  // SliderControl/ToggleControl are pure inline-CSS <div>s (no <svg>), so
+  // they can't reference a page-level <filter> by url(#id) the way
+  // KnobControl can -- instead they layer the same seeded material's grain
+  // as a second background-image, blended over the existing gradient.
+  const { materialId, seedString } = useContext(MaterialContext);
+  const texture = materialTextureDataUri(materialId, seedString);
+  const trackGradient = on
+    ? `linear-gradient(180deg, ${param.accentColor || "#f97316"}, ${param.accentColor || "#c2410c"}bb)`
+    : "linear-gradient(180deg, #18181b, #18181b)";
   return (
     <button
       type="button"
@@ -259,7 +276,8 @@ function ToggleControl({ param, onChange }: ControlProps) {
       <div
         className="w-12 h-6 rounded-full p-0.5 transition-colors duration-150"
         style={{
-          background: on ? `linear-gradient(180deg, ${(param.accentColor || "#f97316")}, ${(param.accentColor || "#c2410c")}bb)` : "#18181b",
+          backgroundImage: `url("${texture}"), ${trackGradient}`,
+          backgroundBlendMode: "overlay",
           boxShadow: on
             ? `inset 0 1px 2px rgba(0,0,0,0.35), 0 0 10px ${(param.accentColor || "#f97316")}66`
             : "inset 0 1.5px 3px rgba(0,0,0,0.7)",
@@ -605,6 +623,8 @@ function SliderControl({ param, onChange }: ControlProps) {
   const accent = param.accentColor || ACCENT_FALLBACK;
   const [isEditingValue, setIsEditingValue] = useState(false);
   const dragRef = useRef<HTMLDivElement | null>(null);
+  const { materialId, seedString } = useContext(MaterialContext);
+  const texture = materialTextureDataUri(materialId, seedString);
 
   const handleDrag = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -686,7 +706,11 @@ function SliderControl({ param, onChange }: ControlProps) {
       >
         <div
           className="absolute inset-x-0 h-2 rounded-full bg-neutral-950 border border-black/60"
-          style={{ boxShadow: "inset 0 1.5px 3px rgba(0,0,0,0.8)" }}
+          style={{
+            backgroundImage: `url("${texture}")`,
+            backgroundBlendMode: "overlay",
+            boxShadow: "inset 0 1.5px 3px rgba(0,0,0,0.8)",
+          }}
         />
         <div
           className="absolute left-0 h-2 rounded-full"

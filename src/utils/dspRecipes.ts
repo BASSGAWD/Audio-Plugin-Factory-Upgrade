@@ -17,6 +17,7 @@ import { PluginParameter } from "../types";
 import { AudioPluginSpec, PluginFamily } from "./pluginSpec";
 import { findCandidateRecipe } from "./recipeMemory";
 import { formatManifestForPrompt } from "./featureManifest";
+import { oversampledWaveshape } from "./dspPrimitives";
 
 export interface DspRecipe {
   id: string;
@@ -434,20 +435,14 @@ let q = 1.2 - res;
 // Drive saturates the filter INPUT, so pushing resonance thickens into
 // analog-style growl instead of the thin whistle a clean SVF produces.
 // The gain-compensating divisor keeps the knob a character control rather
-// than a disguised volume control. 2x oversampled with a triangular
-// [0.25, 0.5, 0.25] halfband decimator (this sample's midpoint-and-current
-// shaped values plus the PREVIOUS cycle's shaped current) -- at Drive
-// pushed hard the tanh's harmonics climb well above Nyquist and fold back
-// as inharmonic fizz if shaped at 1x; bypassed at Drive=0 so the clean
-// filter path is untouched.
+// than a disguised volume control. Oversampled (see oversampledWaveshape
+// in dspPrimitives.ts) since at Drive pushed hard the tanh's harmonics
+// climb well above Nyquist and fold back as inharmonic fizz if shaped at
+// 1x; bypassed entirely at Drive=0 so the clean filter path is untouched.
 let dg = Math.pow(10, drive / 20);
 let xin;
 if (drive > 0.01) {
-  let midIn = 0.5 * (state.prevIn + inputSample);
-  let shapedMid = Math.tanh(midIn * dg);
-  let shapedCur = Math.tanh(inputSample * dg);
-  xin = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(dg, 0.6);
-  state.prevShaped = shapedCur;
+  ${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * dg)`, gainCompensation: "Math.pow(dg, 0.6)", outputVar: "xin", declareOutput: false }).split("\n").join("\n  ")}
 } else {
   xin = inputSample;
   state.prevShaped = 0;
@@ -480,17 +475,7 @@ let tone = params.tone !== undefined ? params.tone : 4500;
 let mix = params.mix !== undefined ? params.mix : 1;
 state.smDrive += 0.002 * (drive - state.smDrive);
 let g = Math.pow(10, state.smDrive / 20);
-// 2x oversampled soft clip: shape the linear-interp midpoint AND the sample,
-// then combine with a TRIANGULAR [0.25, 0.5, 0.25] halfband decimator (this
-// sample's midpoint + current, plus the PREVIOUS cycle's shaped current) --
-// a real halfband null, not just a box average, so images above Nyquist fold
-// back roughly another 2x further down than a plain [0.5, 0.5] mix.
-let midIn = 0.5 * (state.prevIn + inputSample);
-let shapedMid = Math.tanh(midIn * g);
-let shapedCur = Math.tanh(inputSample * g);
-let wet = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(g, 0.65);
-state.prevShaped = shapedCur;
-state.prevIn = inputSample;
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g)`, gainCompensation: "Math.pow(g, 0.65)" })}
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);
 wet = state.lp;

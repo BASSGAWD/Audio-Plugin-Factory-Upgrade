@@ -37,29 +37,28 @@ function paramsAt(base: readonly P[], overrides: Record<string, number>): any {
 
 /** Deliberately non-oversampled counterpart: same nonlinearity and gain
  *  compensation, but shaping the RAW sample once instead of oversampling.
- *  Built mechanically from the honest body by stripping the midpoint/
- *  triangular-decimator machinery -- not hand-tuned to look bad. */
+ *  Built mechanically from the honest body by stripping the shared
+ *  oversampledWaveshape() output (dspPrimitives.ts) back down to a single
+ *  1x shape of the current sample -- not hand-tuned to look bad. Every
+ *  oversampled stage now emits this exact same structural shape (only the
+ *  shaper expression and gain-compensation/output-var differ), so one
+ *  generic regex covers all of them instead of a bespoke one per site. */
 function naiveCounterpart(body: string): string {
-  return body
-    // Replace the triangular-blended oversampled result with a single 1x
-    // shape of the current sample, keeping every other line (gain, tone
-    // filter, mix, bias) identical so only the oversampling itself differs.
-    .replace(
-      /let midIn = 0\.5 \* \(state\.prevIn \+ inputSample\)[^\n]*;\nlet shapedMid = Math\.tanh\(midIn \* (\w+)( \+ bias)?\)( - biasRest)?;\nlet shapedCur = Math\.tanh\(inputSample \* \1\2\)\3;\nlet wet = \(0\.25 \* state\.prevShaped \+ 0\.5 \* shapedMid \+ 0\.25 \* shapedCur\) \/ Math\.pow\(\1, ([\d.]+)\);\nstate\.prevShaped = shapedCur;/,
-      "let wet = (Math.tanh(inputSample * $1$2)$3) / Math.pow($1, $4);"
-    )
-    .replace(
-      /let midIn = 0\.5 \* \(state\.prevIn \+ inputSample\) \* (\w+);\nlet curIn = inputSample \* \1;\nlet shapedMid = midIn \/ \(1 \+ Math\.abs\(midIn\)\);\nlet shapedCur = curIn \/ \(1 \+ Math\.abs\(curIn\)\);\nlet wet = \(0\.25 \* state\.prevShaped \+ 0\.5 \* shapedMid \+ 0\.25 \* shapedCur\) \/ Math\.pow\(\1, ([\d.]+)\);\nstate\.prevShaped = shapedCur;/,
-      "let curIn = inputSample * $1;\nlet wet = (curIn / (1 + Math.abs(curIn))) / Math.pow($1, $2);"
-    );
+  return body.replace(
+    /let midRaw = 0\.5 \* \(state\.prevIn \+ inputSample\);\nlet shapedMid = .+?;\nlet shapedCur = (.+?);\nlet (\w+) = \(0\.25 \* state\.prevShaped \+ 0\.5 \* shapedMid \+ 0\.25 \* shapedCur\) \/ (.+?);\nstate\.prevShaped = shapedCur;\nstate\.prevIn = inputSample;/,
+    "let $2 = ($1) / $3;"
+  );
 }
 
 /** filter recipe: bespoke naive counterpart (drive stage has its own
- *  if/else oversampling shape, not the linear midpoint idiom above). */
+ *  if/else oversampling shape -- oversampledWaveshape() called with
+ *  declareOutput:false/outputVar:"xin" inside a conditional branch, not
+ *  the plain always-declared "let wet = ..." shape naiveCounterpart
+ *  above handles). */
 function naiveFilterBody(honestBody: string): string {
   return honestBody.replace(
-    /let xin;\nif \(drive > 0\.01\) \{\n\s*let midIn = 0\.5 \* \(state\.prevIn \+ inputSample\);\n\s*let shapedMid = Math\.tanh\(midIn \* dg\);\n\s*let shapedCur = Math\.tanh\(inputSample \* dg\);\n\s*xin = \(0\.25 \* state\.prevShaped \+ 0\.5 \* shapedMid \+ 0\.25 \* shapedCur\) \/ Math\.pow\(dg, 0\.6\);\n\s*state\.prevShaped = shapedCur;\n\} else \{\n\s*xin = inputSample;\n\s*state\.prevShaped = 0;\n\}\nstate\.prevIn = inputSample;/,
-    "let xin = drive > 0.01 ? Math.tanh(inputSample * dg) / Math.pow(dg, 0.6) : inputSample;\nstate.prevIn = inputSample;"
+    /let xin;\nif \(drive > 0\.01\) \{\n\s*let midRaw = 0\.5 \* \(state\.prevIn \+ inputSample\);\n\s*let shapedMid = .+?;\n\s*let shapedCur = (.+?);\n\s*xin = \(0\.25 \* state\.prevShaped \+ 0\.5 \* shapedMid \+ 0\.25 \* shapedCur\) \/ (.+?);\n\s*state\.prevShaped = shapedCur;\n\s*state\.prevIn = inputSample;\n\} else \{\n\s*xin = inputSample;\n\s*state\.prevShaped = 0;\n\}\nstate\.prevIn = inputSample;/,
+    "let xin = drive > 0.01 ? ($1) / ($2) : inputSample;\nstate.prevIn = inputSample;"
   );
 }
 
@@ -119,17 +118,16 @@ for (const c of cases) {
   );
 }
 
-/* ---- comp_feedback_glue: naive counterpart needs its own regex (out=,  ---- */
-/* prevOut feedback path differs from the plain "wet" cases above).        */
+/* ---- comp_feedback_glue: its Warmth stage now goes through the SAME
+ * shared oversampledWaveshape() shape (outputVar "out", gainComp "norm")
+ * as every other site, so the generic naiveCounterpart above covers it
+ * too -- no bespoke regex needed anymore. ---- */
 {
   const t = T("comp_feedback_glue");
   const overrides = { warmth: 1, makeup: 24, threshold: -48, ratio: 1 };
   const params = paramsAt(t.parameters, overrides);
   const honestAlias = measureAliasing(t.body, params);
-  const naiveBody = t.body.replace(
-    /let shapedMid = Math\.tanh\(mid \* hot\);\nlet shapedCur = Math\.tanh\(lin \* hot\);\nlet out = \(0\.25 \* state\.prevShaped \+ 0\.5 \* shapedMid \+ 0\.25 \* shapedCur\) \/ norm;\nstate\.prevShaped = shapedCur;/,
-    "let out = Math.tanh(lin * hot) / norm;"
-  );
+  const naiveBody = naiveCounterpart(t.body);
   check("comp_feedback_glue: naive counterpart differs from honest body (sanity)", naiveBody !== t.body);
   const naiveAlias = measureAliasing(naiveBody, params);
   const ratio = naiveAlias > 1e-9 ? naiveAlias / Math.max(honestAlias, 1e-9) : 0;

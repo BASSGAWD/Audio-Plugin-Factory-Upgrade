@@ -364,6 +364,25 @@ interface ComposedRecipe {
   stageIds: [string, string];
 }
 
+/** Indents every non-empty line of `code` by `spaces` spaces. Used when
+ *  splicing a recipe body -- naturally written at column 0 -- into a
+ *  nested `{ }` block one level deeper, so a composed/hybrid plugin's
+ *  generated code reads like real, lexically-nested source instead of
+ *  every statement sitting flush left regardless of its actual scope.
+ *  A flat per-line shift is the correct fix here (not a brace-depth
+ *  parser): the whole body is being uniformly nested one level deeper as
+ *  a unit, and its own internal nesting -- if/else, block-scoped recipes
+ *  like the oversampled-drive branch -- is already correct relative to
+ *  its own column-0 baseline, so shifting every line by the same amount
+ *  preserves that relative structure exactly. */
+function reindent(code: string, spaces = 2): string {
+  const pad = " ".repeat(spaces);
+  return code
+    .split("\n")
+    .map((line) => (line.trim().length === 0 ? line : pad + line))
+    .join("\n");
+}
+
 /** Deterministically chain two verified recipe bodies: stage 1's output
  *  becomes stage 2's input. State keys are namespaced per stage; colliding
  *  parameter ids get a "2" suffix on the second stage. */
@@ -394,8 +413,10 @@ export function composeRecipes(first: DspRecipe, second: DspRecipe): ComposedRec
     parameters: [...a.parameters.map((p) => ({ ...p })), ...stage2Params],
     // Each stage runs in its own block scope: recipes freely declare the same
     // local names (`let mix`, `let hf`), and without the braces any collision
-    // is a duplicate-let SyntaxError that kills the whole function.
-    body: `let __stage1Out = 0;\n// --- STAGE 1: ${a.title} ---\n{\n${stage1Body}\n}\n\n// --- STAGE 2: ${b.title} ---\n{\n${stage2Body}\n}`,
+    // is a duplicate-let SyntaxError that kills the whole function. Each
+    // body is reindented one level deeper since it's now lexically nested
+    // inside that block, not sitting at the function's top level anymore.
+    body: `let __stage1Out = 0;\n// --- STAGE 1: ${a.title} ---\n{\n${reindent(stage1Body)}\n}\n\n// --- STAGE 2: ${b.title} ---\n{\n${reindent(stage2Body)}\n}`,
     stageIds: [a.id, b.id],
   };
 }

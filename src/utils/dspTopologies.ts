@@ -14,7 +14,9 @@
  *   - the string is the BODY of function(inputSample, params, state)
  *   - exactly ONE return statement (chainStage/composers block-wrap bodies)
  *   - guard every log/division, clamp every feedback below 1
- *   - nonlinearities use the 2x midpoint-average oversampling idiom
+ *   - nonlinearities use the shared 2x oversampled triangular-decimator
+ *     idiom (oversampledWaveshape() in dspPrimitives.ts), not a plain
+ *     2-tap box average -- see that function's doc for why
  *   - every parameter audibly works min->max and honors its name's semantics
  *     (the gate measures both; a topology that fails does not ship)
  */
@@ -22,6 +24,7 @@
 import { DSP_RECIPES, DspRecipe } from "./dspRecipes";
 import { PluginFamily } from "./pluginSpec";
 import { CharacterGoal, SourceMaterial } from "./requirements";
+import { oversampledWaveshape } from "./dspPrimitives";
 
 export interface TopologyTags {
   /** Structural name, e.g. "feed-forward-rms", "fdn-plate". */
@@ -149,16 +152,9 @@ let g = Math.pow(10, (gainDb + makeup) / 20);
 let hot = 1 + warmth * 4;
 let norm = 1 + warmth * 2.2;
 // The Warmth tanh is a real saturator, not a safety clamp, so it gets the
-// same 2x oversampling as the distortion recipe: midpoint + current shaped,
-// combined with a triangular [0.25, 0.5, 0.25] halfband decimator against
-// the PREVIOUS cycle's shaped current.
-let lin = inputSample * g;
-let mid = 0.5 * (state.prevIn + inputSample) * g;
-let shapedMid = Math.tanh(mid * hot);
-let shapedCur = Math.tanh(lin * hot);
-let out = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / norm;
-state.prevShaped = shapedCur;
-state.prevIn = inputSample;
+// same shared 2x oversampled treatment as every other waveshaper in this
+// factory (see oversampledWaveshape in dspPrimitives.ts).
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g * hot)`, gainCompensation: "norm", outputVar: "out" })}
 state.prevOut = out;
 return out * mix + inputSample * (1 - mix);`,
     tags: { topology: "feedback-colored", character: ["colored"], sources: ["vocals", "mix_bus", "guitar", "bass"], latency: "zero", cpu: "light" },
@@ -759,15 +755,7 @@ state.smDrive += 0.002 * (drive - state.smDrive);
 let g = Math.pow(10, state.smDrive / 20);
 let bias = 0.22;
 let biasRest = Math.tanh(bias);
-// 2x oversampled with a triangular [0.25, 0.5, 0.25] halfband decimator
-// (this sample's midpoint-and-current shaped values plus the PREVIOUS
-// cycle's shaped current) -- a real halfband null, not a plain box average.
-let midIn = 0.5 * (state.prevIn + inputSample);
-let shapedMid = Math.tanh(midIn * g + bias) - biasRest;
-let shapedCur = Math.tanh(inputSample * g + bias) - biasRest;
-let wet = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(g, 0.65);
-state.prevShaped = shapedCur;
-state.prevIn = inputSample;
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g + bias) - biasRest`, gainCompensation: "Math.pow(g, 0.65)" })}
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);
 wet = state.lp;
@@ -790,16 +778,10 @@ let tone = params.tone !== undefined ? params.tone : 3600;
 let mix = params.mix !== undefined ? params.mix : 1;
 state.smDrive += 0.002 * (drive - state.smDrive);
 let g = Math.pow(10, state.smDrive / 20);
-// 2x oversampled with a triangular [0.25, 0.5, 0.25] halfband decimator --
 // softsign's fold-back shoulders are sharper than tanh's, so the plain box
-// average left more image energy behind; the halfband null cuts it further.
-let midIn = 0.5 * (state.prevIn + inputSample) * g;
-let curIn = inputSample * g;
-let shapedMid = midIn / (1 + Math.abs(midIn));
-let shapedCur = curIn / (1 + Math.abs(curIn));
-let wet = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / Math.pow(g, 0.7);
-state.prevShaped = shapedCur;
-state.prevIn = inputSample;
+// average this used to use left more image energy behind than the shared
+// halfband decimator below cuts.
+${oversampledWaveshape({ shape: (x) => `(${x} * g) / (1 + Math.abs(${x} * g))`, gainCompensation: "Math.pow(g, 0.7)" })}
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);
 wet = state.lp;
@@ -817,7 +799,7 @@ return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
       { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4200, unit: "Hz" },
       { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
     ],
-    body: `if (!state.init) { state.lp = 0; state.env = 0; state.smDrive = 10; state.prevIn = 0; state.init = true; }
+    body: `if (!state.init) { state.lp = 0; state.env = 0; state.smDrive = 10; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
 let drive = params.drive !== undefined ? params.drive : 10;
 let response = params.response !== undefined ? params.response : 0.5;
 let tone = params.tone !== undefined ? params.tone : 4200;
@@ -828,9 +810,7 @@ state.env += (x > state.env ? 0.008 : 0.0009) * (x - state.env);
 let envNorm = Math.min(1, state.env * 3.5);
 let dynDb = state.smDrive * (1 - response * 0.6 + response * envNorm);
 let g = Math.pow(10, dynDb / 20);
-let midIn = 0.5 * (state.prevIn + inputSample);
-let wet = 0.5 * (Math.tanh(midIn * g) + Math.tanh(inputSample * g)) / Math.pow(g, 0.65);
-state.prevIn = inputSample;
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g)`, gainCompensation: "Math.pow(g, 0.65)" })}
 let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
 state.lp += a * (wet - state.lp);
 wet = state.lp;

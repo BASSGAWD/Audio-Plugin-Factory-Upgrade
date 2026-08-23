@@ -34,6 +34,60 @@ export interface DspPrimitive {
   body: string;
 }
 
+export interface OversampledWaveshapeOptions {
+  /**
+   * Turns ONE raw (unshaped) sample expression into the shaped expression --
+   * receives "midRaw" or "inputSample" and returns the full shaper call,
+   * e.g. `(x) => \`Math.tanh(${x} * g)\`` or, for a biased asymmetric
+   * curve, `(x) => \`Math.tanh(${x} * g + bias) - biasRest\`` or, for
+   * softsign, `(x) => \`(${x} * g) / (1 + Math.abs(${x} * g))\``. Whatever
+   * gain/bias scaling a recipe needs belongs in here, not in the raw sample.
+   */
+  shape: (rawSampleExpr: string) => string;
+  /** Expression the halfband-combined sum divides by for gain compensation, e.g. "Math.pow(g, 0.65)" or "norm". */
+  gainCompensation: string;
+  /** Name of the declared output variable. Defaults to "wet". */
+  outputVar?: string;
+  /** Pass false when outputVar is already declared by the caller (e.g. inside an if/else branch), so this emits a plain assignment instead of `let`. Defaults to true. */
+  declareOutput?: boolean;
+}
+
+/**
+ * The ONE shared "2x oversampled nonlinearity" snippet generator. Every
+ * waveshaping stage in this factory (drive/distortion/tube/fuzz/dynamic-sat,
+ * plus the Warmth saturator inside the glue-compressor recipe) needs this
+ * same treatment: shaping a raw sample at 1x lets tanh/softsign's harmonics
+ * climb above Nyquist and fold back as inharmonic digital fizz once the
+ * drive knob is pushed, which the quality gate measures and penalizes.
+ *
+ * Returns the JS statements that:
+ *   1. shape this sample AND the linearly-interpolated previous/current
+ *      midpoint (a cheap, zero-latency 2x oversample),
+ *   2. combine them with a TRIANGULAR [0.25, 0.5, 0.25] halfband decimator
+ *      against the PREVIOUS cycle's shaped current -- a real halfband
+ *      null, not a plain 2-tap box average. A box average is a much
+ *      shallower low-pass and leaves substantially more alias energy
+ *      behind; see the dist_fuzz topology's own rationale for the same
+ *      point, which is why this must never regress back to it,
+ *   3. advance state.prevIn/state.prevShaped for the next call.
+ *
+ * Requires the caller's init guard to zero state.prevIn and
+ * state.prevShaped. The exact shaping curve (plain tanh, biased/asymmetric
+ * tanh, softsign fold-back, ...) is supplied via `shape` since that
+ * character is the whole reason these are different stages/recipes; only
+ * the oversampling scaffold around it is shared.
+ */
+export function oversampledWaveshape(opts: OversampledWaveshapeOptions): string {
+  const out = opts.outputVar ?? "wet";
+  const decl = opts.declareOutput === false ? "" : "let ";
+  return `let midRaw = 0.5 * (state.prevIn + inputSample);
+let shapedMid = ${opts.shape("midRaw")};
+let shapedCur = ${opts.shape("inputSample")};
+${decl}${out} = (0.25 * state.prevShaped + 0.5 * shapedMid + 0.25 * shapedCur) / ${opts.gainCompensation};
+state.prevShaped = shapedCur;
+state.prevIn = inputSample;`;
+}
+
 export const DSP_PRIMITIVES: DspPrimitive[] = [
   {
     id: "pitch_grain",
@@ -108,13 +162,12 @@ return y / Math.pow(state.smF, 0.4);`,
     order: 20,
     role: "shaper",
     parameters: [{ id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 8, unit: "dB" }],
-    body: `if (!state.init) { state.smD = 8; state.pv = 0; state.init = true; }
+    body: `if (!state.init) { state.smD = 8; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
 let drive = params.drive !== undefined ? params.drive : 8;
 state.smD += 0.002 * (drive - state.smD);
 let g = Math.pow(10, state.smD / 20);
-let mid = 0.5 * (state.pv + inputSample);
-state.pv = inputSample;
-return 0.5 * (Math.tanh(mid * g) + Math.tanh(inputSample * g)) / Math.pow(g, 0.65);`,
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g)`, gainCompensation: "Math.pow(g, 0.65)" })}
+return wet;`,
   },
   {
     id: "comb_resonator",

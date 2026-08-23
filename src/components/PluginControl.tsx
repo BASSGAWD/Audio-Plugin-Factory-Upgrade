@@ -319,6 +319,13 @@ function ToggleControl({ param, onChange }: ControlProps) {
   );
 }
 
+// Zone color per segment index (bottom -> top), matching the old
+// continuous gradient's emerald -> amber -> rose progression.
+const METER_SEGMENTS = 12;
+function meterSegmentColor(i: number): string {
+  return i < 7 ? "#10b981" : i < 10 ? "#fbbf24" : "#f43f5e";
+}
+
 function MeterControl({ param, analyserNode, isPlaying }: ControlProps) {
   const range = param.max - param.min || 1;
   const staticPct = Math.max(0, Math.min(1, (param.value - param.min) / range));
@@ -326,13 +333,30 @@ function MeterControl({ param, analyserNode, isPlaying }: ControlProps) {
   const isLive = liveLevel !== null;
   const pct = isLive ? liveLevel : staticPct;
 
+  // Discrete LED-style segments instead of one continuous gradient fill --
+  // real hardware VU/peak meters read as individually lit cells. Same
+  // ballistics (pct, from useSignalLevel/ballisticsStep) and the same
+  // emerald/amber/rose zones as before -- this is a render-only change.
   return (
     <div className="flex flex-col items-center gap-1 select-none">
-      <div className="w-6 h-16 rounded-md bg-neutral-900 border border-neutral-800 relative overflow-hidden">
-        <div
-          className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-emerald-500 via-amber-400 to-rose-500 transition-[height] duration-75"
-          style={{ height: `${pct * 100}%` }}
-        />
+      <div
+        className="w-6 h-16 rounded-md bg-neutral-950 border border-neutral-800 relative overflow-hidden flex flex-col-reverse gap-[1.5px] p-1"
+        style={{ boxShadow: "inset 0 1.5px 3px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.03)" }}
+      >
+        {Array.from({ length: METER_SEGMENTS }).map((_, i) => {
+          const lit = pct * METER_SEGMENTS > i;
+          const color = meterSegmentColor(i);
+          return (
+            <div
+              key={i}
+              className="flex-1 rounded-[1px] transition-[background-color,box-shadow] duration-75"
+              style={{
+                backgroundColor: lit ? color : `${color}22`,
+                boxShadow: lit ? `0 0 4px ${color}bb, inset 0 1px 1px rgba(255,255,255,0.3)` : "inset 0 1px 1px rgba(0,0,0,0.4)",
+              }}
+            />
+          );
+        })}
         {isLive && <div className="absolute top-0.5 right-0.5 w-1 h-1 rounded-full bg-emerald-400 animate-pulse" title="Live signal" />}
       </div>
       <span className="text-[10px] font-medium text-neutral-300 truncate max-w-[76px] text-center leading-tight">{param.name}</span>
@@ -345,6 +369,11 @@ function MeterControl({ param, analyserNode, isPlaying }: ControlProps) {
 
 function PadControl({ param, onChange }: ControlProps) {
   const active = param.value > param.min;
+  // Same seeded material grain KnobControl/SliderControl/ToggleControl
+  // already have -- layered over both rest/active gradients so a pad
+  // doesn't stand out as the one un-textured surface on the faceplate.
+  const { materialId, seedString } = useContext(MaterialContext);
+  const texture = materialTextureDataUri(materialId, seedString);
   return (
     <button
       type="button"
@@ -354,11 +383,13 @@ function PadControl({ param, onChange }: ControlProps) {
       style={
         active
           ? {
-              background: `radial-gradient(circle at 40% 30%, ${(param.accentColor || "#f97316")}, ${(param.accentColor || "#c2410c")} 70%)`,
+              backgroundImage: `url("${texture}"), radial-gradient(circle at 40% 30%, ${(param.accentColor || "#f97316")}, ${(param.accentColor || "#c2410c")} 70%)`,
+              backgroundBlendMode: "overlay",
               boxShadow: `0 0 22px ${(param.accentColor || "#f97316")}aa, inset 0 1px 3px rgba(255,255,255,0.25)`,
             }
           : {
-              background: "radial-gradient(circle at 40% 28%, #26262c, #161619 70%)",
+              backgroundImage: `url("${texture}"), radial-gradient(circle at 40% 28%, #26262c, #161619 70%)`,
+              backgroundBlendMode: "overlay",
               boxShadow: "inset 0 1px 2px rgba(255,255,255,0.05), 0 2px 4px rgba(0,0,0,0.4)",
             }
       }
@@ -379,12 +410,24 @@ function PadControl({ param, onChange }: ControlProps) {
 }
 
 function AmpHeadControl({ param }: ControlProps) {
+  // This is the amp_sim family's showpiece identity, not a placeholder --
+  // same seeded material grain as every other control, plus a real bevel
+  // (lit top/left edge, dark bottom/right) so the panel reads as gear
+  // rather than a flat color swatch. Replaces `shadow-lg` (an inline
+  // boxShadow overrides it anyway) with an explicit outer drop-shadow +
+  // inset bevel combo.
+  const { materialId, seedString } = useContext(MaterialContext);
+  const texture = materialTextureDataUri(materialId, seedString);
   return (
     <div
-      className="w-full rounded-xl border-2 p-3 flex items-center justify-between gap-3 select-none shadow-lg"
+      className="w-full rounded-xl border-2 p-3 flex items-center justify-between gap-3 select-none"
       style={{
         backgroundColor: param.bgColor || "#1c1c22",
+        backgroundImage: `url("${texture}")`,
+        backgroundBlendMode: "overlay",
         borderColor: param.borderColor || "#3a3a45",
+        boxShadow:
+          "inset 0 1px 0 rgba(255,255,255,0.1), inset 0 -1.5px 0 rgba(0,0,0,0.5), inset 1px 0 0 rgba(255,255,255,0.04), 0 6px 14px rgba(0,0,0,0.45), 0 2px 4px rgba(0,0,0,0.3)",
       }}
     >
       <div className="flex-1 min-w-0">
@@ -411,20 +454,39 @@ function AmpHeadControl({ param }: ControlProps) {
 }
 
 function CabinetControl({ param }: ControlProps) {
+  // Same grain + bevel treatment as AmpHeadControl. The grille dots were
+  // flat-filled circles with zero dimension -- each now gets its own
+  // upper-left highlight + lower-right shadow layered over the base tone,
+  // reading as a real dimpled speaker grille instead of painted dots.
+  const { materialId, seedString } = useContext(MaterialContext);
+  const texture = materialTextureDataUri(materialId, seedString);
+  const dotBase = param.accentColor || "#3e3e4a";
   return (
     <div
-      className="w-full rounded-xl border-2 p-3 flex items-center gap-3 select-none shadow-lg"
+      className="w-full rounded-xl border-2 p-3 flex items-center gap-3 select-none"
       style={{
         backgroundColor: param.bgColor || "#16161a",
+        backgroundImage: `url("${texture}")`,
+        backgroundBlendMode: "overlay",
         borderColor: param.borderColor || "#2c2c36",
+        boxShadow:
+          "inset 0 1px 0 rgba(255,255,255,0.1), inset 0 -1.5px 0 rgba(0,0,0,0.5), inset 1px 0 0 rgba(255,255,255,0.04), 0 6px 14px rgba(0,0,0,0.45), 0 2px 4px rgba(0,0,0,0.3)",
       }}
     >
       <div
         className="w-10 h-10 rounded-md shrink-0 grid grid-cols-3 gap-0.5 p-1"
-        style={{ backgroundColor: "#0d0d10" }}
+        style={{ backgroundColor: "#0d0d10", boxShadow: "inset 0 1px 3px rgba(0,0,0,0.7)" }}
       >
         {Array.from({ length: 9 }).map((_, i) => (
-          <div key={i} className="rounded-full" style={{ backgroundColor: param.accentColor || "#3e3e4a" }} />
+          <div
+            key={i}
+            className="rounded-full"
+            style={{
+              backgroundImage: `radial-gradient(circle at 35% 30%, rgba(255,255,255,0.35), rgba(255,255,255,0) 45%), radial-gradient(circle at 65% 70%, rgba(0,0,0,0.55), rgba(0,0,0,0) 60%)`,
+              backgroundColor: dotBase,
+              boxShadow: "inset 0 0.5px 1px rgba(0,0,0,0.5)",
+            }}
+          />
         ))}
       </div>
       <div className="flex-1 min-w-0">

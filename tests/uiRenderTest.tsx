@@ -6,6 +6,7 @@ import GenerativeFaceplate, { evaluateMover } from "../src/components/Generative
 import RefineControl from "../src/components/RefineControl";
 import { CustomKnob } from "../src/components/UIDesigner";
 import { PluginManual, PluginManualContent } from "../src/components/PluginManual";
+import { PluginControl } from "../src/components/PluginControl";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { runQualityGate } from "../src/utils/qualityGate";
 import { buildPluginManual } from "../src/utils/featureManifest";
@@ -120,6 +121,60 @@ function knobParam(overrides: Partial<PluginParameter> = {}): PluginParameter {
   const low = renderToStaticMarkup(<CustomKnob param={knobParam({ value: 0 })} onChange={() => {}} onDblClick={() => {}} themeStyle="aero-slate" />);
   const high = renderToStaticMarkup(<CustomKnob param={knobParam({ value: 100 })} onChange={() => {}} onDblClick={() => {}} themeStyle="aero-slate" />);
   check("CustomKnob: indicator rotation responds to param.value", low !== high);
+}
+
+/* ---- Round-2 UI Track 1: AmpHead/Cabinet/Pad now carry the same seeded
+ * material grain KnobControl/SliderControl/ToggleControl already had --
+ * previously flat rectangles with zero texture, the amp_sim family's own
+ * showpiece identity. Meter is redrawn as discrete lit LED segments
+ * instead of one continuous gradient fill. Checked by rendering the real
+ * PluginControl dispatcher (not the underlying private components
+ * directly -- those aren't exported, and the dispatcher is what every
+ * real call site actually renders). ---- */
+{
+  const ctrlParam = (overrides: Partial<PluginParameter> = {}): PluginParameter =>
+    ({ id: "p", name: "Test", min: 0, max: 1, value: 0, defaultValue: 0, unit: "", ...overrides } as PluginParameter);
+  const noop = () => {};
+
+  const ampHtml = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "amp" as any, name: "Amp" })} allParams={[]} onChange={noop} />
+  );
+  check("AmpHeadControl: carries the seeded material grain texture (not a flat color swatch)", ampHtml.includes("data:image/svg+xml"));
+  check("AmpHeadControl: has a real bevel (lit top edge + dark bottom edge), not a bare drop-shadow", /inset 0 1px 0 rgba\(255,255,255/.test(ampHtml) && /inset 0 -1\.5px 0 rgba\(0,0,0/.test(ampHtml));
+
+  const cabHtml = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "cab" as any, name: "Cab" })} allParams={[]} onChange={noop} />
+  );
+  check("CabinetControl: carries the seeded material grain texture", cabHtml.includes("data:image/svg+xml"));
+  check("CabinetControl: grille dots are dimensional (radial-gradient highlight/shadow), not flat-filled circles", /radial-gradient\(circle at 35% 30%, rgba\(255,255,255/.test(cabHtml));
+
+  const padOffHtml = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "pad" as any, name: "Pad", value: 0 })} allParams={[]} onChange={noop} />
+  );
+  const padOnHtml = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "pad" as any, name: "Pad", min: 0, max: 1, value: 1 })} allParams={[]} onChange={noop} />
+  );
+  check("PadControl: carries the seeded material grain texture at rest", padOffHtml.includes("data:image/svg+xml"));
+  check("PadControl: carries the seeded material grain texture when active", padOnHtml.includes("data:image/svg+xml"));
+
+  const meterHtml = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "meter" as any, name: "Meter", min: -60, max: 0, value: -12 })} allParams={[]} onChange={noop} />
+  );
+  // Lit segments are the bare 6-hex-digit color; dim (unlit) segments are
+  // the same color with a "22" alpha suffix appended -- match on a
+  // non-hex-digit boundary so "lit" doesn't accidentally also match the
+  // dim form as a substring prefix.
+  const litSegments = (meterHtml.match(/background-color:#(?:10b981|fbbf24|f43f5e)(?![0-9a-f])/g) || []).length;
+  const dimSegments = (meterHtml.match(/background-color:#(?:10b981|fbbf24|f43f5e)22/g) || []).length;
+  check("MeterControl: renders 12 discrete segments, not one continuous gradient bar", !meterHtml.includes("gradient"));
+  check("MeterControl: has both lit and unlit segments at a mid-range value (real per-segment state, not all-on/all-off)", litSegments > 0 && dimSegments > 0, `lit=${litSegments} dim=${dimSegments}`);
+  const meterFull = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "meter" as any, name: "Meter", min: -60, max: 0, value: 0 })} allParams={[]} onChange={noop} />
+  );
+  const meterEmpty = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "meter" as any, name: "Meter", min: -60, max: 0, value: -60 })} allParams={[]} onChange={noop} />
+  );
+  check("MeterControl: lit segment count actually tracks the value (decisive gap between empty and full)", meterFull !== meterEmpty && meterEmpty.includes("#10b98122"));
 }
 
 console.log(failures === 0 ? "UI RENDER: ALL CHECKS PASS" : failures + " FAILURE(S)");

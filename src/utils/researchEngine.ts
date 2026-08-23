@@ -112,13 +112,18 @@ export interface ResearchItem {
   decidedAt?: string;
   /** Who/what decided this item. "auto" means the Research Lab's "Include
    *  live web sources" toggle auto-approved it the moment research
-   *  completed, with no human click -- it still had to pass the exact same
-   *  isApprovable() check (no blocking conflicts, any proposed module
-   *  already passed the real quality gate) a human's Approve click also
-   *  requires, so this only automates the click, it never relaxes what
-   *  "approvable" means. Undefined while pending, and for every item
-   *  decided before this field existed (a real absence, not stale data). */
-  decidedBy?: "human" | "auto";
+   *  completed, with no human click -- a human still chose WHICH gap to
+   *  research. "roaming" means Roaming Mode (roamingResearch.ts) chose the
+   *  gap AND approved it, with no human involved at any step -- a strictly
+   *  larger delegation than "auto", which is why it's its own value rather
+   *  than collapsed into "auto". Either non-human value still had to pass
+   *  the exact same isApprovable() check (no blocking conflicts, any
+   *  proposed module already passed the real quality gate) a human's
+   *  Approve click also requires -- this field is a label on WHO decided,
+   *  never a relaxation of what "approvable" means. Undefined while
+   *  pending, and for every item decided before this field existed (a real
+   *  absence, not stale data). */
+  decidedBy?: "human" | "auto" | "roaming";
 }
 
 /* ------------------------------------------------------------------ */
@@ -384,6 +389,22 @@ function verifyModule(family: PluginFamily, title: string, parameters: DspRecipe
 /* ------------------------------------------------------------------ */
 
 /**
+ * The queue's identity key for a concept -- the same resolution `runResearch`
+ * uses for its own dedup AND stores as `item.concept` (see below). Anything
+ * that asks "has this concept already been attempted?" (e.g. Roaming
+ * Mode's picker in roamingResearch.ts) MUST resolve through this, not
+ * compare a raw caller string directly against `item.concept` --
+ * `corpusEntriesFor` does fuzzy substring/regex matching, so a raw
+ * research key ("parallel compression") is not always textually equal to
+ * the concept it resolves to and gets stored as ("parallel-compression").
+ * Comparing the wrong thing silently misses a match and would re-research
+ * (or endlessly re-attempt) a concept that already has a queue entry.
+ */
+export function resolveResearchConcept(concept: string): string {
+  return corpusEntriesFor(concept)[0]?.concept ?? concept;
+}
+
+/**
  * Research one concept end-to-end and queue the result for human approval.
  * Returns the queued (or already-pending) item. Deterministic without any
  * sources; `sources.llmConfig` adds optional low-authority model notes and
@@ -408,7 +429,7 @@ export async function runResearch(
   // happened to already equal its own corpus's canonical concept string
   // (raw input === resolved concept is not something callers should have to
   // guarantee).
-  const resolvedConcept = corpusEntriesFor(concept)[0]?.concept ?? concept;
+  const resolvedConcept = resolveResearchConcept(concept);
   const existing = readResearchQueue().find((i) => i.concept === resolvedConcept && i.status === "pending");
   if (existing) return existing;
 
@@ -472,7 +493,7 @@ export function isApprovable(item: ResearchItem): boolean {
   return item.claims.length > 0;
 }
 
-function decide(id: string, status: "approved" | "rejected", decidedBy: "human" | "auto" = "human"): ResearchItem | null {
+function decide(id: string, status: "approved" | "rejected", decidedBy: "human" | "auto" | "roaming" = "human"): ResearchItem | null {
   const queue = readResearchQueue();
   const item = queue.find((i) => i.id === id);
   if (!item || item.status !== "pending") return null;
@@ -485,9 +506,11 @@ function decide(id: string, status: "approved" | "rejected", decidedBy: "human" 
 }
 
 /** `decidedBy` defaults to "human" (the Research Lab's manual Approve
- *  button) -- pass "auto" only from the online-research auto-add path.
- *  Either way this still refuses anything that fails isApprovable(). */
-export function approveResearch(id: string, decidedBy: "human" | "auto" = "human"): ResearchItem | null {
+ *  button) -- pass "auto" from the online-research checkbox's auto-add
+ *  path, or "roaming" from Roaming Mode (roamingResearch.ts). Every value
+ *  still refuses anything that fails isApprovable() -- this parameter is
+ *  a label, never a permission. */
+export function approveResearch(id: string, decidedBy: "human" | "auto" | "roaming" = "human"): ResearchItem | null {
   return decide(id, "approved", decidedBy);
 }
 

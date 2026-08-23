@@ -9,28 +9,21 @@
  * gate. Blocked concepts show their structural constraint and cannot be
  * approved at all.
  */
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BookOpen, Search, CheckCircle2, XCircle, AlertTriangle, ShieldCheck,
-  ShieldAlert, Ban, Loader2, GraduationCap, ListX, ExternalLink,
+  ShieldAlert, Ban, Loader2, GraduationCap, ListX, ExternalLink, Radar,
 } from "lucide-react";
 import {
   ResearchItem, runResearch, approveResearch, rejectResearch, readResearchQueue, isApprovable, createProxyWebFetcher,
 } from "../utils/researchEngine";
-import { runKnowledgeAudit, CURRICULUM } from "../utils/knowledgeAudit";
-import { readPromptGaps } from "../utils/knowledgeGraph";
+import { listKnowledgeGaps, KnowledgeGap } from "../utils/knowledgeAudit";
 import { getLLMConfig, isLocalProvider } from "../utils/llmGateway";
+import { isRoamingEnabled, setRoamingEnabled, getRoamingStatus, subscribeRoaming, RoamingStatus } from "../utils/roamingResearch";
 import { Globe, Github } from "lucide-react";
 
 interface ResearchLabProps {
   triggerToast: (message: string) => void;
-}
-
-interface GapRow {
-  area: string;
-  label: string;
-  /** Concept key handed to the research engine (corpus lookup). */
-  researchKey: string;
 }
 
 function authorityBadge(authority: number): { label: string; cls: string } {
@@ -51,32 +44,26 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
     setGapsVersion((v) => v + 1);
   }, []);
 
+  // Roaming Mode's status lives in roamingResearch.ts, not here -- the loop
+  // itself keeps running whether or not this panel is even mounted. This
+  // just subscribes to push updates so the status line and Decision
+  // History both update live, unattended, with no polling.
+  const [roaming, setRoaming] = useState<RoamingStatus>(getRoamingStatus);
+  useEffect(() => subscribeRoaming((s) => { setRoaming(s); refresh(); }), [refresh]);
+  const toggleRoaming = () => setRoamingEnabled(!isRoamingEnabled());
+
   // Gap list: curriculum items the graph can't reach (cheap — no benchmark
   // builds) plus prompts the banks couldn't serve. Recomputed after every
-  // approval because approvals close gaps.
-  const gaps = useMemo<GapRow[]>(() => {
-    const audit = runKnowledgeAudit({ withBenchmarks: false });
-    const missingRows: GapRow[] = [];
-    for (const area of audit.coverage) {
-      for (const missingLabel of area.missing) {
-        const item = CURRICULUM.find((c) => c.area === area.area && c.concept === missingLabel);
-        missingRows.push({ area: area.area, label: missingLabel, researchKey: item?.satisfiedBy[0] ?? missingLabel });
-      }
-    }
-    const promptRows: GapRow[] = readPromptGaps().map((g) => ({
-      area: "Unserved prompts",
-      label: `"${g.prompt}"`,
-      researchKey: g.prompt,
-    }));
-    return [...missingRows, ...promptRows];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gapsVersion]);
+  // approval because approvals close gaps. Shared with Roaming Mode's
+  // background picker (roamingResearch.ts) via listKnowledgeGaps() so both
+  // always see the identical set of open gaps -- not two implementations.
+  const gaps = useMemo<KnowledgeGap[]>(() => listKnowledgeGaps(), [gapsVersion]);
 
   const pending = queue.filter((i) => i.status === "pending");
   const decided = [...queue.filter((i) => i.status !== "pending")].reverse();
   const pendingConcepts = new Set(pending.map((i) => i.concept));
 
-  const handleResearch = async (gap: GapRow) => {
+  const handleResearch = async (gap: KnowledgeGap) => {
     setBusyKey(gap.researchKey);
     try {
       const cfg = getLLMConfig();
@@ -183,6 +170,65 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
             </span>
           </span>
         </label>
+      </div>
+
+      {/* Roaming Mode: a separate, always-on background researcher --
+          distinct from the checkbox above, which only affects the manual
+          Research button. Toggling this on keeps researching the factory's
+          own open gaps continuously, with no per-gap click, ever, for as
+          long as this browser tab stays open (regardless of which screen
+          you're looking at). */}
+      <div className="bg-[#111215]/60 border border-neutral-850 rounded-xl p-4 space-y-1.5">
+        <div className="flex items-center gap-2">
+          <Radar className={`w-3.5 h-3.5 ${roaming.enabled ? "text-violet-400" : "text-neutral-500"}`} />
+          <span className="font-bold text-neutral-200 text-xs">Roaming Mode</span>
+          <button
+            role="switch"
+            aria-checked={roaming.enabled}
+            aria-label="Roaming Mode"
+            onClick={toggleRoaming}
+            className={`ml-auto relative w-9 h-5 rounded-full transition-colors cursor-pointer ${roaming.enabled ? "bg-violet-600" : "bg-neutral-800"}`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${roaming.enabled ? "translate-x-4" : "translate-x-0"}`}
+            />
+          </button>
+        </div>
+        <p className="text-[10px] text-neutral-400 leading-relaxed">
+          Runs on its own ~90s cycle, only while this browser tab is open, and always uses live web sources
+          regardless of the checkbox above. Adds a finding only when it clears the <em>same</em> blocking-conflict
+          and quality-gate checks the Approve button requires — a blocked concept or a gate failure still lands in
+          the pending list below for you.
+        </p>
+        <div className="flex items-center gap-1.5 text-[10.5px] text-neutral-300">
+          {roaming.phase === "off" && <span className="text-neutral-500 italic">Off — the factory only researches gaps when you click Research.</span>}
+          {roaming.phase === "researching" && (
+            <>
+              <Loader2 className="w-3 h-3 animate-spin text-violet-400" />
+              Researching <span className="font-semibold text-neutral-100">&quot;{roaming.concept}&quot;</span>…
+            </>
+          )}
+          {roaming.phase === "idle" && <span className="text-emerald-400/90">Every measured gap has been attempted — watching for new ones.</span>}
+          {roaming.phase === "done" && roaming.lastOutcome && (
+            <span>
+              {roaming.lastOutcome.kind === "auto-added" && (
+                <span className="text-emerald-400/90">
+                  Auto-added &quot;{roaming.lastOutcome.concept}&quot;{roaming.lastOutcome.buildable ? " — the factory can now build it." : " — now counts as covered knowledge."}
+                </span>
+              )}
+              {roaming.lastOutcome.kind === "queued" && (
+                <span className="text-amber-400/90">
+                  Queued &quot;{roaming.lastOutcome.concept}&quot; for your review ({roaming.lastOutcome.reason === "blocked" ? "structurally blocked" : roaming.lastOutcome.reason === "gate-failed" ? "failed the quality gate" : "no findings"}).
+                </span>
+              )}
+              {roaming.lastOutcome.kind === "error" && <span className="text-rose-400/90">Research failed: {roaming.lastOutcome.message}</span>}
+              {roaming.lastOutcome.kind === "idle" && <span className="text-emerald-400/90">Every measured gap has been attempted — watching for new ones.</span>}
+            </span>
+          )}
+          {(roaming.researched > 0 || roaming.autoAdded > 0) && (
+            <span className="ml-auto text-[9px] font-mono text-neutral-500">{roaming.researched} researched · {roaming.autoAdded} added</span>
+          )}
+        </div>
       </div>
 
       {/* Gaps to research */}
@@ -369,6 +415,15 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
                     title="Auto-added by the online-research toggle, no manual click"
                   >
                     auto
+                  </span>
+                )}
+                {item.status === "approved" && item.decidedBy === "roaming" && (
+                  <span
+                    className="flex items-center gap-0.5 text-[8px] font-mono uppercase tracking-wide text-violet-400/90 bg-violet-950/40 border border-violet-900 rounded px-1 py-0.5"
+                    title="Added by Roaming Mode — researched and approved with no click at all"
+                  >
+                    <Radar className="w-2 h-2" />
+                    roaming
                   </span>
                 )}
                 {item.status === "approved" && item.proposedModule && (

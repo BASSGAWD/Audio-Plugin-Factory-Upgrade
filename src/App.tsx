@@ -69,6 +69,7 @@ import DiagnosticsLab from "./components/DiagnosticsLab";
 import UIDesigner from "./components/UIDesigner";
 import MemoryCore from "./components/MemoryCore";
 import ResearchLab from "./components/ResearchLab";
+import { initRoamingResearch } from "./utils/roamingResearch";
 import PresetManager from "./components/PresetManager";
 import GitHubAudioDiscovery from "./components/GitHubAudioDiscovery";
 import NativeBuildPanel from "./components/NativeBuildPanel";
@@ -548,6 +549,15 @@ export default function App() {
     setUiMode(mode);
     localStorage.setItem(STORAGE_KEY_UI_MODE, mode);
   };
+
+  // Roaming Mode (Research Lab): owned entirely by roamingResearch.ts (its
+  // own persisted flag + interval), booted once here -- above every uiMode
+  // branch below -- so it keeps running across every screen and Pro-mode
+  // companion tab, not just while ResearchLab itself happens to be mounted.
+  // No-op unless the user left it on; idempotent, so React.StrictMode's
+  // dev double-invoke of this effect is harmless. Deliberately no cleanup
+  // returned -- stopping the loop on unmount would defeat the feature.
+  useEffect(() => { initRoamingResearch(); }, []);
   const [plugin, setPlugin] = useState<AudioPlugin>(DEFAULT_STARTING_PLUGIN);
   const [selectedAgentId, setSelectedAgentId] = useState<string>("nexus");
   const [inputMessage, setInputMessage] = useState("");

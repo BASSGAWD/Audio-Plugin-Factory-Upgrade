@@ -18,7 +18,7 @@
  */
 
 import { AudioPlugin } from "../types";
-import { KNOWLEDGE_GRAPH, KnowledgeNode, knownConcepts, rankTopologies } from "./knowledgeGraph";
+import { KNOWLEDGE_GRAPH, KnowledgeNode, knownConcepts, rankTopologies, readPromptGaps } from "./knowledgeGraph";
 import { inferRequirements } from "./requirements";
 import { buildOfflineCandidates } from "./offlineBuilder";
 import { runQualityGate } from "./qualityGate";
@@ -334,6 +334,45 @@ export function runKnowledgeAudit(opts: { withBenchmarks?: boolean } = {}): Know
     benchmarks,
     benchmarkPassRate: benchmarks.length === 0 ? 0 : Math.round((passCount / benchmarks.length) * 100),
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Gap list -- shared by the Research Lab's manual gap list and Roaming */
+/* Mode's background picker (roamingResearch.ts). One definition so     */
+/* both always see the identical set of open gaps.                     */
+/* ------------------------------------------------------------------ */
+
+export interface KnowledgeGap {
+  area: string;
+  label: string;
+  /** Concept key handed to the research engine (corpus lookup). */
+  researchKey: string;
+}
+
+/**
+ * The factory's measured, currently-open knowledge gaps: curriculum items
+ * the graph can't reach (cheap -- coverage only, no benchmark builds), then
+ * prompts the build banks couldn't serve (logPromptGap in knowledgeGraph.ts).
+ * Queue-agnostic by design: this reports what's MISSING, not what's already
+ * been ATTEMPTED (a pending/approved/rejected research item) -- filtering
+ * out already-attempted gaps is the caller's job (see
+ * roamingResearch.ts's pickNextRoamingGap), since a manual "Research"
+ * button and an automatic picker have different reasons to want that
+ * filter applied differently.
+ */
+export function listKnowledgeGaps(): KnowledgeGap[] {
+  const audit = runKnowledgeAudit({ withBenchmarks: false });
+  const rows: KnowledgeGap[] = [];
+  for (const area of audit.coverage) {
+    for (const missingLabel of area.missing) {
+      const item = CURRICULUM.find((c) => c.area === area.area && c.concept === missingLabel);
+      rows.push({ area: area.area, label: missingLabel, researchKey: item?.satisfiedBy[0] ?? missingLabel });
+    }
+  }
+  for (const g of readPromptGaps()) {
+    rows.push({ area: "Unserved prompts", label: `"${g.prompt}"`, researchKey: g.prompt });
+  }
+  return rows;
 }
 
 /* ------------------------------------------------------------------ */

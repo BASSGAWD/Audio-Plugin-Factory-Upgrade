@@ -84,14 +84,38 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
         llmConfig: isLocalProvider(cfg) ? cfg : null,
         webFetcher: useWeb ? createProxyWebFetcher() : null,
       });
+
+      // Online mode auto-adds passing findings the moment research
+      // completes -- no relaxed bar: this only fires when the item already
+      // clears isApprovable(), the EXACT same check that enables the manual
+      // Approve button below, so it automates the click rather than
+      // skipping any safety/gate check.
+      let decidedItem = item;
+      let autoApproved = false;
+      if (useWeb && isApprovable(item)) {
+        const approved = approveResearch(item.id, "auto");
+        if (approved) {
+          decidedItem = approved;
+          autoApproved = true;
+        }
+      }
       refresh();
-      const blocked = item.conflicts.some((c) => c.severity === "blocking");
-      const webCount = item.claims.filter((c) => /live web/i.test(c.citation.source)).length;
-      triggerToast(
-        blocked
-          ? `Research on "${item.concept}": found a structural constraint — see the pending card.`
-          : `Research on "${item.concept}" is ready for your review (${item.claims.length} cited finding${item.claims.length === 1 ? "" : "s"}${webCount ? `, ${webCount} from the web` : ""}).`
-      );
+
+      const blocked = decidedItem.conflicts.some((c) => c.severity === "blocking");
+      const webCount = decidedItem.claims.filter((c) => /live web/i.test(c.citation.source)).length;
+      if (autoApproved) {
+        triggerToast(
+          decidedItem.proposedModule
+            ? `Auto-added: "${decidedItem.concept}" — the factory can now build it (try asking for one).`
+            : `Auto-added: "${decidedItem.concept}" now counts as covered knowledge.`
+        );
+      } else {
+        triggerToast(
+          blocked
+            ? `Research on "${decidedItem.concept}": found a structural constraint — see the pending card.`
+            : `Research on "${decidedItem.concept}" is ready for your review (${decidedItem.claims.length} cited finding${decidedItem.claims.length === 1 ? "" : "s"}${webCount ? `, ${webCount} from the web` : ""}).`
+        );
+      }
     } catch (err: any) {
       console.error("[ResearchLab] research failed:", err);
       triggerToast(`Research failed: ${err?.message || "unknown error"}`);
@@ -129,9 +153,12 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
         </div>
         <p className="text-[10px] text-neutral-400 leading-relaxed">
           The factory researches its own measured knowledge gaps: every finding carries a citation with an authority
-          score, proposed DSP modules are verified through the quality gate <em>before</em> you see them, and{" "}
-          <strong className="text-orange-300">nothing becomes factory knowledge until you approve it here</strong>.
-          Approved modules become buildable immediately — just describe one in the Studio.
+          score, and proposed DSP modules are verified through the quality gate <em>before</em> you ever see them.{" "}
+          <strong className="text-orange-300">By default nothing becomes factory knowledge until you approve it
+          here</strong> — check the box below to also auto-add passing findings the instant research completes, no
+          click required. Either way, a proposed module only ever lands if it already passed the real gate; the
+          checkbox only decides who clicks Approve, never what "approvable" means. Approved modules become buildable
+          immediately — just describe one in the Studio.
         </p>
         <label className="flex items-center gap-2 mt-1 cursor-pointer select-none">
           <input
@@ -139,12 +166,21 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
             checked={useWeb}
             onChange={(e) => setUseWeb(e.target.checked)}
             className="accent-sky-500 w-3.5 h-3.5"
-            aria-label="Include live web sources"
+            aria-label="Include live web sources and auto-add passing findings"
           />
           <Globe className="w-3 h-3 text-sky-400" />
           <span className="text-[10px] text-neutral-300">
-            Include <strong className="text-sky-300">live web sources</strong>
-            <span className="text-neutral-500"> — fetches a curated allowlist of authoritative references (Wikipedia, CCRMA, W3C) for cited evidence, and links to matching open-source implementations from the OpenAudio index for code examples. Off by default; everything fetched is data only — it can never build or approve anything on its own.</span>
+            Include <strong className="text-sky-300">live web sources</strong> and{" "}
+            <strong className="text-sky-300">auto-add passing findings</strong>
+            <span className="text-neutral-500">
+              {" "}— fetches a curated allowlist of authoritative references (Wikipedia, CCRMA, W3C) for cited
+              evidence, and links to matching open-source implementations from the OpenAudio index for code
+              examples. While checked, any research run that clears the same blocking-conflict and quality-gate
+              checks the Approve button below requires is added to the factory's knowledge base immediately,
+              without waiting for you to click anything — a blocked concept or a module that fails the gate still
+              lands in the pending list for you to look at, exactly as before. Off by default; nothing is fetched or
+              auto-added unless this is checked.
+            </span>
           </span>
         </label>
       </div>
@@ -327,6 +363,14 @@ export default function ResearchLab({ triggerToast }: ResearchLabProps) {
                 )}
                 <span className="text-neutral-300">{item.concept}</span>
                 <span className="text-[8.5px] font-mono text-neutral-600">{item.area}</span>
+                {item.status === "approved" && item.decidedBy === "auto" && (
+                  <span
+                    className="text-[8px] font-mono uppercase tracking-wide text-sky-400/90 bg-sky-950/40 border border-sky-900 rounded px-1 py-0.5"
+                    title="Auto-added by the online-research toggle, no manual click"
+                  >
+                    auto
+                  </span>
+                )}
                 {item.status === "approved" && item.proposedModule && (
                   <span className="text-[8.5px] text-emerald-500/80">buildable</span>
                 )}

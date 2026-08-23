@@ -155,6 +155,45 @@ const mem = new Map<string, string>();
   const unknown = await runResearch("quantum yodel translation");
   check("unknown concept blocks with 'no findings'", unknown.conflicts.some((c) => c.severity === "blocking" && /no findings/i.test(c.text)) && !isApprovable(unknown));
 
+  /* ---- decidedBy: "auto" is a real, gate-preserving path, not a way to
+   * bypass approval. Research Lab's "Include live web sources" toggle
+   * calls approveResearch(id, "auto") instead of waiting for a human
+   * click. It must (a) actually stamp decidedBy so the UI can show an
+   * honest "auto" badge, (b) default to "human" when nothing is passed
+   * (every pre-existing manual-Approve call site, including every call
+   * above in this very file), and (c) still refuse to approve anything
+   * that fails isApprovable() -- "auto" is never a lower bar than a
+   * human click, only a way to skip waiting for one. ---- */
+  {
+    // fixture-a's original item was already approved above; re-researching
+    // the same concept yields a FRESH pending item (dedup only matches
+    // pending, not decided, items) -- exactly the "research again" flow
+    // the online toggle actually drives.
+    const autoItem = await runResearch("test-lifecycle-fixture-a");
+    check("re-research after a prior decision yields a fresh pending item", autoItem.status === "pending" && autoItem.id !== fixtureA.id);
+    const autoDecided = approveResearch(autoItem.id, "auto");
+    check("approveResearch(id, \"auto\") approves an approvable item", autoDecided?.status === "approved");
+    check("approveResearch(id, \"auto\") stamps decidedBy: \"auto\"", autoDecided?.decidedBy === "auto");
+
+    const manualItem = await runResearch("test-lifecycle-fixture-a");
+    const manualDecided = approveResearch(manualItem.id); // no second arg -- every pre-existing call site in this file
+    check("approveResearch(id) with no decidedBy arg defaults to \"human\" (backward compatible)", manualDecided?.decidedBy === "human");
+
+    const rejectItem = await runResearch("test-lifecycle-fixture-a");
+    const rejectDecided = rejectResearch(rejectItem.id);
+    check("rejectResearch always stamps decidedBy: \"human\" (no auto-reject path exists)", rejectDecided?.decidedBy === "human");
+
+    // Decisive: "auto" must not relax isApprovable() -- feeding it a
+    // structurally blocked, unapprovable item must still refuse and leave
+    // the item pending, exactly like a disabled Approve button would.
+    const blockedForAuto = await runResearch("quantum yodel translation redux");
+    check("blocked concept is not approvable (sanity)", !isApprovable(blockedForAuto));
+    const blockedAutoResult = approveResearch(blockedForAuto.id, "auto");
+    check("approveResearch(id, \"auto\") refuses a non-approvable item, same as a human Approve click would", blockedAutoResult === null);
+    const stillPending = readResearchQueue().find((i) => i.id === blockedForAuto.id);
+    check("the refused item is untouched -- still pending, not silently force-approved", stillPending?.status === "pending" && stillPending?.decidedBy === undefined);
+  }
+
   // The "already-covered concept" scenario is now exercised directly at the
   // top of this file (parallel-compression is covered from the start, not
   // partway through), so no separate re-check is needed here.

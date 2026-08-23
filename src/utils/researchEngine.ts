@@ -110,6 +110,15 @@ export interface ResearchItem {
   status: "pending" | "approved" | "rejected";
   createdAt: string;
   decidedAt?: string;
+  /** Who/what decided this item. "auto" means the Research Lab's "Include
+   *  live web sources" toggle auto-approved it the moment research
+   *  completed, with no human click -- it still had to pass the exact same
+   *  isApprovable() check (no blocking conflicts, any proposed module
+   *  already passed the real quality gate) a human's Approve click also
+   *  requires, so this only automates the click, it never relaxes what
+   *  "approvable" means. Undefined while pending, and for every item
+   *  decided before this field existed (a real absence, not stale data). */
+  decidedBy?: "human" | "auto";
 }
 
 /* ------------------------------------------------------------------ */
@@ -463,23 +472,27 @@ export function isApprovable(item: ResearchItem): boolean {
   return item.claims.length > 0;
 }
 
-function decide(id: string, status: "approved" | "rejected"): ResearchItem | null {
+function decide(id: string, status: "approved" | "rejected", decidedBy: "human" | "auto" = "human"): ResearchItem | null {
   const queue = readResearchQueue();
   const item = queue.find((i) => i.id === id);
   if (!item || item.status !== "pending") return null;
   if (status === "approved" && !isApprovable(item)) return null;
   item.status = status;
   item.decidedAt = new Date().toISOString();
+  item.decidedBy = decidedBy;
   writeResearchQueue(queue);
   return item;
 }
 
-export function approveResearch(id: string): ResearchItem | null {
-  return decide(id, "approved");
+/** `decidedBy` defaults to "human" (the Research Lab's manual Approve
+ *  button) -- pass "auto" only from the online-research auto-add path.
+ *  Either way this still refuses anything that fails isApprovable(). */
+export function approveResearch(id: string, decidedBy: "human" | "auto" = "human"): ResearchItem | null {
+  return decide(id, "approved", decidedBy);
 }
 
 export function rejectResearch(id: string): ResearchItem | null {
-  return decide(id, "rejected");
+  return decide(id, "rejected", "human");
 }
 
 /* ------------------------------------------------------------------ */

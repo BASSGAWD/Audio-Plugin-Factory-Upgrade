@@ -106,7 +106,25 @@ ${plugin.dspFunction.replace(/\*\//g, "* /")}
 }
 
 function cppIdent(p: PluginParameter): string {
-  return p.id.replace(/[^a-zA-Z0-9_]/g, "_");
+  const cleaned = p.id.replace(/[^a-zA-Z0-9_]/g, "_");
+  // A C++ identifier can't start with a digit -- confirmed the exact same
+  // guard already exists in server/nativeBuild.ts's cppIdentifier() but was
+  // never ported here; a numeric-led param id (e.g. a sanitized "1x12"-
+  // style id) would otherwise emit an illegal declaration.
+  return /^[0-9]/.test(cleaned) ? `p_${cleaned}` : cleaned;
+}
+
+/** Valid C++ float literal: integers need the decimal point ("20f" is a
+ *  compile error -- C3688 -- "20.0f" is not). Same helper as
+ *  server/nativeBuild.ts's cppFloat(), ported verbatim rather than
+ *  reinvented -- that file already fixed this exact defect, it just never
+ *  propagated to this sibling generator, which is why every whole-number
+ *  parameter default (dB/ms/Hz/ratio-count -- the common case) shipped an
+ *  invalid literal ("3f" instead of "3.0f") in every scaffold this
+ *  function produced. */
+function cppFloat(n: number): string {
+  const v = Number(n) || 0;
+  return `${v}${Number.isInteger(v) ? ".0" : ""}f`;
 }
 
 export function buildJuceScaffold(plugin: AudioPlugin): string {
@@ -114,7 +132,7 @@ export function buildJuceScaffold(plugin: AudioPlugin): string {
   const className = (plugin.name || "Generated").replace(/[^a-zA-Z0-9]/g, "") + "Processor";
 
   const paramDecls = params
-    .map((p) => `    float ${cppIdent(p)} = ${p.defaultValue}f; // "${p.name}" [${p.min} .. ${p.max}] ${p.unit || ""}`)
+    .map((p) => `    float ${cppIdent(p)} = ${cppFloat(p.defaultValue)}; // "${p.name}" [${p.min} .. ${p.max}] ${p.unit || ""}`)
     .join("\n");
 
   const smoothDecls = params.map((p) => `    juce::SmoothedValue<float> ${cppIdent(p)}Smooth;`).join("\n");

@@ -128,6 +128,49 @@ const filterPlugin: AudioPlugin = {
 const filterScaffold = buildJuceScaffold(filterPlugin);
 check("portableCodegen: guard present for a second, unrelated category (filter)", /sanitizeSample/.test(filterScaffold) && /juce::jlimit\s*\(\s*-4\.0f\s*,\s*4\.0f/.test(filterScaffold));
 
+/* --- C++ float-literal correctness: the compile-breaking bug this session
+   found and fixed. explosivePlugin's own params are exactly the real-world
+   mix that exposed it -- time's default (350) is a whole number, feedback's
+   (0.45) and mix's (0.4) are not. "350f" is a C++ compile error (C3688);
+   "350.0f" is required. --- */
+check(
+  "portableCodegen: a whole-number default emits a VALID C++ float literal (350.0f, not the broken 350f)",
+  /float time = 350\.0f;/.test(scaffold),
+  scaffold.match(/float time = [^;]+;/)?.[0]
+);
+check(
+  "portableCodegen: a decimal default ships unchanged, not re-padded (0.45f stays 0.45f)",
+  /float feedback = 0\.45f;/.test(scaffold),
+  scaffold.match(/float feedback = [^;]+;/)?.[0]
+);
+check(
+  "portableCodegen: no bare-integer float literal survives ANYWHERE in the scaffold -- the actual defect, decisively closed",
+  !/=\s*-?\d+f\b/.test(scaffold),
+  scaffold.match(/=\s*-?\d+f\b/)?.[0]
+);
+check(
+  "portableCodegen: whole-number default correct for a second, unrelated plugin too (resonance: 35 -> 35.0f)",
+  /float resonance = 35\.0f;/.test(filterScaffold),
+  filterScaffold.match(/float resonance = [^;]+;/)?.[0]
+);
+
+// A closely-related defect found alongside the float-literal bug: a param
+// id that starts with a digit after sanitization is an ILLEGAL C++
+// identifier ("1x12" can't be a variable name) -- the exact same guard
+// nativeBuild.ts's cppIdentifier() already had, never ported here either.
+const digitLedPlugin: AudioPlugin = {
+  id: "p3", name: "Digit Led Param Test", category: "filter", description: "",
+  parameters: [makeParam("1x12", "1x12 Size", 0, 2, 1)],
+  dspFunction: `return inputSample;`, faustCode: "", cppJuceCode: "", createdAt: "",
+};
+const digitLedScaffold = buildJuceScaffold(digitLedPlugin);
+check(
+  "portableCodegen: a numeric-led param id gets a legal C++ identifier (p_1x12, not the illegal 1x12)",
+  /float p_1x12 = 1\.0f;/.test(digitLedScaffold),
+  digitLedScaffold.match(/float \S+ = 1\.0f;/)?.[0]
+);
+check("portableCodegen: never emits an identifier that illegally starts with a digit", !/\bfloat\s+\d/.test(digitLedScaffold));
+
 /* --- Honest vs. deliberately broken counterpart (CLAUDE.md standard) --- */
 // Simulate the exact pre-patch template (guard function AND the wrapped
 // call both absent) and prove the auditor's new check sees a decisive gap

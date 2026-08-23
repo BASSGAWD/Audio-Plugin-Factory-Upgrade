@@ -59,6 +59,70 @@ defect(
   [{ id: "feedback", name: "Feedback", min: 0, max: 1.2, defaultValue: 0.5, value: 0.5 }]
 );
 
+/* ---- 2b. magicNumbersPerLine: computed since this metric existed, but
+   never turned into a finding until this session -- confirm it now
+   actually catches a genuinely dense, uncommented run of numeric
+   constants (the exact "why THESE buffer lengths?" pattern this session's
+   investigation found in the real reverb recipe), and does NOT false-
+   positive on an equally long function that just isn't magic-number-heavy
+   -- a decisive gap between the two, not a metric that fires on line count
+   alone. ---- */
+{
+  const denseMagicNumbers = `
+if (!state.init) {
+  state.c0 = new Float32Array(1557); state.c1 = new Float32Array(1617);
+  state.c2 = new Float32Array(1491); state.c3 = new Float32Array(1422);
+  state.i0 = 0; state.i1 = 0; state.i2 = 0; state.i3 = 0;
+  state.a1 = new Float32Array(225); state.a1i = 0;
+  state.a2 = new Float32Array(556); state.a2i = 0;
+  state.init = true;
+}
+let decay = params.decay !== undefined ? params.decay : 0.75;
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let s = inputSample * 0.4187 + state.c0[state.i0] * 0.2612 + state.c1[state.i1] * 0.1934;
+s += state.c2[state.i2] * 0.3311 + state.c3[state.i3] * 0.2778;
+return Math.tanh(inputSample * (1 - mix) + s * mix * 1.6);
+`;
+  const sparse = auditDspCode(denseMagicNumbers);
+  check(
+    "magicNumbersPerLine: a genuinely dense, uncommented run of numeric constants produces a real finding",
+    sparse.findings.some((f) => f.dimension === "maintainability" && /numeric literals per line/i.test(f.message)),
+    `metrics=${JSON.stringify(sparse.metrics)} findings=${sparse.findings.map((f) => f.message).join(" | ")}`
+  );
+
+  // Same line count, same overall shape, but not magic-number-dense --
+  // must NOT trip the same check. Proves the finding tracks density, not
+  // just "this function is long".
+  const equallyLongButSparse = `
+if (!state.init) {
+  state.env = 0;
+  state.gain = 0;
+  state.init = true;
+}
+let threshold = params.threshold !== undefined ? params.threshold : -18;
+let ratio = params.ratio !== undefined ? params.ratio : 4;
+let attack = params.attack !== undefined ? params.attack : 10;
+let release = params.release !== undefined ? params.release : 150;
+let level = Math.abs(inputSample);
+state.env += (level > state.env ? attack : release) * (level - state.env);
+let over = Math.max(0, state.env - threshold);
+state.gain = over / ratio;
+return Math.tanh(inputSample - state.gain);
+`;
+  const denseFinding = sparse.findings.find((f) => f.dimension === "maintainability" && /numeric literals per line/i.test(f.message));
+  const notDense = auditDspCode(equallyLongButSparse);
+  check(
+    "magicNumbersPerLine: an equally long but NOT magic-number-dense function does not trip the same check",
+    !notDense.findings.some((f) => f.dimension === "maintainability" && /numeric literals per line/i.test(f.message)),
+    `metrics=${JSON.stringify(notDense.metrics)}`
+  );
+  check(
+    "magicNumbersPerLine: decisive gap between the dense and sparse fixtures' actual metric value",
+    !!denseFinding && sparse.metrics.magicNumbersPerLine > notDense.metrics.magicNumbersPerLine * 2,
+    `dense=${sparse.metrics.magicNumbersPerLine} sparse=${notDense.metrics.magicNumbersPerLine}`
+  );
+}
+
 /* ---- 3. No false positives on safe idioms ---- */
 const clean = (label: string, body: string, params: any[] = []) => {
   const r = auditDspCode(body, params);
@@ -91,9 +155,15 @@ check("all benchmarks are code-healthy (>= 90)", audit.benchmarks.every((b) => b
 /* ---- the sampler hardening actually landed: seeded PRNG, no random in code ---- */
 const sampler = DSP_RECIPES.find((r) => r.id === "sampler")!;
 const samplerCode = sampler.body.replace(/\/\/[^\n]*/g, ""); // ignore the explanatory comment
+// codeHealth is checked against the same >=95 "shipped module" bar used
+// elsewhere in this file, not an exact 100 -- this recipe's real body is
+// dense enough in numeric constants (46 lines, ~0.87 magic numbers/line)
+// to trip the new magicNumbersPerLine finding above (a real, deserved
+// advisory, not a false positive), which this PRNG-specific check has no
+// business depending on for an exact-100 pass/fail.
 check(
   "sampler uses a seeded PRNG, no Math.random in executable code",
-  !/Math\.random/.test(samplerCode) && /state\.rng/.test(sampler.body) && auditDspCode(sampler.body, sampler.parameters).codeHealth === 100
+  !/Math\.random/.test(samplerCode) && /state\.rng/.test(sampler.body) && auditDspCode(sampler.body, sampler.parameters).codeHealth >= 95
 );
 
 console.log(failures === 0 ? "\nCODE AUDIT: ALL CHECKS PASS" : `\n${failures} FAILURE(S)`);

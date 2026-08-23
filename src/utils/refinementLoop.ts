@@ -162,7 +162,20 @@ export function refinementScore(gate: QualityGateResult): number {
   // than visualBonus since it's a narrower, single-field check rather than
   // a full contrast measurement; still a pure tie-breaker, never gates.
   const skeuomorphicBonus = 0.1 * (gate.report.skeuomorphicFidelity?.score ?? 100);
-  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus + visualBonus + skeuomorphicBonus;
+  // CODE HEALTH — the DSP-code auditor's own static-quality score
+  // (codeAudit.ts: real-time safety, numerical guards, parameter
+  // smoothing, maintainability). This project's own documentation
+  // (codeAudit.ts's header comment, CLAUDE.md) already asserted this
+  // measurement "ranks candidates inside refinementScore()" -- it never
+  // actually did (grepped: zero references here before this line). A
+  // light tie-breaker like cpuBonus/visualBonus, not a correctness gate:
+  // codeHealth is informational by design (see CLAUDE.md's standing
+  // "measure, surface the evidence, feed the ranking -- don't move the
+  // floor" rule), so a build with a real numerical/smoothing defect loses
+  // a close tie to a cleaner one without ever being able to outrank
+  // something that's actually more correct or musical.
+  const codeHealthBonus = 0.15 * (gate.report.codeHealth ?? 100);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus + visualBonus + skeuomorphicBonus + codeHealthBonus;
 }
 
 /* ------------------------------------------------------------------ */

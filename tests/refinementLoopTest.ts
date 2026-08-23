@@ -227,6 +227,27 @@ function gatedBuild(prompt: string, dspOverride?: string): { plugin: AudioPlugin
   check("character index: breaks ties between equal-score candidates", refinementScore(highChar) > refinementScore(lowChar));
   check("character index: bonus stays small relative to correctness terms", refinementScore(highChar) - refinementScore(lowChar) <= 3);
 
+  /* 5e. CODE HEALTH: codeAudit.ts's own doc comment and CLAUDE.md both
+   *     asserted this measurement "ranks candidates inside
+   *     refinementScore()" -- it never actually did (confirmed by grep:
+   *     zero references before this session's fix). Same shape of check as
+   *     characterIndex just above: two otherwise-identical candidates,
+   *     differing only in codeHealth, must rank by it, and the gap must
+   *     stay a tie-breaker (small relative to the ~0-800 correctness
+   *     range), never enough to let a genuinely worse build outrank a
+   *     better one. */
+  const lowCodeHealth = { ...initial.gate, report: { ...initial.gate.report, codeHealth: 40 } };
+  const highCodeHealth = { ...initial.gate, report: { ...initial.gate.report, codeHealth: 100 } };
+  check("code health: breaks ties between equal-score candidates", refinementScore(highCodeHealth) > refinementScore(lowCodeHealth));
+  check(
+    "code health: bonus stays small relative to correctness terms (pure tie-breaker, never a gate)",
+    refinementScore(highCodeHealth) - refinementScore(lowCodeHealth) <= 15
+  );
+  check(
+    "code health: absent codeHealth defaults to 100 (no auditor run yet must never be treated as a defect)",
+    Math.abs(refinementScore({ ...initial.gate, report: { ...initial.gate.report, codeHealth: undefined } }) - refinementScore(highCodeHealth)) < 1e-9
+  );
+
   /* 6. Ranked candidates: distinct, described, and ordered — the leaderboard +
         blind-test payload. Even on an already-maxed build the loop must surface
         >=2 audibly-distinct versions to rank and audition. */

@@ -207,6 +207,25 @@ function auditMaintainability(code: string, findings: CodeFinding[]): CodeAuditR
   if (maxDepth > 6) {
     findings.push({ dimension: "maintainability", severity: "advisory", message: `nesting depth ${maxDepth} — deep control flow is hard to follow and to make branch-predictable` });
   }
+  // magicPerLine was computed and returned in `metrics` below but never
+  // turned into a finding or a score effect -- measured and reported,
+  // never actually audited. A genuinely dense run of unexplained literals
+  // (a specific buffer length, a tuned coefficient, a magic gain-comp
+  // exponent) is real undocumented-constant risk a reader can't tell apart
+  // from incidental numbers without a comment -- exactly what this
+  // dimension exists to catch. Gated on a minimum line count: the ratio is
+  // only a meaningful "hard to follow" signal over a real, multi-line
+  // function -- a short or single-line snippet (e.g. several statements
+  // joined with ";" on one line, as this project's own smaller test
+  // fixtures do) trivially inflates literals-per-line without the code
+  // actually being harder to read.
+  if (lines.length >= 10 && magicPerLine > 0.8) {
+    findings.push({
+      dimension: "maintainability",
+      severity: "advisory",
+      message: `~${Math.round(magicPerLine * 100) / 100} unexplained numeric literals per line — dense enough that a reader can't tell which constants are meaningful (a tuned buffer length, a specific coefficient) versus incidental; a short comment on the non-obvious ones would help`,
+    });
+  }
   return {
     lines: lines.length,
     maxNestingDepth: maxDepth,

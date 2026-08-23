@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   Guitar,
   BookOpen,
+  LayoutGrid,
 } from "lucide-react";
 import { AudioPlugin, PluginParameter } from "../types";
 import {
@@ -27,6 +28,9 @@ import {
   saveCanvasWorkspace,
   placeNewCard,
   mergeRebuildChanges,
+  CARD_FOOTPRINT_W,
+  CARD_FOOTPRINT_H,
+  CARD_FOOTPRINT_GAP,
 } from "../utils/canvasFactory";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
 import GenerativeFaceplate from "./GenerativeFaceplate";
@@ -808,14 +812,20 @@ export default function FactoryCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fitView = () => {
+  // Accepts an optional explicit card list so a caller that JUST changed
+  // positions (alignCards, below) can center the view around the NEW
+  // layout immediately, without waiting a tick for cardsRef.current to
+  // catch up with an async setCards -- avoids a setTimeout/effect just to
+  // sequence "reposition, then fit" correctly.
+  const fitView = (cardsOverride?: CanvasCard[]) => {
     const el = containerRef.current;
-    if (!el || cardsRef.current.length === 0) {
+    const list = cardsOverride ?? cardsRef.current;
+    if (!el || list.length === 0) {
       setView({ x: 0, y: 0, zoom: 1 });
       return;
     }
-    const xs = cardsRef.current.map((c) => c.x);
-    const ys = cardsRef.current.map((c) => c.y);
+    const xs = list.map((c) => c.x);
+    const ys = list.map((c) => c.y);
     const minX = Math.min(...xs) - 60;
     const minY = Math.min(...ys) - 60;
     const maxX = Math.max(...xs) + CARD_W + 60;
@@ -826,6 +836,25 @@ export default function FactoryCanvas({
       x: (el.clientWidth - (maxX - minX) * zoom) / 2 - minX * zoom,
       y: (el.clientHeight - 140 - (maxY - minY) * zoom) / 2 - minY * zoom,
     });
+  };
+
+  // "Align all cards": snaps every card into a clean grid (creation order,
+  // roughly square column count) using the SAME footprint/gap the
+  // collision-avoidance placement already uses, then centers the view on
+  // the freshly-tidied layout. Distinct from fitView alone, which only
+  // ever adjusts pan/zoom -- it never moves a card that's been dragged
+  // somewhere scattered.
+  const alignCards = () => {
+    if (cardsRef.current.length === 0) return;
+    const cols = Math.max(1, Math.ceil(Math.sqrt(cardsRef.current.length)));
+    const sorted = [...cardsRef.current].sort((a, b) => a.createdAt - b.createdAt);
+    const updated = sorted.map((c, i) => ({
+      ...c,
+      x: (i % cols) * (CARD_FOOTPRINT_W + CARD_FOOTPRINT_GAP),
+      y: Math.floor(i / cols) * (CARD_FOOTPRINT_H + CARD_FOOTPRINT_GAP),
+    }));
+    setCards(updated);
+    fitView(updated);
   };
 
   /* ---- keyboard ---- */
@@ -967,9 +996,10 @@ export default function FactoryCanvas({
         >
           {(
             [
+              { icon: <LayoutGrid className="w-3.5 h-3.5" />, label: "Align all cards", act: alignCards },
               { icon: <Plus className="w-3.5 h-3.5" />, label: "Zoom in", act: () => zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2) },
               { icon: <Minus className="w-3.5 h-3.5" />, label: "Zoom out", act: () => zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2) },
-              { icon: <Maximize2 className="w-3.5 h-3.5" />, label: "Fit all cards", act: fitView },
+              { icon: <Maximize2 className="w-3.5 h-3.5" />, label: "Fit all cards", act: () => fitView() },
             ] as const
           ).map((b) => (
             <button

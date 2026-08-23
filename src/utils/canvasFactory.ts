@@ -196,9 +196,13 @@ export const CANVAS_STORAGE_KEY = "audio_factory_canvas_v1";
  *  matches FactoryCanvas.tsx's actual worst-case rendered height: header
  *  (~52px) + the scrollable body's max-h-[440px] cap + footer (~44px). Keep
  *  these three in sync with that cap if it ever changes. */
-const CARD_FOOTPRINT_W = 360;
-const CARD_FOOTPRINT_H = 536;
-const CARD_FOOTPRINT_GAP = 24;
+// Exported so FactoryCanvas.tsx's "align all cards" button can lay cards
+// into a clean grid using the SAME authoritative spacing this file already
+// uses for collision avoidance, instead of a second, independently-guessed
+// set of numbers that could silently drift out of sync with this one.
+export const CARD_FOOTPRINT_W = 360;
+export const CARD_FOOTPRINT_H = 536;
+export const CARD_FOOTPRINT_GAP = 24;
 
 /** Nudges any card that violates the current no-overlap spacing away from
  *  cards already placed, in array order (oldest cards keep their spot;

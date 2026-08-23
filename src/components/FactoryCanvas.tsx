@@ -19,6 +19,7 @@ import {
   Guitar,
   BookOpen,
   LayoutGrid,
+  ChevronDown,
 } from "lucide-react";
 import { AudioPlugin, PluginParameter } from "../types";
 import {
@@ -132,12 +133,13 @@ const CanvasPluginCard: React.FC<CardProps> = ({
   onOpenManual,
   onParamChange,
 }) => {
-  // Replaces the old permanently-visible prompt/evidence text and the
-  // click-to-toggle "Quality evidence" drawer: the card's resting state now
-  // shows just the plugin itself (name up top, its own controls, the
-  // action row at bottom) -- all of that explanatory detail lives in one
-  // panel that fades in on hover and fades back out on mouse-leave.
-  const [isHovering, setIsHovering] = useState(false);
+  // Replaces the old permanently-visible prompt/evidence text and the old
+  // hover-to-reveal panel: the card's resting state shows just the plugin
+  // itself (name up top, its own controls, the action row at bottom) --
+  // all of that explanatory detail lives in one panel toggled by a small
+  // "More"/chevron button in the footer, not a hover (hover doesn't work
+  // on touch, and it fought with dragging the card by unrelated pixels).
+  const [isExpanded, setIsExpanded] = useState(false);
   const plugin = card.plugin;
   const live = isLive && enginePlaying;
 
@@ -156,16 +158,15 @@ const CanvasPluginCard: React.FC<CardProps> = ({
   // Everything explanatory (the prompt it was built from, the measured
   // functional-fitness evidence, the "why this design" rationale, and the
   // four quality scores + refinement/fixes notes) lives in ONE panel that
-  // fades/expands in on hover and collapses back out on mouse-leave --
-  // replacing both the old permanently-visible callouts and the separate
-  // click-to-toggle "Quality evidence" drawer. Rendered above the knobs (in
-  // normal document flow, not an absolute overlay), so it never competes
-  // with dragging a knob for the same pixels the way a floating overlay
-  // covering the controls would.
+  // expands/collapses on the footer's "More" button click -- replacing both
+  // the old permanently-visible callouts and the old hover-to-reveal panel.
+  // Rendered above the knobs (in normal document flow, not an absolute
+  // overlay), so it never competes with dragging a knob for the same pixels
+  // the way a floating overlay covering the controls would.
   const infoPanel = (
     <div
       className={`overflow-hidden transition-all duration-200 ease-out ${
-        isHovering ? "max-h-[640px] opacity-100 mb-3" : "max-h-0 opacity-0"
+        isExpanded ? "max-h-[640px] opacity-100 mb-3" : "max-h-0 opacity-0"
       }`}
     >
       <div className="space-y-2.5 pt-0.5">
@@ -362,8 +363,6 @@ const CanvasPluginCard: React.FC<CardProps> = ({
         e.stopPropagation();
         onSelect();
       }}
-      onMouseEnter={() => setIsHovering(true)}
-      onMouseLeave={() => setIsHovering(false)}
       className={`absolute rounded-2xl border bg-neutral-900 shadow-xl shadow-black/50 transition-shadow select-none ${
         selected ? "border-orange-600 ring-2 ring-orange-600/30" : "border-neutral-800 hover:border-neutral-700"
       } ${live ? "shadow-orange-950/40" : ""}`}
@@ -500,6 +499,15 @@ const CanvasPluginCard: React.FC<CardProps> = ({
               LIVE
             </span>
           )}
+          <button
+            onClick={() => setIsExpanded((v) => !v)}
+            className={`flex items-center gap-1 text-[10px] font-semibold text-neutral-300 hover:text-white px-2 py-1 rounded-md hover:bg-neutral-800 transition-colors cursor-pointer ${live ? "" : "ml-auto"}`}
+            title={isExpanded ? "Hide the prompt, measured evidence, and quality scores" : "Show the prompt, measured evidence, and quality scores"}
+            aria-expanded={isExpanded}
+          >
+            <ChevronDown className={`w-3 h-3 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`} />
+            {isExpanded ? "Less" : "More"}
+          </button>
         </div>
       )}
     </div>

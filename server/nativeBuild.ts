@@ -13,6 +13,8 @@ import {
   resolveKnobStyle,
   toJuceKnobPaintCode,
   toJucePanelPaintCode,
+  resolvePanelStyle,
+  resolveParamKnobStyle,
 } from "../src/utils/uiRenderPatterns";
 
 // ---------------------------------------------------------------------------
@@ -502,79 +504,13 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
   return { cpp, bufferWriteSite };
 }
 
-// Coarse category -> a coherent DEFAULT knob/panel style for ordinary
-// parameters (no explicit ampKnobStyle set). Deliberately one style per
-// plugin, not one per knob -- matches the existing GUI philosophy rule
-// ("one dominant accentColor, not a rainbow of per-knob colors") extended
-// to knob CRAFT, not just color. Original style-family choices, not
-// modeled on any specific commercial product's actual visual identity.
-const CATEGORY_DEFAULT_KNOB_STYLE: Record<string, KnobRenderStyle> = {
-  distortion: "chickenhead",
-  delay: "vintage_amber",
-  filter: "modern_pointer",
-  synthesizer: "neonring",
-  dynamics: "silvercap",
-  modulation: "vintage_amber",
-  reverb: "silvercap",
-};
-const CATEGORY_DEFAULT_PANEL_STYLE: Record<string, PanelTextureStyle> = {
-  distortion: "carbon_weave",
-  delay: "tweed_weave",
-  filter: "matte_poly",
-  synthesizer: "brushed_metal",
-  dynamics: "brushed_metal",
-  modulation: "leather_grain",
-  reverb: "matte_poly",
-};
+// (moved) The category/attribute -> knob & panel style selectors now live
+// in src/utils/uiRenderPatterns.ts alongside the recipes they select from,
+// so the WEB faceplate can share them -- previously only this C++ export
+// path ever resolved a real panel material. Re-exported so existing
+// importers of this module keep working unchanged.
+export { resolvePanelStyle, resolveParamKnobStyle };
 
-// Research into professional plugin UI design converged on "skeuomorphism
-// should scale with how strongly a plugin claims to emulate real hardware,
-// independent of its DSP category" -- a "vintage tape echo" and a "modern
-// digital delay algorithm" shouldn't automatically get the same knob/panel
-// treatment just because both are category "delay". plugin.buildReport
-// .attributes (dreamy/aggressive/vintage/futuristic/clinical/minimal/
-// industrial/luxurious -- the SAME vocabulary GenerativeFaceplate.tsx's
-// ATTRIBUTE_PATTERN already keys its generative-art pattern off) is an
-// existing, already-populated signal that captures exactly this. Each
-// category maps to exactly one plausible style today (confirmed: no small
-// family of options to pick within), so an attribute match here is a real
-// override of the category default, not a subtle nudge -- deliberate: it's
-// what the underlying design principle actually calls for.
-const ATTRIBUTE_KNOB_NUDGE: Partial<Record<string, KnobRenderStyle>> = {
-  vintage: "vintage_amber",
-  industrial: "chickenhead",
-  futuristic: "neonring",
-  clinical: "modern_pointer",
-  minimal: "modern_pointer",
-  luxurious: "silvercap",
-};
-const ATTRIBUTE_PANEL_NUDGE: Partial<Record<string, PanelTextureStyle>> = {
-  vintage: "wood_grain",
-  industrial: "carbon_weave",
-  futuristic: "matte_poly",
-  clinical: "matte_poly",
-  minimal: "matte_poly",
-  luxurious: "leather_grain",
-};
-
-export function resolvePanelStyle(category: string | undefined, attributes?: string[]): PanelTextureStyle {
-  const categoryDefault = (category && CATEGORY_DEFAULT_PANEL_STYLE[category]) || "matte_poly";
-  const nudge = attributes?.map((a) => ATTRIBUTE_PANEL_NUDGE[a]).find((s): s is PanelTextureStyle => Boolean(s));
-  return nudge ?? categoryDefault;
-}
-
-/** ampKnobStyle (an explicit choice -- amp/cab widgets, or any control the
- *  model/UI explicitly styled) always wins. Otherwise: an attribute match
- *  overrides the plain category default (see ATTRIBUTE_KNOB_NUDGE doc
- *  above); with neither, every ordinary knob on the plugin shares one
- *  category-appropriate default, same "one dominant style" principle as the
- *  panel texture above. */
-export function resolveParamKnobStyle(param: NativeParameter, category: string | undefined, attributes?: string[]): KnobRenderStyle {
-  if (param.ampKnobStyle) return resolveKnobStyle(param.ampKnobStyle);
-  const categoryDefault = (category && CATEGORY_DEFAULT_KNOB_STYLE[category]) || "modern_pointer";
-  const nudge = attributes?.map((a) => ATTRIBUTE_KNOB_NUDGE[a]).find((s): s is KnobRenderStyle => Boolean(s));
-  return nudge ?? categoryDefault;
-}
 
 export function generateLookAndFeelHeader(): string {
   return `#pragma once

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AudioPlugin } from "../types";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
 import { resolveMaterial, materialFilterDefs, MaterialContext } from "../utils/materialVisuals";
+import { resolvePanelStyle, panelTextureCss } from "../utils/uiRenderPatterns";
 import { buildPluginManual, hasSeenGuide, markGuideSeen, ManualContext } from "../utils/featureManifest";
 
 /**
@@ -344,12 +345,22 @@ function ChassisDetails({ plugin, fontFamily, textColor }: { plugin: AudioPlugin
 
 export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, className = "", style, children }: GenerativeFaceplateProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  // borderColor is read inside buildArtwork() (used for some stroke colors)
-  // but was missing from this dependency array -- changing it silently
-  // failed to regenerate the artwork that actually uses it.
+  // Every input buildArtwork() actually reads must be listed, or changing it
+  // silently fails to regenerate the art that depends on it. Two were
+  // missing: buildReport.attributes (picks WHICH pattern via
+  // ATTRIBUTE_PATTERN) and parameters.length (part of the RNG seed) -- so an
+  // attribute change produced no visual change at all.
   const artwork = useMemo(
     () => buildArtwork(plugin),
-    [plugin.id, plugin.name, plugin.category, plugin.customSkin?.accentColor, plugin.customSkin?.borderColor]
+    [
+      plugin.id,
+      plugin.name,
+      plugin.category,
+      plugin.parameters.length,
+      plugin.buildReport?.attributes,
+      plugin.customSkin?.accentColor,
+      plugin.customSkin?.borderColor,
+    ]
   );
   const accent = plugin.customSkin?.accentColor || "#f97316";
   const { elementRefs } = artwork;
@@ -361,6 +372,18 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
     () => ({ materialId: resolveMaterial(plugin), seedString: pluginSeedString(plugin) }),
     [plugin.name, plugin.category, plugin.parameters.length, plugin.buildReport?.attributes]
   );
+
+  // The plugin's real hardware panel material (tweed / wood grain / leather /
+  // carbon weave / brushed metal / matte polymer). This selector and these
+  // recipes already existed and already shipped -- but only into the exported
+  // VST3's C++ paint code. The web faceplate, the surface users actually
+  // look at, fell back to a flat hex background. Same resolvePanelStyle the
+  // native build uses, so preview and export agree on the material.
+  const panelStyle = useMemo(
+    () => resolvePanelStyle(plugin.category, plugin.buildReport?.attributes),
+    [plugin.category, plugin.buildReport?.attributes]
+  );
+  const panelCss = useMemo(() => panelTextureCss(panelStyle), [panelStyle]);
 
   // Per-plugin manual + first-launch guide mode -- resolved once per plugin
   // (buildPluginManual is pure/cheap) and provided the same way materialCtx
@@ -446,6 +469,15 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
       className={`relative overflow-hidden ${className}`}
       style={{ ["--gfp-live" as any]: 0, ...skinStyle, clipPath: CHASSIS_CLIP, ...style }}
     >
+      {/* Panel substrate: the plugin's real hardware material, painted UNDER
+          the generative artwork so the art tints a physical surface instead
+          of floating on a flat color field. */}
+      <div
+        aria-hidden="true"
+        data-panel-style={panelStyle}
+        className="absolute inset-0 pointer-events-none"
+        style={panelCss}
+      />
       {artwork.node}
       <div
         aria-hidden="true"

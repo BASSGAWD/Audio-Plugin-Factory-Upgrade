@@ -7,6 +7,7 @@ import RefineControl from "../src/components/RefineControl";
 import { CustomKnob } from "../src/components/UIDesigner";
 import { PluginManual, PluginManualContent } from "../src/components/PluginManual";
 import { PluginControl } from "../src/components/PluginControl";
+import { resolvePanelStyle } from "../src/utils/uiRenderPatterns";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { runQualityGate } from "../src/utils/qualityGate";
 import { buildPluginManual } from "../src/utils/featureManifest";
@@ -136,17 +137,48 @@ function knobParam(overrides: Partial<PluginParameter> = {}): PluginParameter {
     ({ id: "p", name: "Test", min: 0, max: 1, value: 0, defaultValue: 0, unit: "", ...overrides } as PluginParameter);
   const noop = () => {};
 
+  // Amp head + cabinet are the amp_sim family's showpiece identity and the
+  // thing the user judged hardest ("the amps dont look like th-u"). They are
+  // now real gear -- a tolex-wrapped box with a recessed lit fascia, and a
+  // cab whose speaker count matches its actual cabSize -- rather than flat
+  // cards with text. The decisive checks are the ones a generic widget would
+  // FAIL: does cabSize change what's drawn, and does tolex change the box.
   const ampHtml = renderToStaticMarkup(
-    <PluginControl param={ctrlParam({ controlType: "amp" as any, name: "Amp" })} allParams={[]} onChange={noop} />
+    <PluginControl param={ctrlParam({ controlType: "amp" as any, name: "Amp", ampTubeGlow: true } as any)} allParams={[]} onChange={noop} />
   );
-  check("AmpHeadControl: carries the seeded material grain texture (not a flat color swatch)", ampHtml.includes("data:image/svg+xml"));
-  check("AmpHeadControl: has a real bevel (lit top edge + dark bottom edge), not a bare drop-shadow", /inset 0 1px 0 rgba\(255,255,255/.test(ampHtml) && /inset 0 -1\.5px 0 rgba\(0,0,0/.test(ampHtml));
+  check("AmpHeadControl: renders a tolex-covered chassis, not a flat color card", /data-tolex="/.test(ampHtml) && /repeating-linear-gradient|radial-gradient/.test(ampHtml));
+  check("AmpHeadControl: has a recessed, lit control fascia (inset shadow + engraved text)", /inset 0 2px 6px rgba\(0,0,0/.test(ampHtml) && /text-shadow|textShadow/i.test(ampHtml));
+  check("AmpHeadControl: a lit jewel lamp actually glows when tubes are warm", /0 0 14px/.test(ampHtml));
 
-  const cabHtml = renderToStaticMarkup(
-    <PluginControl param={ctrlParam({ controlType: "cab" as any, name: "Cab" })} allParams={[]} onChange={noop} />
+  const ampDark = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "amp" as any, name: "Amp", ampTubeGlow: false } as any)} allParams={[]} onChange={noop} />
   );
-  check("CabinetControl: carries the seeded material grain texture", cabHtml.includes("data:image/svg+xml"));
-  check("CabinetControl: grille dots are dimensional (radial-gradient highlight/shadow), not flat-filled circles", /radial-gradient\(circle at 35% 30%, rgba\(255,255,255/.test(cabHtml));
+  check("AmpHeadControl: the jewel lamp is decisively different lit vs. unlit", ampHtml !== ampDark && !/0 0 14px/.test(ampDark));
+
+  const cab412 = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "cab" as any, name: "Cab", cabSize: "4x12" } as any)} allParams={[]} onChange={noop} />
+  );
+  const cab112 = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "cab" as any, name: "Cab", cabSize: "1x12" } as any)} allParams={[]} onChange={noop} />
+  );
+  const coneCount = (html: string) => (html.match(/aspect-square rounded-full relative/g) || []).length;
+  check("CabinetControl: renders grille cloth over a tolex box", /data-tolex="/.test(cab412) && /repeating-linear-gradient/.test(cab412));
+  check(
+    "CabinetControl: speaker count matches the REAL cabSize (4x12 draws 4, 1x12 draws 1)",
+    coneCount(cab412) === 4 && coneCount(cab112) === 1,
+    `4x12=${coneCount(cab412)} cones, 1x12=${coneCount(cab112)} cones`
+  );
+  check("CabinetControl: has corner hardware (clip-path metal protectors)", /clip-path|clipPath/i.test(cab412));
+
+  // Tolex is data that was already populated and previously only appeared as
+  // a text label -- two different patterns must now actually look different.
+  const cabTweed = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "cab" as any, name: "Cab", ampTolexPattern: "tweed" } as any)} allParams={[]} onChange={noop} />
+  );
+  const cabCarbon = renderToStaticMarkup(
+    <PluginControl param={ctrlParam({ controlType: "cab" as any, name: "Cab", ampTolexPattern: "carbon" } as any)} allParams={[]} onChange={noop} />
+  );
+  check("CabinetControl: different tolex patterns render decisively differently", cabTweed !== cabCarbon && /data-tolex="tweed"/.test(cabTweed) && /data-tolex="carbon"/.test(cabCarbon));
 
   const padOffHtml = renderToStaticMarkup(
     <PluginControl param={ctrlParam({ controlType: "pad" as any, name: "Pad", value: 0 })} allParams={[]} onChange={noop} />
@@ -175,6 +207,52 @@ function knobParam(overrides: Partial<PluginParameter> = {}): PluginParameter {
     <PluginControl param={ctrlParam({ controlType: "meter" as any, name: "Meter", min: -60, max: 0, value: -60 })} allParams={[]} onChange={noop} />
   );
   check("MeterControl: lit segment count actually tracks the value (decisive gap between empty and full)", meterFull !== meterEmpty && meterEmpty.includes("#10b98122"));
+}
+
+/* ---- Panel material: the faceplate paints a REAL hardware substrate.
+ * PANEL_TEXTURE_RECIPES (tweed / wood grain / leather / carbon weave /
+ * brushed metal / matte polymer) and resolvePanelStyle already existed and
+ * already shipped -- but only into the exported VST3's C++ paint code. The
+ * web faceplate, the surface users actually look at, rendered a flat hex
+ * background, which is a large part of why every generated plugin looked
+ * like the same dark rectangle. The decisive check is therefore not "does a
+ * texture render" but "do two different plugins get DIFFERENT materials",
+ * since a hardcoded texture would pass the former and fail the latter. ---- */
+{
+  const buildFor = (prompt: string, id: string) => {
+    const b = buildOfflinePlugin(prompt);
+    return runQualityGate(
+      { id, name: b.name, category: b.category, description: b.description, parameters: b.parameters, dspFunction: b.dspFunction, faustCode: "", cppJuceCode: "", createdAt: "" },
+      { family: b.family, prompt }
+    ).plugin;
+  };
+
+  const ampPlugin = buildFor("crunchy vintage guitar amp", "amp-panel");
+  const compPlugin = buildFor("clean transparent mastering compressor", "comp-panel");
+
+  const ampHtml = renderToStaticMarkup(<GenerativeFaceplate plugin={ampPlugin}><div /></GenerativeFaceplate>);
+  const compHtml = renderToStaticMarkup(<GenerativeFaceplate plugin={compPlugin}><div /></GenerativeFaceplate>);
+
+  const styleOf = (html: string) => (html.match(/data-panel-style="([a-z_]+)"/) || [])[1];
+  check("faceplate paints a named panel material", !!styleOf(ampHtml), `amp=${styleOf(ampHtml)}`);
+  check(
+    "two different plugin families get DIFFERENT panel materials",
+    !!styleOf(ampHtml) && !!styleOf(compHtml) && styleOf(ampHtml) !== styleOf(compHtml),
+    `amp=${styleOf(ampHtml)} compressor=${styleOf(compHtml)}`
+  );
+  check(
+    "the material is real layered CSS, not a flat color",
+    /repeating-linear-gradient|radial-gradient/.test(ampHtml.slice(0, 4000)),
+    "substrate uses generated texture layers"
+  );
+
+  // The web preview and the C++ export must agree on the material -- they now
+  // call the same resolver, so a divergence here means someone re-forked it.
+  check(
+    "web faceplate and native export resolve the SAME material for a plugin",
+    styleOf(ampHtml) === resolvePanelStyle(ampPlugin.category, ampPlugin.buildReport?.attributes),
+    `${styleOf(ampHtml)} vs ${resolvePanelStyle(ampPlugin.category, ampPlugin.buildReport?.attributes)}`
+  );
 }
 
 console.log(failures === 0 ? "UI RENDER: ALL CHECKS PASS" : failures + " FAILURE(S)");

@@ -410,91 +410,182 @@ function PadControl({ param, onChange }: ControlProps) {
 }
 
 function AmpHeadControl({ param }: ControlProps) {
-  // This is the amp_sim family's showpiece identity, not a placeholder --
-  // same seeded material grain as every other control, plus a real bevel
-  // (lit top/left edge, dark bottom/right) so the panel reads as gear
-  // rather than a flat color swatch. Replaces `shadow-lg` (an inline
-  // boxShadow overrides it anyway) with an explicit outer drop-shadow +
-  // inset bevel combo.
-  const { materialId, seedString } = useContext(MaterialContext);
-  const texture = materialTextureDataUri(materialId, seedString);
+  // The hero of every amp_sim build. A real head is a tolex-wrapped BOX with
+  // a recessed, brightly-lit control fascia across its face and a jewel lamp
+  // -- not a flat card with text on it, which is what this used to render.
+  // Tolex comes from ampTolexPattern (already populated, previously only a
+  // text label) so the head and its cabinet visibly match.
+  const tolex = TOLEX_CSS[param.ampTolexPattern || "leather"] || TOLEX_CSS.leather;
+  const accent = param.accentColor || "#ef4444";
+  const glowing = param.ampTubeGlow;
+
   return (
     <div
-      className="w-full rounded-xl border-2 p-3 flex items-center justify-between gap-3 select-none"
+      data-amp-head="true"
+      data-tolex={param.ampTolexPattern || "leather"}
+      className="w-full rounded-lg select-none relative overflow-hidden"
       style={{
-        backgroundColor: param.bgColor || "#1c1c22",
-        backgroundImage: `url("${texture}")`,
-        backgroundBlendMode: "overlay",
-        borderColor: param.borderColor || "#3a3a45",
+        backgroundColor: tolex.color,
+        backgroundImage: tolex.image,
+        backgroundSize: tolex.size,
         boxShadow:
-          "inset 0 1px 0 rgba(255,255,255,0.1), inset 0 -1.5px 0 rgba(0,0,0,0.5), inset 1px 0 0 rgba(255,255,255,0.04), 0 6px 14px rgba(0,0,0,0.45), 0 2px 4px rgba(0,0,0,0.3)",
+          "inset 0 2px 0 rgba(255,255,255,0.1), inset 0 -3px 0 rgba(0,0,0,0.55), inset 2px 0 0 rgba(255,255,255,0.04), inset -2px 0 0 rgba(0,0,0,0.4), 0 10px 22px rgba(0,0,0,0.55)",
+        padding: 9,
       }}
     >
-      <div className="flex-1 min-w-0">
-        <div className="text-[8px] uppercase tracking-widest text-neutral-500 font-mono">Amp Head</div>
-        <div
-          className="text-sm font-black uppercase tracking-tight truncate"
-          style={{ color: param.textColor || param.accentColor || "#e5e5e5" }}
-        >
-          {param.customText || param.name}
-        </div>
-        <div className="text-[9px] font-mono text-neutral-500 mt-0.5 capitalize">
-          {param.ampChannelType || "crunch"} channel{param.ampTubeGlow ? " · tube glow" : ""}
-        </div>
-      </div>
+      {/* Recessed control fascia -- the lit plate a real head's knobs mount
+          through. Sunk into the box, not sitting on top of it. */}
       <div
-        className="w-8 h-8 rounded-full border-4 shrink-0"
+        className="rounded-sm px-3 py-2.5 flex items-center gap-3"
         style={{
-          borderColor: param.accentColor || "#ef4444",
-          boxShadow: param.ampTubeGlow ? `0 0 10px ${param.accentColor || "#ef4444"}` : undefined,
+          background: "linear-gradient(178deg, #2f3238 0%, #1d1f24 55%, #141619 100%)",
+          boxShadow: "inset 0 2px 6px rgba(0,0,0,0.75), inset 0 -1px 0 rgba(255,255,255,0.07), 0 1px 0 rgba(255,255,255,0.05)",
         }}
-      />
+      >
+        <div className="flex-1 min-w-0">
+          <div className="text-[7.5px] uppercase tracking-[0.22em] text-neutral-500 font-mono">Amp Head</div>
+          <div
+            className="text-[15px] font-black uppercase tracking-tight truncate leading-tight"
+            style={{
+              color: param.textColor || "#e8e8ec",
+              // Engraved: dark shadow below, faint light above.
+              textShadow: "0 1px 0 rgba(0,0,0,0.8), 0 -0.5px 0 rgba(255,255,255,0.12)",
+            }}
+          >
+            {param.customText || param.name}
+          </div>
+          <div className="text-[8.5px] font-mono text-neutral-500 mt-0.5 capitalize tracking-wide">
+            {param.ampChannelType || "crunch"} channel
+          </div>
+        </div>
+
+        {/* Jewel lamp: a real domed indicator, lit when the tubes are warm */}
+        <div
+          className="w-6 h-6 rounded-full shrink-0 relative"
+          style={{
+            background: glowing
+              ? `radial-gradient(circle at 34% 30%, #fff8, ${accent} 45%, ${accent}bb 70%, #1a0708)`
+              : `radial-gradient(circle at 34% 30%, #ffffff22, ${accent}55 45%, ${accent}33 70%, #140607)`,
+            boxShadow: glowing
+              ? `0 0 14px ${accent}cc, 0 0 4px ${accent}, inset 0 -1px 3px rgba(0,0,0,0.6)`
+              : "inset 0 -1px 3px rgba(0,0,0,0.6)",
+            border: "2px solid #23262b",
+          }}
+          title={glowing ? "Tubes warm" : "Standby"}
+        />
+      </div>
+
+      {/* Vent slots along the top of the chassis */}
+      <div aria-hidden="true" className="flex gap-1 justify-center mt-1.5 opacity-40">
+        {Array.from({ length: 9 }).map((_, i) => (
+          <div key={i} className="w-3 h-[2px] rounded-full" style={{ background: "rgba(0,0,0,0.6)", boxShadow: "0 1px 0 rgba(255,255,255,0.07)" }} />
+        ))}
+      </div>
     </div>
   );
 }
 
+/** How many speakers a cab size actually has, and how to arrange them.
+ *  `cabSize` was already populated on every amp build and only ever drove a
+ *  text label -- a "4x12" and a "1x12" rendered the identical widget. */
+const CAB_LAYOUTS: Record<string, { count: number; cols: number }> = {
+  "1x12": { count: 1, cols: 1 },
+  "2x12": { count: 2, cols: 2 },
+  "4x12": { count: 4, cols: 2 },
+  "8x10": { count: 8, cols: 2 },
+};
+
+/** Tolex is the vinyl covering on a real cabinet. `ampTolexPattern` was also
+ *  already populated and also only drove a label. */
+const TOLEX_CSS: Record<string, { color: string; image: string; size: string }> = {
+  leather: { color: "#241a13", image: "radial-gradient(rgba(255,255,255,0.05) 0.5px, transparent 0.6px), radial-gradient(rgba(0,0,0,0.35) 0.5px, transparent 0.6px)", size: "5px 5px, 8px 8px" },
+  carbon: { color: "#14161a", image: "repeating-linear-gradient(45deg, rgba(255,255,255,0.05) 0 1px, transparent 1px 5px), repeating-linear-gradient(-45deg, rgba(0,0,0,0.4) 0 1px, transparent 1px 5px)", size: "10px 10px, 10px 10px" },
+  tweed: { color: "#a8862f", image: "repeating-linear-gradient(45deg, rgba(255,255,255,0.16) 0 1px, transparent 1px 4px), repeating-linear-gradient(-45deg, rgba(0,0,0,0.22) 0 1px, transparent 1px 4px)", size: "8px 8px, 8px 8px" },
+  wood: { color: "#43291a", image: "repeating-linear-gradient(92deg, rgba(0,0,0,0.3) 0 4px, transparent 4px 10px), repeating-linear-gradient(88deg, rgba(255,255,255,0.06) 0 1px, transparent 1px 27px)", size: "80px 100%, 130px 100%" },
+  snakeskin: { color: "#2a2620", image: "repeating-linear-gradient(60deg, rgba(255,255,255,0.07) 0 2px, transparent 2px 7px), repeating-linear-gradient(-60deg, rgba(0,0,0,0.35) 0 2px, transparent 2px 7px)", size: "12px 12px, 12px 12px" },
+  metalgrid: { color: "#2c2f34", image: "repeating-linear-gradient(0deg, rgba(255,255,255,0.07) 0 1px, transparent 1px 6px), repeating-linear-gradient(90deg, rgba(0,0,0,0.4) 0 1px, transparent 1px 6px)", size: "12px 12px, 12px 12px" },
+};
+
 function CabinetControl({ param }: ControlProps) {
-  // Same grain + bevel treatment as AmpHeadControl. The grille dots were
-  // flat-filled circles with zero dimension -- each now gets its own
-  // upper-left highlight + lower-right shadow layered over the base tone,
-  // reading as a real dimpled speaker grille instead of painted dots.
-  const { materialId, seedString } = useContext(MaterialContext);
-  const texture = materialTextureDataUri(materialId, seedString);
-  const dotBase = param.accentColor || "#3e3e4a";
+  // A real cabinet: tolex-covered box, grille cloth stretched over the
+  // baffle, and the ACTUAL number of speakers its cabSize names -- a 4x12
+  // shows four drivers, a 1x12 shows one. Both cabSize and ampTolexPattern
+  // were already populated on every amp build and previously only appeared
+  // as text, so a 1x12 and an 8x10 rendered an identical widget.
+  const layout = CAB_LAYOUTS[param.cabSize || "4x12"] || CAB_LAYOUTS["4x12"];
+  const tolex = TOLEX_CSS[param.ampTolexPattern || "leather"] || TOLEX_CSS.leather;
+  const coneTint = param.accentColor || "#6b6152";
+
   return (
     <div
-      className="w-full rounded-xl border-2 p-3 flex items-center gap-3 select-none"
+      data-cab-size={param.cabSize || "4x12"}
+      data-tolex={param.ampTolexPattern || "leather"}
+      className="w-full rounded-lg select-none relative overflow-hidden"
       style={{
-        backgroundColor: param.bgColor || "#16161a",
-        backgroundImage: `url("${texture}")`,
-        backgroundBlendMode: "overlay",
-        borderColor: param.borderColor || "#2c2c36",
+        backgroundColor: tolex.color,
+        backgroundImage: tolex.image,
+        backgroundSize: tolex.size,
+        // A box, not a card: thick tolex-wrapped edges, lit from the same
+        // upper-left the rest of the faceplate is lit from.
         boxShadow:
-          "inset 0 1px 0 rgba(255,255,255,0.1), inset 0 -1.5px 0 rgba(0,0,0,0.5), inset 1px 0 0 rgba(255,255,255,0.04), 0 6px 14px rgba(0,0,0,0.45), 0 2px 4px rgba(0,0,0,0.3)",
+          "inset 0 2px 0 rgba(255,255,255,0.09), inset 0 -3px 0 rgba(0,0,0,0.55), inset 2px 0 0 rgba(255,255,255,0.04), inset -2px 0 0 rgba(0,0,0,0.4), 0 10px 22px rgba(0,0,0,0.55)",
+        padding: 10,
       }}
     >
+      {/* Corner hardware -- real cabs have metal corner protectors */}
+      {[
+        { top: 3, left: 3 }, { top: 3, right: 3 }, { bottom: 3, left: 3 }, { bottom: 3, right: 3 },
+      ].map((pos, i) => (
+        <div
+          key={i}
+          aria-hidden="true"
+          className="absolute w-3 h-3 pointer-events-none"
+          style={{
+            ...pos,
+            background: "linear-gradient(135deg, #8b8b93, #3a3a42 60%, #1a1a1f)",
+            clipPath: i === 0 ? "polygon(0 0,100% 0,0 100%)" : i === 1 ? "polygon(100% 0,100% 100%,0 0)" : i === 2 ? "polygon(0 0,0 100%,100% 100%)" : "polygon(100% 0,100% 100%,0 100%)",
+            opacity: 0.85,
+          }}
+        />
+      ))}
+
+      {/* Grille cloth over the baffle, with the speakers behind it */}
       <div
-        className="w-10 h-10 rounded-md shrink-0 grid grid-cols-3 gap-0.5 p-1"
-        style={{ backgroundColor: "#0d0d10", boxShadow: "inset 0 1px 3px rgba(0,0,0,0.7)" }}
+        className="rounded-sm p-2"
+        style={{
+          backgroundColor: "#15130f",
+          backgroundImage:
+            "repeating-linear-gradient(0deg, rgba(255,255,255,0.055) 0 1px, transparent 1px 3px), repeating-linear-gradient(90deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 3px)",
+          backgroundSize: "3px 3px, 3px 3px",
+          boxShadow: "inset 0 2px 6px rgba(0,0,0,0.8), inset 0 -1px 0 rgba(255,255,255,0.05)",
+        }}
       >
-        {Array.from({ length: 9 }).map((_, i) => (
-          <div
-            key={i}
-            className="rounded-full"
-            style={{
-              backgroundImage: `radial-gradient(circle at 35% 30%, rgba(255,255,255,0.35), rgba(255,255,255,0) 45%), radial-gradient(circle at 65% 70%, rgba(0,0,0,0.55), rgba(0,0,0,0) 60%)`,
-              backgroundColor: dotBase,
-              boxShadow: "inset 0 0.5px 1px rgba(0,0,0,0.5)",
-            }}
-          />
-        ))}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="text-[8px] uppercase tracking-widest text-neutral-500 font-mono">Cabinet</div>
-        <div className="text-sm font-black uppercase tracking-tight truncate text-neutral-200">{param.customText || param.name}</div>
-        <div className="text-[9px] font-mono text-neutral-500 mt-0.5">
-          {param.cabSize || "4x12"} · mic {param.cabMicModel || "SM57"}
+        <div className="grid gap-2 mx-auto" style={{ gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`, maxWidth: layout.cols === 1 ? 90 : 150 }}>
+          {Array.from({ length: layout.count }).map((_, i) => (
+            <div key={i} className="aspect-square rounded-full relative" style={{
+              // A speaker: dark surround, lit cone, dust cap in the middle.
+              background: `radial-gradient(circle at 38% 32%, ${coneTint}dd, ${coneTint}66 42%, #15120e 70%, #0a0908)`,
+              boxShadow: "inset 0 2px 5px rgba(0,0,0,0.75), 0 1px 0 rgba(255,255,255,0.06)",
+            }}>
+              <div
+                aria-hidden="true"
+                className="absolute rounded-full"
+                style={{
+                  inset: "34%",
+                  background: "radial-gradient(circle at 35% 30%, #6d6459, #2a251f 65%, #14110d)",
+                  boxShadow: "0 1px 2px rgba(0,0,0,0.6)",
+                }}
+              />
+            </div>
+          ))}
         </div>
+      </div>
+
+      <div className="flex items-baseline gap-2 mt-2 px-0.5">
+        <span className="text-[10px] font-black uppercase tracking-tight truncate text-neutral-200">{param.customText || param.name}</span>
+        <span className="ml-auto text-[9px] font-mono text-neutral-400/80 shrink-0">
+          {param.cabSize || "4x12"} · {param.cabMicModel || "SM57"}
+        </span>
       </div>
     </div>
   );

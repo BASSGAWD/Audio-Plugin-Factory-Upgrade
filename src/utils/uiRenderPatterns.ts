@@ -144,6 +144,151 @@ export const PANEL_TEXTURE_RECIPES: Record<PanelTextureStyle, PanelTextureRecipe
 };
 
 /* ------------------------------------------------------------------ */
+/* Which panel/knob style a given plugin gets                          */
+/* ------------------------------------------------------------------ */
+
+/* These selectors lived in server/nativeBuild.ts, so ONLY the exported VST3
+ * ever got tweed, wood grain or leather -- the browser preview the user
+ * actually looks at fell back to a flat hex color. They're pure functions
+ * over data that already lives in this file, so they belong here, where both
+ * the web faceplate and the C++ generator can share them. nativeBuild.ts
+ * imports them back, so the generated C++ is unchanged. */
+
+// Coarse category -> a coherent DEFAULT knob/panel style for ordinary
+// parameters (no explicit ampKnobStyle set). Deliberately one style per
+// plugin, not one per knob -- matches the existing GUI philosophy rule
+// ("one dominant accentColor, not a rainbow of per-knob colors") extended
+// to knob CRAFT, not just color. Original style-family choices, not
+// modeled on any specific commercial product's actual visual identity.
+export const CATEGORY_DEFAULT_KNOB_STYLE: Record<string, KnobRenderStyle> = {
+  distortion: "chickenhead",
+  delay: "vintage_amber",
+  filter: "modern_pointer",
+  synthesizer: "neonring",
+  dynamics: "silvercap",
+  modulation: "vintage_amber",
+  reverb: "silvercap",
+};
+export const CATEGORY_DEFAULT_PANEL_STYLE: Record<string, PanelTextureStyle> = {
+  distortion: "carbon_weave",
+  delay: "tweed_weave",
+  filter: "matte_poly",
+  synthesizer: "brushed_metal",
+  dynamics: "brushed_metal",
+  modulation: "leather_grain",
+  reverb: "matte_poly",
+};
+
+// Skeuomorphism should scale with how strongly a plugin claims to emulate
+// real hardware, independent of its DSP category -- a "vintage tape echo"
+// and a "modern digital delay" shouldn't get the same treatment just
+// because both are category "delay". buildReport.attributes is an existing,
+// already-populated signal that captures exactly that, and an attribute
+// match is a real override of the category default, not a subtle nudge.
+export const ATTRIBUTE_KNOB_NUDGE: Partial<Record<string, KnobRenderStyle>> = {
+  vintage: "vintage_amber",
+  industrial: "chickenhead",
+  futuristic: "neonring",
+  clinical: "modern_pointer",
+  minimal: "modern_pointer",
+  luxurious: "silvercap",
+};
+export const ATTRIBUTE_PANEL_NUDGE: Partial<Record<string, PanelTextureStyle>> = {
+  vintage: "wood_grain",
+  industrial: "carbon_weave",
+  futuristic: "matte_poly",
+  clinical: "matte_poly",
+  minimal: "matte_poly",
+  luxurious: "leather_grain",
+};
+
+export function resolvePanelStyle(category: string | undefined, attributes?: string[]): PanelTextureStyle {
+  const categoryDefault = (category && CATEGORY_DEFAULT_PANEL_STYLE[category]) || "matte_poly";
+  const nudge = attributes?.map((a) => ATTRIBUTE_PANEL_NUDGE[a]).find((s): s is PanelTextureStyle => Boolean(s));
+  return nudge ?? categoryDefault;
+}
+
+/** ampKnobStyle (an explicit choice) always wins; otherwise an attribute
+ *  match overrides the category default. Takes only the field it reads
+ *  rather than a whole parameter object, so a NativeParameter (server) and
+ *  a PluginParameter (browser) both work without either type leaking into
+ *  this module. */
+export function resolveParamKnobStyle<T extends { ampKnobStyle?: string | null }>(
+  param: T | string | null | undefined,
+  category: string | undefined,
+  attributes?: string[]
+): KnobRenderStyle {
+  const explicit = typeof param === "string" ? param : param?.ampKnobStyle;
+  if (explicit) return resolveKnobStyle(explicit);
+  const categoryDefault = (category && CATEGORY_DEFAULT_KNOB_STYLE[category]) || "modern_pointer";
+  const nudge = attributes?.map((a) => ATTRIBUTE_KNOB_NUDGE[a]).find((s): s is KnobRenderStyle => Boolean(s));
+  return nudge ?? categoryDefault;
+}
+
+/* ------------------------------------------------------------------ */
+/* Panel texture -> real CSS                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Turns a PanelTextureRecipe into layered CSS backgrounds so the WEB
+ * faceplate can render the same hardware material the C++ export already
+ * paints. Each microStructure kind becomes a repeating gradient sized by
+ * the recipe's own scalePx/opacity -- no images, no external assets, and
+ * deterministic per plugin.
+ *
+ * Returns the layers separately so a caller can stack its own artwork
+ * between the substrate and whatever it paints on top.
+ */
+export function panelTextureCss(style: PanelTextureStyle): { backgroundColor: string; backgroundImage: string; backgroundSize: string } {
+  const r = PANEL_TEXTURE_RECIPES[style];
+  const { kind, scalePx, opacity } = r.microStructure;
+  const light = `rgba(255,255,255,${opacity.toFixed(3)})`;
+  const dark = `rgba(0,0,0,${(opacity * 1.35).toFixed(3)})`;
+
+  switch (kind) {
+    case "diagonal_weave":
+      // Two opposed 45-degree gradients read as an interlaced weave --
+      // the tweed/carbon look.
+      return {
+        backgroundColor: r.baseColor,
+        backgroundImage: [
+          `repeating-linear-gradient(45deg, ${light} 0 1px, transparent 1px ${scalePx}px)`,
+          `repeating-linear-gradient(-45deg, ${dark} 0 1px, transparent 1px ${scalePx}px)`,
+        ].join(", "),
+        backgroundSize: `${scalePx * 2}px ${scalePx * 2}px, ${scalePx * 2}px ${scalePx * 2}px`,
+      };
+    case "brushed_lines":
+      // Fine horizontal striations: brushed metal.
+      return {
+        backgroundColor: r.baseColor,
+        backgroundImage: `repeating-linear-gradient(0deg, ${light} 0 0.5px, transparent 0.5px ${scalePx}px), repeating-linear-gradient(0deg, ${dark} 0 0.5px, transparent 0.5px ${scalePx * 3}px)`,
+        backgroundSize: `100% ${scalePx * 2}px, 100% ${scalePx * 6}px`,
+      };
+    case "wood_bands":
+      // Wide, irregular vertical banding: wood grain.
+      return {
+        backgroundColor: r.baseColor,
+        backgroundImage: [
+          `repeating-linear-gradient(92deg, ${dark} 0 ${scalePx * 0.4}px, transparent ${scalePx * 0.4}px ${scalePx}px)`,
+          `repeating-linear-gradient(88deg, ${light} 0 1px, transparent 1px ${scalePx * 2.7}px)`,
+        ].join(", "),
+        backgroundSize: `${scalePx * 8}px 100%, ${scalePx * 13}px 100%`,
+      };
+    case "noise_specks":
+    default:
+      // Fine stippling: leather grain / matte polymer.
+      return {
+        backgroundColor: r.baseColor,
+        backgroundImage: [
+          `radial-gradient(${light} 0.5px, transparent 0.6px)`,
+          `radial-gradient(${dark} 0.5px, transparent 0.6px)`,
+        ].join(", "),
+        backgroundSize: `${scalePx * 2}px ${scalePx * 2}px, ${scalePx * 3}px ${scalePx * 3}px`,
+      };
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Meter ballistics                                                      */
 /* ------------------------------------------------------------------ */
 

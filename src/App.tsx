@@ -70,6 +70,7 @@ import UIDesigner from "./components/UIDesigner";
 import MemoryCore from "./components/MemoryCore";
 import ResearchLab from "./components/ResearchLab";
 import { initRoamingResearch } from "./utils/roamingResearch";
+import { PLUGIN_STORAGE_KEY, savePersistedPlugin, preserveRejectedPlugin } from "./utils/pluginPersistence";
 import PresetManager from "./components/PresetManager";
 import GitHubAudioDiscovery from "./components/GitHubAudioDiscovery";
 import NativeBuildPanel from "./components/NativeBuildPanel";
@@ -78,6 +79,8 @@ import FactoryCanvas from "./components/FactoryCanvas";
 import ModelPicker, { EngineId } from "./components/ModelPicker";
 import RefineControl from "./components/RefineControl";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./components/BuildProgressBar";
+import BuildCrewPanel from "./components/BuildCrewPanel";
+import { CrewMember, crewFromTrace } from "./utils/buildCrew";
 import BlindListeningTest from "./components/BlindListeningTest";
 import { runPlannedBuild } from "./utils/buildPlanner";
 import { loadCanvasWorkspace, saveCanvasWorkspace, placeNewCard, CanvasCard } from "./utils/canvasFactory";
@@ -124,56 +127,11 @@ export function sanitizeDspCode(codeString: string): string {
   return sanitizedCode;
 }
 
-export function getAgentSteps(agentId: string): string[] {
-  if (agentId === "nexus") {
-    return [
-      "Intercepting prompt & routing acoustic params...",
-      "Consulting Aero: Designing LTI filter math & curves...",
-      "Consulting Decibel: Auditing safety & feedback bounds...",
-      "Consulting Haptic: Shaping logarithmic control response...",
-      "Consulting Syntax: Structuring optimized JUCE C++ templates...",
-      "Assembling final DSP code & hot-reloading active engine..."
-    ];
-  }
-  if (agentId === "aero") {
-    return [
-      "Analyzing user request & wave equations...",
-      "Deriving transfer functions & z-domain formulas...",
-      "Formulating filter difference coefficients...",
-      "Optimizing continuous parameters for compile-ready math..."
-    ];
-  }
-  if (agentId === "syntax") {
-    return [
-      "Parsing active JavaScript DSP stack & scoping variables...",
-      "Optimizing register-level loops and SIMD registers...",
-      "Designing lock-free C++ processBlock structures...",
-      "Generating structured Faust code and compiling AST..."
-    ];
-  }
-  if (agentId === "haptic") {
-    return [
-      "Inspecting canvas coordinates & visual layout grouping...",
-      "Mapping physical control parameters to sliders...",
-      "Calibrating logarithmic dials for natural mouse gesture feel...",
-      "Structuring UI config coordinates and hot-reloading workspace..."
-    ];
-  }
-  if (agentId === "decibel") {
-    return [
-      "Analyzing active code for NaN feedback singularities...",
-      "Verifying active DC-blocking filters and anti-blowup clamps...",
-      "Calculating coefficient safeguards on resonance ranges...",
-      "Generating diagnostic signal purity reports and QA logs..."
-    ];
-  }
-  return [
-    "Analyzing request & configuring audio processor...",
-    "Drafting DSP concepts and equations...",
-    "Synthesizing high-fidelity audio structures...",
-    "Hot-reloading active controls and running workspace audits..."
-  ];
-}
+// (Removed: getAgentSteps -- hardcoded "Consulting Aero…", "Consulting
+//  Decibel…" strings advanced by a 1400ms setInterval. None of those agents'
+//  prompts ever reached a model during a build, so the checklist claimed work
+//  that never happened. The build UI now reports the pipeline's REAL job
+//  trace via buildCrew.ts / BuildCrewPanel.tsx.)
 
 export function OrangeJuceLogo({ size = 32 }: { size?: number }) {
   return (
@@ -256,7 +214,7 @@ export function OrangeJuceLogo({ size = 32 }: { size?: number }) {
   );
 }
 
-const STORAGE_KEY_PLUGIN = "audio_factory_plugin_state";
+const STORAGE_KEY_PLUGIN = PLUGIN_STORAGE_KEY;
 const STORAGE_KEY_UI_MODE = "audio_factory_ui_mode";
 
 type CompanionTabId =
@@ -562,7 +520,6 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>("nexus");
   const [inputMessage, setInputMessage] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
-  const [orchestrationStep, setOrchestrationStep] = useState<number>(0);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [apiHealth, setApiHealth] = useState<{ status: string; hasApiKey: boolean } | null>(null);
   const [localLlmStatus, setLocalLlmStatus] = useState<{
@@ -572,6 +529,10 @@ export default function App() {
     checking: boolean;
   } | null>(null);
   const [offlineForced, setOfflineForced] = useState(false);
+  /** Set by the boot effect when a cached plugin failed verification. Surfaced
+   *  as a toast from its own effect rather than inline, because the boot
+   *  effect runs before the toast machinery is ready to fire. */
+  const [recoveredPluginNotice, setRecoveredPluginNotice] = useState<string | null>(null);
 
   // Perfecting loop: 0 = off; 1..MAX_REFINE_LOOPS rework passes after each
   // build, keeping only iterations that score strictly higher. Persisted.
@@ -588,6 +549,9 @@ export default function App() {
   // Live build status bar: checkpoint stages driven by REAL pipeline
   // callbacks (planner onStage, perfecting-loop onIteration) — no fake timers.
   const [buildStages, setBuildStages] = useState<BuildStage[]>([]);
+  /** Who really worked on the last build, derived from buildPlanner's own
+   *  JobTrace -- replaces the fake "Consulting Aero…" setInterval checklist. */
+  const [buildCrew, setBuildCrew] = useState<CrewMember[]>([]);
   // Perfecting-loop leaderboard + blind A/B/C test. Versions persist after the
   // build finishes so the ranking and the "Judge by ear" button stay visible.
   const [buildVersions, setBuildVersions] = useState<BuildVersion[]>([]);
@@ -604,6 +568,9 @@ export default function App() {
     setRefineCandidates([]);
     setShowBlindTest(false);
     setAnnotations([]);
+    // Last build's crew is stale the moment a new build starts. It refills
+    // from the new build's real trace when the pipeline reports back.
+    setBuildCrew([]);
     const base: BuildStage[] = withPipeline
       ? [
           { id: "intent", label: "Intent", status: "pending" },
@@ -901,21 +868,11 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatHistory, chatLoading]);
 
-  // Orchestrator dynamic step delegator loop
-  useEffect(() => {
-    let interval: any = null;
-    if (chatLoading && selectedAgentId === "nexus") {
-      setOrchestrationStep(0);
-      interval = setInterval(() => {
-        setOrchestrationStep((prev) => (prev < 5 ? prev + 1 : prev));
-      }, 1400);
-    } else {
-      setOrchestrationStep(0);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [chatLoading, selectedAgentId]);
+  // (Removed: a setInterval that advanced a "Consulting Aero… Consulting
+  //  Decibel…" checklist every 1400ms while a build ran. None of those agents
+  //  ever reached a model during a build, and the animation was identical
+  //  whether the model did all the work or none of it. The crew panel is now
+  //  driven by the REAL buildPlanner onStage callbacks -- see buildCrew.ts.)
 
   // Toast notifier triggers
   const triggerToast = (msg: string) => {
@@ -968,10 +925,20 @@ export default function App() {
             setPlugin(parsed);
             setScratchCode(parsed.dspFunction);
           } catch (compileErr) {
+            // Fall back in MEMORY so a corrupt cache can't brick startup --
+            // but never overwrite the user's stored plugin with the default.
+            // This used to write DEFAULT_STARTING_PLUGIN straight over
+            // STORAGE_KEY_PLUGIN, which made the loss permanent and
+            // unrecoverable after a single boot, and said nothing about it
+            // beyond a console.warn. The rejected plugin is preserved under
+            // its own key instead, and the user is actually told.
             console.warn("Cached plugin failed verification compilation. Falling back to default plugin:", compileErr);
+            preserveRejectedPlugin(cachedPlugin);
             setPlugin(DEFAULT_STARTING_PLUGIN);
             setScratchCode(DEFAULT_STARTING_PLUGIN.dspFunction);
-            localStorage.setItem(STORAGE_KEY_PLUGIN, JSON.stringify(DEFAULT_STARTING_PLUGIN));
+            setRecoveredPluginNotice(
+              typeof parsed?.name === "string" && parsed.name ? parsed.name : "your last plugin"
+            );
           }
         }
       } catch (e) {
@@ -1050,10 +1017,54 @@ export default function App() {
     refreshLocalLlmStatus();
   };
 
-  // Save changes offline
-  const savePluginState = (newPlugin: AudioPlugin) => {
+  // Tell the user when boot verification rejected their saved plugin, instead
+  // of silently swapping in the default (which is what used to happen).
+  useEffect(() => {
+    if (!recoveredPluginNotice) return;
+    triggerToast(
+      `⚠️ "${recoveredPluginNotice}" couldn't be reloaded (its code no longer compiles), so the default is loaded instead. Your version was kept, not overwritten.`
+    );
+    setRecoveredPluginNotice(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recoveredPluginNotice]);
+
+  // A build persists nothing until the WHOLE pipeline (including every
+  // perfecting-loop iteration) finishes -- with 25 loops that's a 30-60s
+  // window where a reload silently throws the build away and rehydrates the
+  // previous plugin. Warn before that happens rather than losing the work
+  // without a word.
+  useEffect(() => {
+    if (!chatLoading) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+      return "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [chatLoading]);
+
+  // Save changes offline.
+  //
+  // The write is guarded: localStorage.setItem THROWS when the quota is
+  // exhausted, and this app fills quota for real (recordCanvasHistoryCard
+  // below appends a full plugin on every build). Unguarded, that throw used
+  // to escape into the caller's catch -- which itself calls savePluginState
+  // and would throw again OUTSIDE any try -- suppressing the build's own
+  // success message and leaving React showing a plugin that storage never
+  // received, so the next reload silently reverted it. Now the in-memory
+  // state always lands, the failure is reported to the user, and the caller
+  // can react. Same "tell the truth about persistence" contract
+  // saveCanvasWorkspace (canvasFactory.ts) already implements.
+  const savePluginState = (newPlugin: AudioPlugin): boolean => {
     setPlugin(newPlugin);
-    localStorage.setItem(STORAGE_KEY_PLUGIN, JSON.stringify(newPlugin));
+    const persisted = savePersistedPlugin(newPlugin);
+    if (!persisted) {
+      triggerToast(
+        "⚠️ Storage is full — this plugin is loaded but won't survive a reload. Open Canvas and remove a few old cards to free space."
+      );
+    }
+    return persisted;
   };
 
   // Record a genuinely new (or rebuilt) plugin as a Factory Canvas card so
@@ -2218,6 +2229,10 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         });
 
         let gate = planned.gate;
+        // Who actually did the work, straight from the pipeline's own job
+        // trace -- so a build where every model call failed shows fallbacks
+        // rather than a row of checkmarks it didn't earn.
+        setBuildCrew(crewFromTrace(planned.trace));
         // Failure memory: distill this model build's measured defects into
         // per-family lessons for future planner/refiner prompts.
         recordLessons(spec?.family, gate.report);
@@ -3251,6 +3266,13 @@ return Math.tanh(finalOut * 0.95);`;
   };
 
   const handleClearChat = () => {
+    // Clearing mid-build aborts the build AND resets to the default plugin
+    // below -- i.e. the in-flight work is thrown away with nothing persisted
+    // (a build writes nothing until the entire pipeline finishes). That's a
+    // reasonable thing to want, but not something to do to someone silently.
+    if (chatLoading && !window.confirm("A build is still running. Starting a new chat will cancel it and discard that build. Continue?")) {
+      return;
+    }
     // A new chat resets the annotation canvas: the next build request is a
     // fresh generation, not an edit of the previous plugin's notes.
     setAnnotations([]);
@@ -3926,10 +3948,14 @@ Return ONLY a JSON object with this exact shape, no other text:
                   )}
 
                   {chatLoading && (() => {
-                    const steps = getAgentSteps(selectedAgentId);
-                    const totalSteps = steps.length;
-                    const activeStepIndex = Math.min(orchestrationStep, totalSteps - 1);
-                    const percent = Math.min(98, Math.round(((activeStepIndex + 0.5) / totalSteps) * 100));
+                    // Progress comes from the REAL pipeline stages (buildStages,
+                    // fed by buildPlanner's onStage callbacks), not a timer.
+                    const doneStages = buildStages.filter((s) => s.status === "done").length;
+                    const activeStage = buildStages.find((s) => s.status === "active");
+                    const percent =
+                      buildStages.length === 0
+                        ? 5
+                        : Math.min(98, Math.round(((doneStages + (activeStage ? 0.5 : 0)) / buildStages.length) * 100));
 
                     return (
                       <div className="flex flex-col items-start space-y-2.5 animate-fadeIn w-full max-w-md">
@@ -3937,9 +3963,12 @@ Return ONLY a JSON object with this exact shape, no other text:
                           <span className="text-[10px] font-bold text-orange-400 font-mono uppercase tracking-wider">
                             {currentAgent.name}
                           </span>
-                          <span className="text-[9px] text-neutral-500 font-mono">
-                            Stage {activeStepIndex + 1} of {totalSteps}
-                          </span>
+                          {activeStage && (
+                            <span className="text-[9px] text-neutral-500 font-mono">
+                              {activeStage.label}
+                              {activeStage.note ? ` ${activeStage.note}` : ""}
+                            </span>
+                          )}
                           <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-ping" />
                         </div>
 
@@ -3973,57 +4002,8 @@ Return ONLY a JSON object with this exact shape, no other text:
                             )}
                           </div>
 
-                          {/* Steps Checklist */}
-                          <div className="pt-2.5 border-t border-neutral-850 space-y-2">
-                            {steps.map((stepText, idx) => {
-                              const isCompleted = idx < activeStepIndex;
-                              const isActive = idx === activeStepIndex;
-                              return (
-                                <div
-                                  key={idx}
-                                  className={`flex items-start gap-2.5 transition-all duration-300 ${
-                                    isActive
-                                      ? "opacity-100 transform scale-[1.01]"
-                                      : isCompleted
-                                      ? "opacity-60"
-                                      : "opacity-25"
-                                  }`}
-                                >
-                                  {/* Step State Icon */}
-                                  <div className="mt-0.5 shrink-0">
-                                    {isCompleted ? (
-                                      <div className="w-3.5 h-3.5 rounded-full bg-emerald-950/80 border border-emerald-500/80 flex items-center justify-center">
-                                        <span className="text-[8px] text-emerald-400 font-bold font-mono">✓</span>
-                                      </div>
-                                    ) : isActive ? (
-                                      <div className="w-3.5 h-3.5 rounded-full bg-orange-950/80 border border-orange-500/80 flex items-center justify-center animate-pulse">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-ping" />
-                                      </div>
-                                    ) : (
-                                      <div className="w-3.5 h-3.5 rounded-full bg-neutral-950 border border-neutral-800 flex items-center justify-center">
-                                        <span className="w-1 h-1 rounded-full bg-neutral-700" />
-                                      </div>
-                                    )}
-                                  </div>
-                                  
-                                  {/* Step description */}
-                                  <div className="flex-1 min-w-0">
-                                    <p
-                                      className={`text-[10.5px] leading-snug font-sans ${
-                                        isActive
-                                          ? "text-orange-200 font-medium"
-                                          : isCompleted
-                                          ? "text-neutral-400 line-through decoration-neutral-800"
-                                          : "text-neutral-550"
-                                      }`}
-                                    >
-                                      {stepText}
-                                    </p>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
+                          {/* Who actually worked on this build (real job trace) */}
+                          <BuildCrewPanel crew={buildCrew} />
                         </div>
                       </div>
                     );
@@ -4344,10 +4324,9 @@ Return ONLY a JSON object with this exact shape, no other text:
                   <div className="absolute inset-0 bg-gradient-to-b from-indigo-950/5 to-transparent pointer-events-none" />
                   
                   {chatLoading ? (() => {
-                    const steps = getAgentSteps(selectedAgentId);
-                    const totalSteps = steps.length;
-                    const activeStepIndex = Math.min(orchestrationStep, totalSteps - 1);
-                    const percent = Math.min(98, Math.round(((activeStepIndex + 0.5) / totalSteps) * 100));
+                    // Real pipeline stages, not a timer -- see buildStages /
+                    // buildPlanner's onStage callbacks.
+                    const activeStage = buildStages.find((s) => s.status === "active");
 
                     return (
                       <div className="aspect-square max-h-[380px] md:max-h-[360px] w-full bg-[#111116] border border-orange-950/40 rounded-xl p-5 flex flex-col justify-between relative overflow-hidden shadow-inner select-none animate-pulse">
@@ -4367,38 +4346,17 @@ Return ONLY a JSON object with this exact shape, no other text:
 
                       <div className="space-y-4 my-auto w-full max-w-sm mx-auto">
                         <p className="text-[11px] text-neutral-350 font-sans leading-relaxed text-center">
-                          Our DSP specialist <strong className="text-orange-450">{currentAgent.name}</strong> is generating mathematical parameters and constructing nodes.
+                          {activeStage ? (
+                            <>Building — currently at <strong className="text-orange-450">{activeStage.label}</strong>{activeStage.note ? ` (${activeStage.note})` : ""}.</>
+                          ) : (
+                            <>Building your plugin…</>
+                          )}
                         </p>
 
-                        {/* Steps Checklist */}
-                        <div className="space-y-1.5 font-mono text-[9px] text-neutral-350 bg-neutral-950/80 p-3 rounded-lg border border-neutral-900/60 max-h-[140px] overflow-y-auto scrollbar-thin">
-                          {steps.map((stepText, idx) => {
-                            const isCompleted = idx < activeStepIndex;
-                            const isActive = idx === activeStepIndex;
-                            return (
-                              <div
-                                key={idx}
-                                className={`flex items-center gap-2 transition-all duration-300 ${
-                                  isActive
-                                    ? "opacity-100"
-                                    : isCompleted
-                                    ? "opacity-60"
-                                    : "opacity-25"
-                                }`}
-                              >
-                                {isCompleted ? (
-                                  <span className="text-emerald-500 font-bold">✓</span>
-                                ) : isActive ? (
-                                  <span className="text-orange-400 animate-spin">⟳</span>
-                                ) : (
-                                  <span className="text-neutral-700 font-bold">○</span>
-                                )}
-                                <span className={isActive ? "text-orange-200" : isCompleted ? "line-through text-neutral-500" : "text-neutral-550"}>
-                                  {stepText}
-                                </span>
-                              </div>
-                            );
-                          })}
+                        {/* Real pipeline stages + who actually did the work */}
+                        <div className="bg-neutral-950/80 p-3 rounded-lg border border-neutral-900/60 max-h-[190px] overflow-y-auto scrollbar-thin">
+                          <BuildProgressBar stages={buildStages} versions={buildVersions} />
+                          <BuildCrewPanel crew={buildCrew} />
                         </div>
                       </div>
 
@@ -5165,7 +5123,11 @@ return inputSample * dynamicVolumeMod;`
                 <GitHubAudioDiscovery
                   currentPlugin={plugin}
                   onApplyPreset={(preset) => {
-                    setPlugin({
+                    // savePluginState, not a bare setPlugin -- applying a
+                    // preset produces a genuinely new loaded plugin, and a
+                    // bare setPlugin never reached localStorage, so it
+                    // silently vanished on the next reload.
+                    savePluginState({
                       ...plugin,
                       pluginName: preset.name,
                       name: preset.name,

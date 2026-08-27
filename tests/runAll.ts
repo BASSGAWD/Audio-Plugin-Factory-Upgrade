@@ -41,6 +41,8 @@ const TEST_FILES = [
   "knowledgeAuditTest.ts",
   "researchEngineTest.ts",
   "roamingResearchTest.ts",
+  "pluginPersistenceTest.ts",
+  "buildCrewTest.ts",
   "stereoEngineTest.ts",
   "blockProcessingTest.ts",
   "codeAuditTest.ts",

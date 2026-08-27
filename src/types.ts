@@ -95,6 +95,16 @@ export interface AudioPlugin {
    *  FEATURE_MANIFEST entries without re-inferring the family from scratch. */
   family?: string;
 
+  /**
+   * True only for the stock plugin the app holds so `plugin` is never null
+   * before the user has built anything. It is scaffolding, NOT the user's
+   * work, and must never be presented as "your loaded plugin" -- the dock
+   * hides itself for a placeholder, so a fresh spin-up (or a build that was
+   * interrupted) shows a clean slate instead of a stock plugin nobody asked
+   * for. Any real build/load clears it by simply not setting it.
+   */
+  isPlaceholder?: boolean;
+
   // Overall faceplate skin configuration properties
   customSkin?: {
     bgImage?: string; // Base64 dataURL or background image URL

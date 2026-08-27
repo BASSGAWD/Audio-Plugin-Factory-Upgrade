@@ -277,6 +277,12 @@ export default function SimpleStudio({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const hasMessages = chatHistory.length > 0;
+  // The app holds a stock plugin so `plugin` is never null, but that is
+  // scaffolding, not the user's work. Presenting it in the dock made a fresh
+  // spin-up (and any interrupted build) look like a plugin nobody asked for
+  // was already loaded -- which is exactly what made a lost build look like a
+  // "stale plugin". The dock only appears once a REAL plugin exists.
+  const hasRealPlugin = !plugin.isPlaceholder;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -527,7 +533,11 @@ export default function SimpleStudio({
       {/* Current plugin dock + composer (hidden composer duplication on empty state) */}
       {hasMessages && (
         <div className="shrink-0 px-4 pb-4 pt-2 space-y-3 bg-gradient-to-t from-neutral-950 via-neutral-950 to-transparent">
-          {/* Plugin card */}
+          {/* Plugin card -- only for a REAL plugin. The stock placeholder is
+              scaffolding so `plugin` is never null; showing it here made a
+              fresh spin-up look like a plugin the user never asked for was
+              already loaded. */}
+          {hasRealPlugin && (
           <div className="w-full max-w-2xl mx-auto bg-neutral-900/80 border border-neutral-800 rounded-2xl overflow-hidden backdrop-blur-sm">
             {/* Card header row — always visible */}
             <div className="flex items-center gap-3 px-4 py-2.5">
@@ -856,6 +866,7 @@ export default function SimpleStudio({
               </GenerativeFaceplate>
             )}
           </div>
+          )}
 
           {composer}
         </div>

@@ -276,6 +276,9 @@ const STORAGE_KEY_CHAT = "audio_factory_chat_history";
 
 // Prefilled starting high-fidelity Auto-Tune vocal pitch corrector plugin
 const DEFAULT_STARTING_PLUGIN: AudioPlugin = {
+  // Scaffolding so `plugin` is never null before the user builds anything --
+  // deliberately flagged so the UI never presents it as the user's own work.
+  isPlaceholder: true,
   id: "factory-autotune",
   name: "🤖 AeroTune Vocal Pitch Corrector",
   category: "modulation",

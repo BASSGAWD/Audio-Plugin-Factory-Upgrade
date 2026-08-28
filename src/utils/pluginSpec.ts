@@ -102,7 +102,10 @@ const FAMILY_SIGNALS: FamilySignal[] = [
   // to contain (e.g. "ambient drone SYNTH pad" must not lose to "ambien"
   // inside the reverb signal just because reverb appears earlier).
   { family: "synthesizer", behavior: /\bsynth(?:esizer)?\b|drone|generative|arpegg|oscillator/i, uiMetaphor: "synth_panel" },
-  { family: "pitch", behavior: /pitch|autotune|auto.?tune|harmoni[sz]er|octav|transpose/i, uiMetaphor: "vocal_processor" },
+  // "tuner"/"retune" were in the pitch RECIPE's own match regex but missing
+  // here, so "a vocal tuner ..." classified as hybrid_other and never
+  // reached the pitch family at all.
+  { family: "pitch", behavior: /pitch|autotune|auto.?tune|harmoni[sz]er|octav|transpose|\btuner\b|\bretune\b/i, uiMetaphor: "vocal_processor" },
   { family: "saturator", behavior: /satur|tape warm|tube warm|harmonic|excite|analog warm/i, uiMetaphor: "vintage_unit" },
   { family: "distortion", behavior: /dist|fuzz|overdrive|drive\b|clip|crunch|bitcrush|lo.?fi/i, uiMetaphor: "stompbox" },
   { family: "delay", behavior: /delay|echo|slapback|ping.?pong|dub\b/i, uiMetaphor: "tape_machine" },

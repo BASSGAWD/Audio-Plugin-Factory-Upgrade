@@ -595,6 +595,22 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
   // shape at all.
   const wantsSidechain = /sidechain\s*(?:input|key|comp)|external\s*(?:key|sidechain)|duck(?:s|ing)?\b.*\b(?:from|to)\b/i.test(prompt) && spec.family === "dynamics";
 
+  // The same gap once more, for the beat-locked autotune. "autotune"/"pitch"
+  // already route to the pitch family, but requirements.ts has no dimension
+  // for "where should the KEY come from", so a request to follow the track's
+  // key silently built the golden tuner -- which infers key from the vocal's
+  // own history and never reads inputKey at all. The wording covers the ways
+  // this is actually asked for: tracking the key, following the beat/track/
+  // instrumental, automatic key detection, or key changes/modulation.
+  const wantsBeatLockedKey =
+    spec.family === "pitch" &&
+    (/\bkey\s*(?:track|detect|follow|chang|aware|lock)/i.test(prompt) ||
+      /(?:track|follow|detect|lock)\w*\s+(?:the\s+)?key\b/i.test(prompt) ||
+      /\bauto(?:matic)?\s*key\b/i.test(prompt) ||
+      /\bmodulat(?:e|ion|es)\b/i.test(prompt) ||
+      (/\bsidechain|\bbeat\b|\bbacking\s*track|\binstrumental\b/i.test(prompt) &&
+        /\bkey\b|\bscale\b|\btune\b/i.test(prompt)));
+
   // Human-approved research first: a gate-verified module the user approved
   // in the Research Lab whose concept wording matches this prompt beats the
   // generic banks -- that's the whole point of researching a gap.
@@ -656,6 +672,14 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     structure = sidechain.title;
     friendly = "an external sidechain compressor -- its detector follows a separate key input instead of the main signal";
     engineeringChoice = sidechain;
+  } else if (wantsBeatLockedKey) {
+    const beatLocked = DSP_TOPOLOGIES.find((t) => t.id === "pitch_beat_locked_autotune")!;
+    parameters = toLiveParams(beatLocked.parameters);
+    dspFunction = beatLocked.body;
+    structure = beatLocked.title;
+    friendly =
+      "an autotune that reads the KEY from the backing track on the sidechain rather than from the vocal itself, and holds the vocal by the lookahead so the key is decided before the note is corrected -- it follows real modulations and ignores passing borrowed chords";
+    engineeringChoice = beatLocked;
   } else if (scored.length >= 2 && (spec.hybrid || spec.family === "multiband_saturator")) {
     const composed = composeRecipes(scored[0].recipe, scored[1].recipe);
     parameters = toLiveParams(composed.parameters);

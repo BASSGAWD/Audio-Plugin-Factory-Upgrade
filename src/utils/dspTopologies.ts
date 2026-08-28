@@ -955,6 +955,379 @@ state.yy2 = state.yy1; state.yy1 = y;
 return Math.tanh(y);`,
     tags: { topology: "rbj-peaking-biquad", character: ["transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
   },
+
+  /* ================================================================ */
+  /* PITCH: the golden tuner, plus a key-tracking variant              */
+  /* ================================================================ */
+  {
+    // Registering the golden recipe as this family's DEFAULT topology is
+    // load-bearing, not bookkeeping: rankTopologies falls back to
+    // isDefault when requirements are neutral, so without an entry here a
+    // single specialist variant would win every generic "autotune" or
+    // "octave-up pitch shifter" prompt by default.
+    id: "pitch_autotune_golden",
+    family: "pitch",
+    title: golden("pitch").title,
+    rationale: "the proven general-purpose tuner — autocorrelation F0 detection, key/scale snap, formant-preserving resynthesis",
+    parameters: golden("pitch").parameters,
+    body: golden("pitch").body,
+    // Tagged "vocals" like the specialist below it, deliberately: both are
+    // vocal tools, and rankTopologies gives a source match +3. Matching tags
+    // means the +0.5 isDefault bonus is what breaks the tie, so an ordinary
+    // "autotune my vocals" gets this one and the specialist has to be asked
+    // for. (Declaring this "any" instead would work for ranking but would be
+    // a lie the quality gate believes -- it picks test material from these
+    // tags, and grading a vocal tuner on non-vocal signal drops it below the
+    // shipping floor.)
+    tags: { topology: "autocorrelation-snap", character: ["transparent"], sources: ["vocals"], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "pitch_beat_locked_autotune",
+    family: "pitch",
+    title: "Beat-locked autotune (sidechain chroma key detection, lookahead, automatic modulation tracking)",
+    rationale:
+      "the golden autotune infers key from the VOCAL's own history, so it can only learn a key after the singer has already sung it -- and a wrong early note poisons the histogram. This keys off the BACKING TRACK through the sidechain instead: a 12-bin chroma profile of the instrumental is matched against all 24 major/minor key profiles, and the vocal is delayed by the lookahead so the key is decided from music that arrives AFTER the sample being corrected. A separate fast profile watches for modulations and commits a key change only when it disagrees with the established key persistently, so a passing borrowed chord doesn't yank the tuning",
+    parameters: [
+      { id: "lookahead", name: "Lookahead", min: 0, max: 120, defaultValue: 60, unit: "ms" },
+      { id: "sensitivity", name: "Key Sensitivity", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "speed", name: "Retune Speed", min: 0, max: 100, defaultValue: 18, unit: "ms" },
+      { id: "strength", name: "Strength", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) {
+  state.buf = new Float32Array(8192);      // vocal ring (analysis + lookahead + resynth)
+  state.wp = 0;
+  // Seed the read heads ONCE, lookahead samples behind the write head, then
+  // let them free-run exactly like the golden autotune (advance by the FULL
+  // ratio every sample, wrap at BUF) -- that free-run IS the pitch shift.
+  // An earlier version of this recompiled an "anchor" position every single
+  // sample and forced the heads back onto it, which pins the AVERAGE
+  // playback rate to 1x no matter what ratio says and cancels the shift --
+  // measured against a 45-cent-sharp probe tone it left correction ~30 cents
+  // off instead of the ~5 cents this same architecture reaches in the golden
+  // recipe. Seed-once and free-run is what makes ratio != 1 actually work.
+  let lookInit = params.lookahead !== undefined ? params.lookahead : 60;
+  let lookSampInit = Math.max(0, Math.min(4096, Math.round(lookInit * 44.1)));
+  state.rp1 = (8192 - lookSampInit) % 8192;
+  state.rp2 = (state.rp1 + 1024) % 8192;   // half a grain apart; Hann pair sums to 1
+  // A second, plain (non-pitch-shifted) delay line for the DRY signal: it
+  // advances at a fixed rate of 1/sample, so the dry portion of the mix
+  // stays a constant "lookahead" behind the input regardless of how far the
+  // pitch-shifted read heads have drifted -- otherwise turning the Mix knob
+  // down would phase-smear against a wet signal at a different, drifting delay.
+  state.dp = (8192 - lookSampInit) % 8192;
+  // The two read heads are offset by half a grain so their Hann windows
+  // sum to 1 -- but that means whichever one has LESS ring distance to
+  // travel wraps into real, written audio a whole half-grain (1024
+  // samples) before the other, and starts contributing through its own
+  // Hann taper well before the requested lookahead has actually elapsed.
+  // Rather than reason about which head wraps first (it depends on the
+  // exact lookahead value), mute output explicitly until BOTH heads are
+  // guaranteed to be reading real history, then start cleanly.
+  state.primed = 0;
+  state.primeTarget = lookSampInit;
+  state.hop = 0;
+  state.detF = 220;
+  state.ratio = 1;
+  // 12 pitch classes x 3 octaves of two-pole resonators, run on the
+  // SIDECHAIN. Three octaves is the point: a single octave's worth of
+  // filters only hears notes that happen to land in it, so a chord voiced
+  // an octave up contributes nothing to its own pitch class and the key
+  // comes out a fourth off.
+  state.rz1 = new Float32Array(48);
+  state.rz2 = new Float32Array(48);
+  state.chFast = new Float32Array(12);     // recent chroma -- sees modulations
+  state.chSlow = new Float32Array(12);     // established chroma -- stable key
+  state.tonic = 0;
+  state.isMinor = 0;
+  state.candTonic = -1;
+  state.candMinor = 0;
+  state.candHold = 0;
+  state.locked = 0;         // 0 until the very first key is established
+  state.lockCand = -1;
+  state.lockCandMinor = 0;
+  state.lockHold = 0;
+  state.init = true;
+}
+let BUF = 8192;
+let GRAIN = 2048;
+// Lookahead is read ONCE, in the init block above, to seed the read-head
+// delay -- it is deliberately an engagement-time setting, not a live knob:
+// like the latency control on real lookahead hardware, changing how far the
+// read head trails the write head mid-stream is inherently disruptive
+// (it would mean jumping the read position), so it takes effect at the next
+// time the plugin is instantiated rather than smoothly re-slewing live.
+let sensitivity = params.sensitivity !== undefined ? params.sensitivity : 0.5;
+let speed = params.speed !== undefined ? params.speed : 18;
+let strength = params.strength !== undefined ? params.strength : 1;
+let mix = params.mix !== undefined ? params.mix : 1;
+
+// ---- 1. Sidechain chroma. Falls back to the vocal itself when nothing is
+//         patched in, so the plugin still works with no key source.
+let side = inputKey !== undefined ? inputKey : inputSample;
+
+// A resonant bandpass per pitch class PER OCTAVE (C3/C4/C5 bands), with the
+// three octaves of each pitch class folded into one chroma bin -- that fold
+// is what makes this a chroma profile rather than a spectrum, and covers the
+// range real instrumental parts are actually voiced in. A two-pole resonator
+// is the cheapest per-bin energy reading available without an FFT, and 36 of
+// them is a fixed, bounded cost with no allocation.
+// Pole radius sets the bandwidth, and it has to be tight enough to RESOLVE a
+// semitone or every bin bleeds into its neighbours and the detected key comes
+// out a fourth off. bandwidth ~= (1-r)*SR/pi, so r=0.9997 gives ~4Hz -- inside
+// the ~7.8Hz semitone spacing at C3, the lowest band scanned. Four octaves
+// (C3-C6) is what real parts are actually voiced across: stopping at C4 meant
+// an ordinary A3-rooted minor progression never registered its own tonic.
+for (let k = 0; k < 12; k++) {
+  let e = 0;
+  for (let oct = 0; oct < 4; oct++) {
+    let idx = oct * 12 + k;
+    let f = 130.81 * Math.pow(2, oct + k / 12);   // C3, C4, C5, C6 bands
+    let w = 2 * Math.PI * f / 44100;
+    let r = 0.9997;
+    let a1r = 2 * r * Math.cos(w);
+    let a2r = r * r;
+    let y = side + a1r * state.rz1[idx] - a2r * state.rz2[idx];
+    state.rz2[idx] = state.rz1[idx];
+    state.rz1[idx] = y;
+    // Normalized by (1-r) so a sharper filter doesn't just mean a bigger
+    // number -- the chroma bins stay comparable to the input's own scale.
+    e += Math.abs(y) * (1 - r);
+  }
+  // Rectified energy into two profiles on genuinely different timescales.
+  // Both must be LONGER than a chord: a profile whose time constant is a
+  // fraction of a bar tracks the current CHORD, not the key, and the
+  // change detector below then "modulates" on every IV chord.
+  //   fast ~2s  (a couple of bars -- fast enough to catch a real modulation)
+  //   slow ~10s (the established key)
+  state.chFast[k] = state.chFast[k] * 0.999989 + e * 0.000011;
+  state.chSlow[k] = state.chSlow[k] * 0.9999977 + e * 0.0000023;
+}
+
+// ---- 2. Match each chroma profile against all 24 keys, every 1024 samples.
+//         Krumhansl-style: correlate the normalized profile against a major
+//         and a minor template rotated to each of the 12 tonics.
+state.hop++;
+if (state.hop >= 1024) {
+  state.hop = 0;
+  // Templates: scale degrees weighted by tonal importance (tonic/dominant
+  // heaviest). Written inline as plain arrays -- no allocation per sample,
+  // this branch runs once every 1024 samples.
+  let majT = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+  let minT = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+  let bestKey = function (prof) {
+    let sum = 0;
+    for (let k = 0; k < 12; k++) sum += prof[k];
+    if (sum < 1e-9) return { tonic: -1, minor: 0, score: 0 };
+    let mean = sum / 12;
+    let bT = 0; let bM = 0; let bS = -1e9;
+    for (let t = 0; t < 12; t++) {
+      let sMaj = 0; let sMin = 0;
+      for (let k = 0; k < 12; k++) {
+        let v = prof[(t + k) % 12] - mean;
+        sMaj += v * majT[k];
+        sMin += v * minT[k];
+      }
+      if (sMaj > bS) { bS = sMaj; bT = t; bM = 0; }
+      if (sMin > bS) { bS = sMin; bT = t; bM = 1; }
+    }
+    return { tonic: bT, minor: bM, score: bS / (sum + 1e-9) };
+  };
+
+  let slow = bestKey(state.chSlow);
+  let fast = bestKey(state.chFast);
+
+  if (!state.locked) {
+    // Initial acquisition: require the SLOW profile to agree with itself for
+    // a sustained run of hops before trusting it, rather than snapping to
+    // whatever the very first sliver of accumulated energy suggests (that
+    // first reading is nearly always noise -- chSlow has barely begun to
+    // integrate). Sensitivity sets how many agreeing hops that takes: a
+    // deliberately SHORTER scale than modulation tracking below (roughly
+    // 0.2-1.4s vs. 1.4-4.6s) because establishing the starting key should
+    // happen quickly, while changing an already-established key should not.
+    if (slow.tonic >= 0) {
+      if (slow.tonic === state.lockCand && slow.minor === state.lockCandMinor) {
+        state.lockHold++;
+      } else {
+        state.lockCand = slow.tonic;
+        state.lockCandMinor = slow.minor;
+        state.lockHold = 1;
+      }
+      let needLock = 60 - Math.round(sensitivity * 50);
+      if (state.lockHold >= needLock) {
+        state.tonic = slow.tonic;
+        state.isMinor = slow.minor;
+        state.locked = 1;
+      }
+    }
+  }
+
+  // ---- 3. Modulation tracking. The fast profile disagreeing with the
+  //         current key is only a key CHANGE if it keeps disagreeing --
+  //         otherwise a borrowed chord or a passing tone would yank the
+  //         tuning mid-phrase. Sensitivity sets how many agreeing hops it
+  //         takes (about 1.4s at max sensitivity, 4.6s at min).
+  if (state.locked && fast.tonic >= 0 && (fast.tonic !== state.tonic || fast.minor !== state.isMinor)) {
+    if (fast.tonic === state.candTonic && fast.minor === state.candMinor) {
+      state.candHold++;
+    } else {
+      state.candTonic = fast.tonic;
+      state.candMinor = fast.minor;
+      state.candHold = 1;
+    }
+    // Sustained disagreement required before committing, in 1024-sample
+    // hops: ~1.4s at max sensitivity, ~4.6s at min. Deliberately longer
+    // than one chord so a IV or a borrowed chord can never read as a key
+    // change -- only a genuine modulation holds this long.
+    let need = 200 - Math.round(sensitivity * 140);
+    if (state.candHold >= need) {
+      state.tonic = state.candTonic;
+      state.isMinor = state.candMinor;
+      state.candTonic = -1;
+      state.candHold = 1;
+    }
+  } else {
+    state.candTonic = -1;
+  }
+}
+
+// ---- 4. Write the vocal into the ring and detect its pitch. The read head
+//         trails the write head by the lookahead, so the key applied to a
+//         sample was decided from sidechain audio that arrived LATER than it.
+state.buf[state.wp] = inputSample;
+state.wp = (state.wp + 1) % BUF;
+
+// Autocorrelation F0 on the vocal, every 512 samples, over the most recent
+// window (60-1000 Hz covers the sung range). Ported from the golden
+// autotune's proven detector -- an earlier version of this scanned for the
+// single GLOBAL max-correlation lag, which is exactly the bug this project's
+// own history warns about: a periodic tone autocorrelates just as strongly
+// at 2x/3x its true period, so a global argmax locks onto an octave-down
+// subharmonic about as often as the true fundamental, and a bare integer lag
+// (no interpolation) is only ~15 cents of resolution near 440Hz -- close
+// enough to a semitone boundary to flip which note the scale-snap thinks
+// it's hearing and send the correction a full semitone the WRONG way (this
+// is what a 45-cent-sharp probe tone measured: corrected to +48 cents
+// instead of the ~5 the golden recipe reaches with this same fix in place).
+if ((state.wp & 511) === 0) {
+  let N = 1024;
+  let start = (state.wp - N + BUF) % BUF;
+  let energy = 0;
+  for (let i = 0; i < N; i++) { let v = state.buf[(start + i) % BUF]; energy += v * v; }
+  if (energy > 1e-3) {
+    let corrAtLag = function (lag) {
+      let c = 0;
+      for (let i = 0; i < N - lag; i += 2) {
+        c += state.buf[(start + i) % BUF] * state.buf[(start + i + lag) % BUF];
+      }
+      return c / (energy + 1e-9);
+    };
+    // Scan from the SHORTEST lag upward and take the first genuine local
+    // peak -- not the global max -- so the true (highest) fundamental wins
+    // over any longer-period subharmonic.
+    let prevPrev = corrAtLag(42);
+    let prev = corrAtLag(43);
+    let foundLag = 0;
+    let foundCorr = 0;
+    let cM = 0;
+    let cP = 0;
+    for (let lag = 44; lag <= 735; lag++) {
+      let corr = corrAtLag(lag);
+      if (prev > prevPrev && prev >= corr && prev > 0.28) {
+        foundLag = lag - 1;
+        foundCorr = prev;
+        cM = prevPrev;
+        cP = corr;
+        break;
+      }
+      prevPrev = prev;
+      prev = corr;
+    }
+    if (foundLag > 0) {
+      // Parabolic interpolation across the peak's neighbors for sub-lag
+      // precision.
+      let denom = cM - 2 * foundCorr + cP;
+      let delta = Math.abs(denom) > 1e-9 ? 0.5 * (cM - cP) / denom : 0;
+      if (delta > 1) delta = 1;
+      if (delta < -1) delta = -1;
+      state.detF = 44100 / (foundLag + delta);
+      // A slow-tracking companion used ONLY for the discrete note decision
+      // below -- the raw per-hop detF still carries a few cents of detector
+      // jitter even after interpolation, and right at a semitone's 50-cent
+      // rounding boundary that jitter flips the chosen note. The correction
+      // ratio still tracks the raw, responsive state.detF; only nearMidi is
+      // judged from this smoothed one.
+      if (state.noteDetF === undefined) state.noteDetF = state.detF;
+      state.noteDetF += 0.08 * (state.detF - state.noteDetF);
+    }
+  }
+}
+
+// ---- 5. Snap the detected note into the CURRENT key's scale.
+let mask = state.isMinor ? 1453 : 2741;   // natural minor / major, 12-bit sets
+let midiRaw = 69 + 12 * Math.log(Math.max(40, state.detF) / 440) / Math.log(2);
+let midiSmoothed = 69 + 12 * Math.log(Math.max(40, state.noteDetF !== undefined ? state.noteDetF : state.detF) / 440) / Math.log(2);
+let nearMidi = Math.round(midiSmoothed);
+let rel = ((nearMidi - state.tonic) % 12 + 12) % 12;
+let snapRel = rel;
+for (let r = 0; r <= 6; r++) {
+  let up = (rel + r) % 12;
+  let dn = (rel - r + 12) % 12;
+  if ((mask >> up) & 1) { snapRel = up; break; }
+  if ((mask >> dn) & 1) { snapRel = dn; break; }
+}
+let snappedMidi = nearMidi - rel + snapRel;
+// Strength blends between the RAW sung pitch and the snapped one -- the raw
+// one, not the smoothed decision pitch, so a partial-strength setting still
+// tracks the singer's actual pitch responsively rather than the debounced
+// note estimate.
+let corrMidi = midiRaw + strength * (snappedMidi - midiRaw);
+let targetF = 440 * Math.pow(2, (corrMidi - 69) / 12);
+let target = targetF / (state.detF + 1e-9);
+if (target < 0.5) target = 0.5;
+if (target > 2) target = 2;
+
+let alpha = speed < 0.5 ? 1 : 1 - Math.exp(-1 / (speed * 0.001 * 44100 + 1));
+state.ratio += alpha * (target - state.ratio);
+
+// ---- 6. Resynthesize: two Hann-windowed read heads a half grain apart,
+//         free-running through the ring at the correction ratio -- the same
+//         proven mechanism the golden autotune uses. The heads were SEEDED
+//         once (in the init block) to start lookSamples behind the write
+//         head; from here they just advance like golden, no re-anchoring.
+let i0a = Math.floor(state.rp1) % BUF; if (i0a < 0) i0a += BUF;
+let i1a = (i0a + 1) % BUF;
+let fracA = state.rp1 - Math.floor(state.rp1);
+let sampleA = state.buf[i0a] * (1 - fracA) + state.buf[i1a] * fracA;
+let i0b = Math.floor(state.rp2) % BUF; if (i0b < 0) i0b += BUF;
+let i1b = (i0b + 1) % BUF;
+let fracB = state.rp2 - Math.floor(state.rp2);
+let sampleB = state.buf[i0b] * (1 - fracB) + state.buf[i1b] * fracB;
+let posA = state.rp1 % GRAIN; if (posA < 0) posA += GRAIN;
+let posB = state.rp2 % GRAIN; if (posB < 0) posB += GRAIN;
+let winA = 0.5 - 0.5 * Math.cos((2 * Math.PI * posA) / GRAIN);
+let winB = 0.5 - 0.5 * Math.cos((2 * Math.PI * posB) / GRAIN);
+let wet = sampleA * winA + sampleB * winB;
+state.rp1 += state.ratio; if (state.rp1 >= BUF) state.rp1 -= BUF; if (state.rp1 < 0) state.rp1 += BUF;
+state.rp2 += state.ratio; if (state.rp2 >= BUF) state.rp2 -= BUF; if (state.rp2 < 0) state.rp2 += BUF;
+
+// Dry is read from the separate constant-rate delay line so the Mix knob
+// stays phase-aligned with the wet signal no matter how far the pitch-shift
+// heads above have drifted from the nominal lookahead.
+let dry = state.buf[Math.floor(state.dp)];
+state.dp += 1; if (state.dp >= BUF) state.dp -= BUF;
+if (state.primed < state.primeTarget) { state.primed++; return 0; }
+return Math.tanh(dry * (1 - mix) + wet * mix);`,
+    // Same "vocals" tag as the golden default above, so neither outranks the
+    // other on source and isDefault decides -- this design only makes sense
+    // when a key source is actually asked for, and is reached through the
+    // explicit prompt route in offlineBuilder (wantsBeatLockedKey), the same
+    // way convolution and the external-sidechain compressor are.
+    tags: { topology: "beat-locked-autotune", character: ["transparent"], sources: ["vocals"], latency: "lookahead", cpu: "medium" },
+  },
 ];
 
 export function topologiesForFamily(family: PluginFamily): DspTopology[] {

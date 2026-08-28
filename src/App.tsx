@@ -81,6 +81,7 @@ import RefineControl from "./components/RefineControl";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./components/BuildProgressBar";
 import BuildCrewPanel from "./components/BuildCrewPanel";
 import { CrewMember, crewFromTrace } from "./utils/buildCrew";
+import { deriveArchitectSyncFromPlugin } from "./utils/architectSync";
 import BlindListeningTest from "./components/BlindListeningTest";
 import { runPlannedBuild } from "./utils/buildPlanner";
 import { loadCanvasWorkspace, saveCanvasWorkspace, placeNewCard, CanvasCard } from "./utils/canvasFactory";
@@ -694,6 +695,23 @@ export default function App() {
   }> | null>(null);
   const [architectGeneratedCode, setArchitectGeneratedCode] = useState<string | null>(null);
   const [architectParameters, setArchitectParameters] = useState<PluginParameter[]>([]);
+  // Sync Architect to whatever was actually just built, everywhere else in
+  // the app (chat, a GitHub preset, Canvas, roaming research) -- fires only
+  // on a genuinely NEW build (plugin.id changing), so anything the user is
+  // mid-editing in Architect survives until the next real build, and the
+  // placeholder scaffold never overwrites a manual Architect session with
+  // nothing. Purely deterministic: no local-model call, no added latency.
+  const lastSyncedPluginIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (plugin.isPlaceholder) return;
+    if (lastSyncedPluginIdRef.current === plugin.id) return;
+    lastSyncedPluginIdRef.current = plugin.id;
+    const synced = deriveArchitectSyncFromPlugin(plugin);
+    setArchitectPrompt(synced.prompt);
+    setArchitectSpecs(synced.specs);
+    setArchitectParameters(synced.parameters);
+    setArchitectGeneratedCode(synced.code);
+  }, [plugin.id, plugin.isPlaceholder]);
 
   // Help manual overlay modal trigger
   const [isHelpManualOpen, setIsHelpManualOpen] = useState(false);

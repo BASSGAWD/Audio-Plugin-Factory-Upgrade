@@ -1,0 +1,6 @@
+{
+  "name": "ORANGEJUCE",
+  "description": "ORANGEJUCE: A highly interactive real-time autonomous DSP audio plugin compilation studio and virtual modular playground.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

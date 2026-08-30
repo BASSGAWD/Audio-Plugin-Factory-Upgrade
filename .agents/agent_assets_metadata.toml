@@ -1,0 +1,62 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "Bf0k17xN6cdrBcWuvM-Vy"
+uri = "file://.local/conversation-workspace/files/audio-plugin-ui-generation-blueprint.md"
+type = "text"
+title = "Audio Plugin UI Generation Blueprint"
+description = "A drop-in architecture for producing consistent, polished plugin interfaces with schemas, governed components, visual tests, and repair loops."
+logical_id = "dae90767-11be-46b8-b6be-5466c4f9b7b3"
+content_hash = "sha256:c84e066c31564729d638dba411953459fafc6fce8820b4bd81fe83e439afc67a"
+size = 5317
+mtime_ms = 1787928585658
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/conversation:a60ae1b7-d211-47e5-88e4-6a2f7ebafb93/dae90767-11be-46b8-b6be-5466c4f9b7b3/2d5fa4b1-d56d-4a10-a384-2e4c764701a1"
+storage_version_token = "1787928586217595"
+content_type = "text/markdown"
+source_uri = "file://audio-plugin-ui-generation-blueprint.md"
+
+[[outputs]]
+id = "kzXLuQotUPh9Asxi6GDru"
+uri = "file://.local/conversation-workspace/files/autonomous-audio-plugin-factory-ui-audit.md"
+type = "text"
+title = "Autonomous Audio Plugin Factory — UI Quality Audit"
+description = "A repository-specific diagnosis of why generated interfaces can pass the current gate yet remain visually weak, plus a prioritized replacement architecture."
+logical_id = "db98b847-b06b-4bf6-898d-1d282a578335"
+content_hash = "sha256:ce217ba792b3135254421a074551a43e0294403af9064243013c3cabae632248"
+size = 6782
+mtime_ms = 1787954240087
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/conversation:a60ae1b7-d211-47e5-88e4-6a2f7ebafb93/db98b847-b06b-4bf6-898d-1d282a578335/cfbdebf8-1831-487f-abe0-0879230f97bf"
+storage_version_token = "1787954240596551"
+content_type = "text/markdown"
+source_uri = "file://autonomous-audio-plugin-factory-ui-audit.md"
+
+[[outputs]]
+id = "hWH4zFKSBaRGvx4jP-Q_E"
+uri = "file://.local/conversation-workspace/files/research/notes.md"
+type = "text"
+title = "Research Notes: Audio Plugin Factory Upgrade"
+description = "Live research plan and findings log for improving code generation, DSP verification, and UI/UX quality."
+logical_id = "0d3a6f92-86cf-43e7-aae2-dc7977c24a4f"
+content_hash = "sha256:760ceafb6918c044acdb66cb09c382832ada7b550e23b017e248fa295d3c6c93"
+size = 2126
+mtime_ms = 1787954392770
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/conversation:a60ae1b7-d211-47e5-88e4-6a2f7ebafb93/0d3a6f92-86cf-43e7-aae2-dc7977c24a4f/8fdb4c2c-556f-42b0-8c6c-5e1471f87fb2"
+storage_version_token = "1787954393326633"
+content_type = "text/markdown"
+source_uri = "file://research/notes.md"
+
+[[outputs]]
+id = "iOd3BUc9oCLatyn8tJxhL"
+uri = "file://.local/conversation-workspace/files/research/audio-plugin-factory-upgrade-report.md"
+type = "text"
+title = "Autonomous Audio Plugin Factory — Upgrade Research"
+description = "A 27-source, repository-specific plan for improving code generation, DSP verification, Web/JUCE parity, UI/UX quality, visual evaluation, and model orchestration."
+logical_id = "2fa86f29-22f4-4f39-872f-9f59dce1eebd"
+content_hash = "sha256:69fb3408f735952dbf089772b5ab0fe2b02f361097c48d10b039680cd4798855"
+size = 36186
+mtime_ms = 1787954624300
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/conversation:a60ae1b7-d211-47e5-88e4-6a2f7ebafb93/2fa86f29-22f4-4f39-872f-9f59dce1eebd/fdd27054-6510-4e71-be68-63f50a1932ea"
+storage_version_token = "1787954651283715"
+content_type = "text/markdown"
+source_uri = "file://research/audio-plugin-factory-upgrade-report.md"

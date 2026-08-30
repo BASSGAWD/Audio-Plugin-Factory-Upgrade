@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "ORANGEJUCE"
+description = "The live browser-first ORANGEJUCE music production studio and autonomous audio plugin builder."
+version = "1.0.0"
+id = "artifacts/orangejuce"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/", "/api/daw-sync", "/api/audio-projects", "/api/llm", "/api/native", "/api/plugins", "/api/proxy", "/api/health" ]
+localPort = 22709
+
+[services.development]
+run = "pnpm --filter @workspace/orangejuce run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/orangejuce", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/orangejuce/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22709"
+BASE_PATH = "/"

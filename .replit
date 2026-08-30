@@ -1,0 +1,48 @@
+modules = ["nodejs-24"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "ORANGEJUCE Live DAW"
+
+[[workflows.workflow]]
+name = "ORANGEJUCE Live DAW"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd imported/autonomous-audio-plugin-factory && npm run dev"
+waitForPort = 3000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[nix]
+channel = "stable-25_05"
+packages = ["cmake", "pkg-config", "alsa-lib", "freetype", "fontconfig", "xorg.libX11", "xorg.libXext", "xorg.libXinerama", "xorg.libXrandr", "xorg.libXcursor", "xorg.libXcomposite", "xorg.libXrender", "glib", "nss", "nspr", "atk", "at-spi2-atk", "cups", "dbus", "expat", "libdrm", "mesa", "pango", "cairo", "xorg.libXdamage", "xorg.libXfixes", "xorg.libxcb", "libxkbcommon", "libgbm", "gtk3"]
+
+[objectStorage]
+defaultBucketID = "replit-objstore-1b2167b8-0365-47d8-9f18-416e10e4cd54"

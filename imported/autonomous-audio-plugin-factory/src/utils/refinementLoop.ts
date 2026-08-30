@@ -1,0 +1,595 @@
+/**
+ * Opt-in perfecting loop: after a build clears the gate, rework it up to N
+ * user-chosen times and keep only iterations that MEASURABLY score higher.
+ *
+ * Three rework strategies, best-effort per iteration:
+ *  - Refiner worker (local LLM): rewrites the dspFunction for richer
+ *    character against the gate's real evidence, parameter schema frozen.
+ *    Every candidate must pass the full acceptance check before it is even
+ *    scored — a regression can never replace a working build.
+ *  - Deterministic structural variant: appends or prepends a verified DSP
+ *    primitive stage (dspPrimitives.ts) to the current build, cycling
+ *    through prompt-relevant primitives across iterations. This changes the
+ *    SIGNAL PATH, not just a knob position — the search dimension voicing
+ *    variants can't reach. Falls back to voicing when the base body can't be
+ *    safely wrapped (e.g. an early-return recipe like autotune).
+ *  - Deterministic voicing variant: seeded nudges of the intensity
+ *    parameters' defaults (mix/drive/feedback/...), re-gated. Safe on ANY
+ *    plugin, including cloud-generated ones, because it never touches code.
+ *
+ * The full iteration trace lands in the BuildReport, so "perfected over N
+ * loops" is always shown as scores, not vibes.
+ */
+
+import { AudioPlugin, BuildReport, PluginParameter } from "../types";
+import { AudioPluginSpec, classifyPluginIntent } from "./pluginSpec";
+import { LLMConfig, callLocalLLM, isLocalProvider, FUSION_MEMBERS, memberConfig } from "./llmGateway";
+import { DSP_CODING_RULES, SOUND_QUALITY_RULES } from "./dspPromptKit";
+import { checkDsp } from "./pluginVerifier";
+import { normalizeModelDspCode } from "./healthcheckRunner";
+import { QualityGateResult, runQualityGate } from "./qualityGate";
+import { learnedPitfallsFor } from "./learnedPitfalls";
+import { DspPrimitive, appendPrimitiveStage, prependPrimitiveStage, promptRelevantPrimitives } from "./dspPrimitives";
+
+export const MAX_REFINE_LOOPS = 25;
+
+export interface RefinementIteration {
+  iteration: number;
+  action: string;
+  accepted: boolean;
+  score: number;
+  /** Plain-language "what changed vs the current best" for the UI trace. */
+  changeSummary: string;
+}
+
+/**
+ * One retained, gated version — the unit the ranking leaderboard and the blind
+ * A/B/C listening test operate on. Candidates are distinct plugins (deduped by
+ * DSP + param defaults) so the user is never auditioning identical clones.
+ */
+export interface RankedCandidate {
+  /** Stable version tag: v1 = initial build, v2.. = rework passes. */
+  label: string;
+  plugin: AudioPlugin;
+  gate: QualityGateResult;
+  score: number;
+  /** 1 = highest refinementScore. */
+  rank: number;
+  changeSummary: string;
+}
+
+export interface RefinementResult {
+  plugin: AudioPlugin;
+  gate: QualityGateResult;
+  iterations: RefinementIteration[];
+  /** Score of the initial build, for the before/after story. */
+  initialScore: number;
+  bestScore: number;
+  /** Distinct versions, ranked best-first (top 3), for the leaderboard + blind test. */
+  candidates: RankedCandidate[];
+}
+
+/**
+ * How close two refinementScores must be to count as a tie the human ear should
+ * settle. The score spans ~0-800 (four 0-100 dimensions + 4x confidence), so 6
+ * points is well under 1% — it captures all-100s/confidence ties and sub-point
+ * character/correction differences without ever calling a real gap a tie.
+ */
+export const NEAR_TIE_MARGIN = 6;
+export function isNearTie(a: number, b: number): boolean {
+  return Math.abs(a - b) <= NEAR_TIE_MARGIN;
+}
+
+/**
+ * One number to climb: all four gate dimensions plus confidence, minus a
+ * small penalty per deterministic correction the gate had to apply (a build
+ * that needs no gain trim beats one that does, even at equal scores) and per
+ * cross-signal dead spot (a build that works on plucks AND sustains beats one
+ * that dies on some material), plus a small bonus for characterIndex. These
+ * last terms are tie-breakers only: the correctness terms (scores,
+ * confidence) dominate the ~0-800 range, so they refine ranking among
+ * otherwise-equal candidates without ever letting an incorrect build win.
+ */
+export function refinementScore(gate: QualityGateResult): number {
+  const s = gate.scores;
+  const corrections = gate.report.fixes.filter((f) => /corrected/i.test(f)).length;
+  const characterBonus = 3 * gate.report.characterIndex;
+  const deadSpotPenalty = 5 * (gate.report.silentOnSignals?.length ?? 0);
+  // Harshness: only when the gate judged it a defect for this family (harsh),
+  // scaled by how bad. Tops out at ~5, another tie-breaker among correct builds.
+  const harshnessPenalty = gate.report.harsh ? 5 * (gate.report.aliasingIndex ?? 0) : 0;
+  // A knob that does the WRONG thing (semantic violation) already costs
+  // musicality; the extra term here makes the loop prefer an honest candidate
+  // even when the headline scores happen to tie.
+  const semanticPenalty = 4 * (gate.report.semanticViolations?.length ?? 0);
+  // FUNCTIONAL FITNESS — the discriminator among correct builds. The four
+  // headline dimensions saturate (~98% of clean candidates score a perfect
+  // 100, competing designs landing within ~2 points of each other out of
+  // ~800), which left this loop, best-of-N, and the fusion ensemble with no
+  // gradient to climb. Fitness measures whether the build actually does its
+  // family's job — compression in dB, decay time, echo calibration, cutoff
+  // accuracy, harmonic generation — and is weighted (0-50) to discriminate
+  // decisively while the correctness terms (~750) still dominate, so a
+  // more-effective-but-broken build can never beat a correct one.
+  const fitnessBonus = 0.5 * (gate.report.functionalFitness?.score ?? 0);
+  // FEATURE DEPTH — the second discriminator, orthogonal to fitness. Fitness
+  // asks "does it do its family's job?", which a 3-knob compressor passes
+  // while still feeling like a toy; depth asks "does it have the controls a
+  // REAL unit has?" (see featureManifest.ts). Weighted below fitness (0-30
+  // vs 0-50) deliberately: an effective plugin should still beat a merely
+  // feature-rich one, so this breaks ties toward completeness without ever
+  // letting a padded build outrank a better-sounding one. Knob-spam can't
+  // win here either -- every parameter it counts had to pass the
+  // deadParams audibility check first.
+  const depthBonus = 0.3 * (gate.report.featureDepth?.score ?? 0);
+  // CPU COST — a light tie-breaker, not a correctness signal. The headline
+  // `latency` score deliberately stays at its deterministic-path 100
+  // regardless of measured per-sample cost (wall-clock timing is noisy and
+  // must never make the gating floor flaky); this term lets an absurdly
+  // expensive candidate lose a close tie to a cheaper one without being able
+  // to outweigh anything that actually affects correctness or musicality.
+  const cpuBonus = 0.15 * (gate.report.cpuCost?.score ?? 100);
+  // REFERENCE DEVIATION — orthogonal to fitness/depth: fitness asks "does it
+  // do its family's job", depth asks "does it have the family's controls",
+  // this asks "does it BEHAVE like a known-good member of its family" by
+  // comparing response shape against the family's golden recipe. Weighted
+  // between fitness and depth: a real signal about wrongness fitness alone
+  // can miss, but still secondary to whether the build is correct at all.
+  const referenceBonus = 0.2 * (gate.report.referenceDeviation?.score ?? 100);
+  // VOICING DIFFERENTIATION — a discrete selector (amp_sim's headType/
+  // cabType) that doesn't actually branch is a hidden defect none of the
+  // other terms above would catch (fitness/depth/reference all render at
+  // DEFAULTS only, never sweep a select param's other choices). Averaged
+  // across every select param present so a build with several behaves like
+  // one signal, not N. Absent entirely (not just 0) when the build has no
+  // select params, so a non-amp build is never penalized for lacking one.
+  const voicingEntries = gate.report.voicingDifferentiation;
+  const voicingBonus =
+    voicingEntries && voicingEntries.length > 0
+      ? 0.2 * (voicingEntries.reduce((sum, v) => sum + v.score, 0) / voicingEntries.length)
+      : 0;
+  // VISUAL INTEGRITY — WCAG contrast on the faceplate, orthogonal to
+  // scoreLooks's structural presence checks (does every param HAVE a
+  // controlType/x/y/accentColor?) and to overlap (already penalized
+  // directly in scoreLooks, not duplicated here). A light tie-breaker
+  // deliberately: a legitimately bold, high-contrast-by-design theme must
+  // never be blocked from shipping over a borderline number, so this never
+  // touches the >=97 floor -- only which of several CORRECT candidates
+  // ranks first.
+  const visualBonus = 0.1 * (gate.report.visualIntegrity?.score ?? 100);
+  // SKEUOMORPHIC FIDELITY — does the theme's declared glow/material intent
+  // actually render (see measureSkeuomorphicFidelity)? A lighter weight
+  // than visualBonus since it's a narrower, single-field check rather than
+  // a full contrast measurement; still a pure tie-breaker, never gates.
+  const skeuomorphicBonus = 0.1 * (gate.report.skeuomorphicFidelity?.score ?? 100);
+  // CODE HEALTH — the DSP-code auditor's own static-quality score
+  // (codeAudit.ts: real-time safety, numerical guards, parameter
+  // smoothing, maintainability). This project's own documentation
+  // (codeAudit.ts's header comment, CLAUDE.md) already asserted this
+  // measurement "ranks candidates inside refinementScore()" -- it never
+  // actually did (grepped: zero references here before this line). A
+  // light tie-breaker like cpuBonus/visualBonus, not a correctness gate:
+  // codeHealth is informational by design (see CLAUDE.md's standing
+  // "measure, surface the evidence, feed the ranking -- don't move the
+  // floor" rule), so a build with a real numerical/smoothing defect loses
+  // a close tie to a cleaner one without ever being able to outrank
+  // something that's actually more correct or musical.
+  const codeHealthBonus = 0.15 * (gate.report.codeHealth ?? 100);
+  return s.looks + s.performance + s.latency + s.musicality + 4 * gate.report.confidence - 2 * corrections + characterBonus - deadSpotPenalty - harshnessPenalty - semanticPenalty + fitnessBonus + depthBonus + cpuBonus + referenceBonus + voicingBonus + visualBonus + skeuomorphicBonus + codeHealthBonus;
+}
+
+/* ------------------------------------------------------------------ */
+/* Deterministic voicing variants                                      */
+/* ------------------------------------------------------------------ */
+
+// Family-defining character knobs, not just the generic effect-level ones.
+// Without ratio/threshold/attack/release/knee/makeup here, a compressor's
+// ONLY match is "mix" -- so voicing search had nothing else to nudge and,
+// combined with the parity bug below, could degenerate to a complete no-op
+// for an entire plugin family. See NUDGE_FRACTIONS' comment for the other
+// half of that bug.
+const INTENSITY_PARAM =
+  /^(mix|drive|feedback|decay|depth|space|tone|cutoff|resonance|damp|ratio|threshold|attack|release|knee|makeup|rate|width|speed|wow|flutter|sensitivity|drift)$/;
+/** Seeded nudge pattern: alternating directions, growing amplitude. */
+const NUDGE_FRACTIONS = [0.12, -0.12, 0.2, -0.2, 0.3, -0.3];
+
+const DECORATIVE_CONTROLS = new Set(["meter", "label", "waveform", "eq", "amp", "cab", "mic", "mic_stand", "pad", "button"]);
+
+/** A continuous, non-decorative parameter worth nudging for a voicing variant. */
+function isNudgeable(p: PluginParameter): boolean {
+  if (p.min >= p.max) return false;
+  if (p.id.startsWith("pad_")) return false;
+  if (p.controlType && DECORATIVE_CONTROLS.has(p.controlType)) return false;
+  if (/bypass|enable|power|on_off/i.test(p.id)) return false;
+  // "select" (e.g. amp_sim's headType/cabType) is functional, not
+  // decorative -- it just isn't CONTINUOUS. The fractional NUDGE_FRACTIONS
+  // scaling is built for a knob you can dial anywhere in its range; applied
+  // to a discrete choice it produces values like headType=1.36 that don't
+  // correspond to any real named voicing. Leave the user's exact choice
+  // alone during voicing search; the continuous tone knobs still vary.
+  if (p.controlType === "select") return false;
+  return true;
+}
+
+/** Clone the plugin with intensity-parameter defaults nudged by a seeded
+ *  fraction of their range. Never touches the DSP code. When a plugin has no
+ *  named intensity knob (e.g. autotune's key/scale), fall back to nudging every
+ *  continuous non-decorative param so looping still yields a DISTINCT version to
+ *  rank and audition instead of an identical clone. */
+export function voicingVariant(plugin: AudioPlugin, iteration: number): AudioPlugin {
+  const frac = NUDGE_FRACTIONS[(iteration - 1) % NUDGE_FRACTIONS.length];
+  const intensity = plugin.parameters.filter((p) => INTENSITY_PARAM.test(p.id));
+  const targets = intensity.length > 0 ? intensity : plugin.parameters.filter(isNudgeable);
+  const targetIds = new Set(targets.map((p) => p.id));
+  const parameters = plugin.parameters.map((p) => {
+    if (!targetIds.has(p.id)) return { ...p };
+    const nudged = Math.min(p.max, Math.max(p.min, p.defaultValue + frac * (p.max - p.min)));
+    const v = Math.round(nudged * 1000) / 1000;
+    return { ...p, defaultValue: v, value: v };
+  });
+  return { ...plugin, parameters };
+}
+
+/* ------------------------------------------------------------------ */
+/* Deterministic structural variants                                   */
+/* ------------------------------------------------------------------ */
+
+/** Titles of stages this loop itself has already bolted onto the plugin,
+ *  read back from the marker comments appendPrimitiveStage/
+ *  prependPrimitiveStage emit -- lets later iterations reach for a
+ *  DIFFERENT primitive instead of stacking the same stage repeatedly. */
+function structuralStageTitles(dspFunction: string): Set<string> {
+  const titles = new Set<string>();
+  const re = /--- (?:APPENDED|PREPENDED) STAGE: (.+?) ---/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(dspFunction))) titles.add(m[1]);
+  return titles;
+}
+
+/**
+ * Deterministic STRUCTURAL search: unlike voicingVariant (same DSP, a knob
+ * nudged), this produces a candidate with a genuinely different signal
+ * path -- a verified primitive stage (dspPrimitives.ts) appended or
+ * prepended to the plugin's CURRENT dspFunction. Direction alternates by
+ * iteration parity (append/prepend are structurally different: finishing
+ * the processed output vs. pre-shaping the source); the primitive chosen
+ * cycles through the prompt's relevant primitives so repeated iterations
+ * explore DIFFERENT stages rather than reinforcing one pick.
+ *
+ * Every candidate this returns still goes through the SAME quality gate as
+ * any other -- this function only proposes, never judges. Returns null when
+ * no relevant primitive exists (never happens in practice -- there is always
+ * a default pool) or the base body can't be safely wrapped (multiple/early
+ * returns, e.g. the autotune recipe), so the caller falls back to
+ * voicingVariant -- the same "safe on ANY plugin" contract voicingVariant
+ * itself documents, just for structure instead of parameters.
+ */
+export function structuralVariant(
+  plugin: AudioPlugin,
+  prompt: string,
+  iteration: number
+): { plugin: AudioPlugin; changeSummary: string } | null {
+  const pool = promptRelevantPrimitives(prompt);
+  if (pool.length === 0) return null;
+
+  // Prefer a primitive not already bolted on by a prior structural pass, so
+  // the chain grows with distinct character instead of duplicating a stage;
+  // once every relevant primitive has been tried, allow reuse (a fresh
+  // append/prepend of an already-used primitive still differs structurally
+  // from whichever iteration first tried it, since direction and position
+  // in the chain differ).
+  const already = structuralStageTitles(plugin.dspFunction);
+  const fresh = pool.filter((p) => !already.has(p.title));
+  const source = fresh.length > 0 ? fresh : pool;
+  const stage: DspPrimitive = source[(iteration - 1) % source.length];
+
+  const append = iteration % 2 === 1;
+  const result = append
+    ? appendPrimitiveStage(plugin.dspFunction, plugin.parameters, stage)
+    : prependPrimitiveStage(plugin.dspFunction, plugin.parameters, stage);
+  if (!result) return null;
+
+  const candidate: AudioPlugin = { ...plugin, dspFunction: result.body, parameters: result.parameters };
+  const changeSummary = `${append ? "added" : "prepended"} a ${stage.title} stage`;
+  return { plugin: candidate, changeSummary };
+}
+
+/** Human-readable default-value differences between two versions of a plugin
+ *  ("Mix +12%, Feedback -12%"), as a percentage of each param's range. Used for
+ *  the per-version change summary in the leaderboard. */
+export function paramDeltas(base: AudioPlugin, cand: AudioPlugin): string[] {
+  const out: string[] = [];
+  for (const bp of base.parameters) {
+    const cp = cand.parameters.find((p) => p.id === bp.id);
+    if (!cp) continue;
+    const range = bp.max - bp.min || 1;
+    const d = cp.defaultValue - bp.defaultValue;
+    if (Math.abs(d) < range * 0.005) continue;
+    const pct = Math.round((d / range) * 100);
+    out.push(`${bp.name} ${pct > 0 ? "+" : ""}${pct}%`);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* LLM refiner worker                                                  */
+/* ------------------------------------------------------------------ */
+
+const REFINER_SYSTEM_PROMPT = `You are the Refinement Agent of an audio plugin factory. You receive a WORKING, verified plugin (parameter schema + dspFunction) plus its measured quality evidence and the original request. Improve the SOUND — richer character, smoother parameter response, more musical defaults-to-extremes behaviour — while keeping the parameter schema EXACTLY as given (same ids, read every one of them) and the same general algorithm family.
+Return ONLY JSON: { "dspFunction": "<improved JS body>", "notes": "<one sentence: what you improved>" }
+${DSP_CODING_RULES}
+${SOUND_QUALITY_RULES}`;
+
+export type RefinerWorker = (input: {
+  prompt: string;
+  plugin: AudioPlugin;
+  evidence: string;
+}) => Promise<{ dspFunction: string; notes: string }>;
+
+function buildLocalRefiner(llmConfig: LLMConfig, signal?: AbortSignal): RefinerWorker | null {
+  if (!isLocalProvider(llmConfig)) return null;
+  // FUSION quality technique: rework proposals ALTERNATE between the member
+  // models, iteration by iteration. Different models propose genuinely
+  // different reworks, and the strictly-higher acceptance rule (the gate is
+  // the judge) keeps whichever survives — an ensemble search that a single
+  // model can't perform. The trace labels which member proposed each rework.
+  const isFusion = llmConfig.provider === "fusion";
+  let fusionTurn = 0;
+  return async ({ prompt, plugin, evidence }) => {
+    const member = isFusion ? FUSION_MEMBERS[fusionTurn++ % FUSION_MEMBERS.length] : null;
+    const config = member ? memberConfig(llmConfig, member) : llmConfig;
+    const paramList = plugin.parameters
+      .map((p) => `{ "id": "${p.id}", "min": ${p.min}, "max": ${p.max}, "defaultValue": ${p.defaultValue} }`)
+      .join(",\n");
+    const payload = await callLocalLLM({
+      config,
+      systemPrompt: REFINER_SYSTEM_PROMPT,
+      userText: `Original request: ${prompt}\n\nMeasured evidence from the quality gate:\n${evidence}\n\nFROZEN parameter schema:\n[${paramList}]\n\nCurrent working dspFunction:\n${plugin.dspFunction}`,
+      temperature: 0.4,
+      signal,
+    });
+    const notes = typeof payload?.notes === "string" ? payload.notes : "";
+    return {
+      dspFunction: typeof payload?.dspFunction === "string" ? payload.dspFunction : "",
+      notes: member ? `[fusion · ${member === "ollama" ? "Ollama" : "LM Studio"}] ${notes}` : notes,
+    };
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* The loop                                                            */
+/* ------------------------------------------------------------------ */
+
+export interface RefinementOptions {
+  prompt: string;
+  spec?: AudioPluginSpec | null;
+  /** User-chosen loop count; clamped to 1..MAX_REFINE_LOOPS. */
+  iterations: number;
+  llmConfig?: LLMConfig;
+  /** Called at the start of each rework pass (drives the UI status bar). */
+  onIteration?: (n: number, total: number) => void;
+  /** Called once each rework pass has been gated (drives the live leaderboard). */
+  onCandidate?: (
+    n: number,
+    total: number,
+    cand: { label: string; score: number; accepted: boolean; changeSummary: string }
+  ) => void;
+  /** Injectable refiner (tests); null disables LLM rework entirely. */
+  refiner?: RefinerWorker | null;
+  /**
+   * Alternate builds (already gated) to consider BEFORE the loop runs --
+   * the best-of-N seeds. Each competes for "best" exactly like a rework pass
+   * (accepted only on a strictly higher score) and joins the ranked
+   * candidates for the leaderboard and blind test.
+   */
+  seedCandidates?: Array<{ plugin: AudioPlugin; gate: QualityGateResult; changeSummary: string }>;
+  signal?: AbortSignal;
+}
+
+/**
+ * Run the perfecting loop from an already-gated build. Monotonic by
+ * construction: a candidate replaces the current best only when its full
+ * acceptance check passes AND its score is strictly higher.
+ */
+export async function runRefinementLoop(
+  initial: { plugin: AudioPlugin; gate: QualityGateResult },
+  opts: RefinementOptions
+): Promise<RefinementResult> {
+  const spec = opts.spec ?? classifyPluginIntent(opts.prompt);
+  const iterations = Math.max(1, Math.min(MAX_REFINE_LOOPS, Math.round(opts.iterations)));
+  const refiner =
+    opts.refiner !== undefined ? opts.refiner : opts.llmConfig ? buildLocalRefiner(opts.llmConfig, opts.signal) : null;
+
+  const gateOf = (plugin: AudioPlugin) =>
+    runQualityGate(plugin, { family: spec.family, prompt: opts.prompt, intent: spec.interpretedGoal });
+
+  let best = { plugin: initial.plugin, gate: initial.gate };
+  const initialScore = refinementScore(initial.gate);
+  let bestScore = initialScore;
+  const trace: RefinementIteration[] = [];
+
+  // Two builds are "the same" when their DSP and rounded param defaults
+  // match. Used below to catch a degenerate rework BEFORE paying for a full
+  // gate pass (audio render + FFT measurements) on it, and to keep the final
+  // leaderboard free of identical clones.
+  const signature = (p: AudioPlugin) =>
+    p.dspFunction + "|" + p.parameters.map((q) => `${q.id}:${Math.round(q.defaultValue * 1000)}`).join(",");
+  const triedSignatures = new Map<string, { gate: QualityGateResult; score: number }>();
+  triedSignatures.set(signature(initial.plugin), { gate: initial.gate, score: initialScore });
+  // Counts only the iterations that actually REACH structuralVariant (every
+  // other loop iteration, see Strategy 2 below) -- kept independent of the
+  // outer loop index `n` so structuralVariant's own append/prepend
+  // alternation and primitive cycling aren't silently coupled to (and
+  // cancelled out by) the outer schedule's parity.
+  let structuralCalls = 0;
+  // Same principle, same bug class, and it WAS live: voicingVariant used to
+  // take the raw outer loop index `n` directly. Voicing only ever runs on
+  // ODD n (see Strategy 2 below), so `n - 1` was always EVEN, and an even
+  // number mod NUDGE_FRACTIONS.length (6) only ever lands on indices
+  // {0, 2, 4} -- the three POSITIVE fractions. The three NEGATIVE ones were
+  // mathematically unreachable for the entire life of this code: voicing
+  // search could only ever try to push a knob higher, never lower. Own
+  // counter, same fix as structuralCalls.
+  let voicingCalls = 0;
+
+  // Every distinct gated version, kept for ranking + the blind listening test.
+  interface Collected { label: string; plugin: AudioPlugin; gate: QualityGateResult; score: number; changeSummary: string; }
+  const collected: Collected[] = [
+    { label: "v1", plugin: initial.plugin, gate: initial.gate, score: initialScore, changeSummary: "initial build" },
+  ];
+
+  // Best-of-N seeds: alternate builds join the ranked pool and compete for
+  // "best" before any rework pass. An alternate must beat the base by MORE
+  // than a near-tie to displace it. The base is either the model build or the
+  // requirements-matched topology (candidate[0], e.g. the vintage compressor
+  // for "warm vintage vocals"); a marginal, ear-indistinguishable score win
+  // must not silently override that deliberate choice. A genuinely better
+  // alternate (> NEAR_TIE_MARGIN) still ships, and every seed is scored and
+  // recorded in the refinement trace regardless of whether it wins. (It
+  // competes for the returned candidates list on score like anything else;
+  // that list is a top-3 leaderboard, so a seed that ranks below three
+  // other builds will not appear there.)
+  const seedTrace: RefinementIteration[] = [];
+  for (let s = 0; s < (opts.seedCandidates?.length ?? 0); s++) {
+    const seed = opts.seedCandidates![s];
+    const score = refinementScore(seed.gate);
+    const accepted = score > bestScore + NEAR_TIE_MARGIN;
+    const label = `alt${s + 1}`;
+    if (accepted) {
+      best = { plugin: seed.plugin, gate: seed.gate };
+      bestScore = score;
+    }
+    seedTrace.push({ iteration: 0, action: `alternate build (${seed.changeSummary.slice(0, 90)})`, accepted, score, changeSummary: seed.changeSummary });
+    collected.push({ label, plugin: seed.plugin, gate: seed.gate, score, changeSummary: seed.changeSummary });
+    triedSignatures.set(signature(seed.plugin), { gate: seed.gate, score });
+    opts.onCandidate?.(0, iterations, { label, score, accepted, changeSummary: seed.changeSummary });
+  }
+
+  for (let n = 1; n <= iterations; n++) {
+    opts.onIteration?.(n, iterations);
+    let action = "";
+    let changeSummary = "";
+    let candidate: AudioPlugin | null = null;
+
+    // Strategy 1: LLM rework of the DSP (schema frozen), acceptance-checked.
+    if (refiner) {
+      try {
+        const evidence = [
+          `scores: looks ${best.gate.scores.looks} / performance ${best.gate.scores.performance} / musicality ${best.gate.scores.musicality}`,
+          best.gate.report.deadParams.length > 0 ? `controls with no audible effect: ${best.gate.report.deadParams.join(", ")}` : "",
+          (best.gate.report.semanticViolations?.length ?? 0) > 0
+            ? `controls that do NOT behave like their name claims (fix the math direction): ${best.gate.report.semanticViolations!.join(", ")}`
+            : "",
+          best.gate.report.harsh ? `audible aliasing fizz (inharmonic ratio ${(best.gate.report.aliasingIndex ?? 0).toFixed(2)}) -- oversample the nonlinearity 2x and lowpass after it` : "",
+          ...best.gate.report.fixes.filter((f) => /corrected/i.test(f)),
+        ].filter(Boolean).join("\n") + learnedPitfallsFor(spec.family);
+        const reworked = await refiner({ prompt: opts.prompt, plugin: best.plugin, evidence });
+        const dsp = normalizeModelDspCode(reworked.dspFunction);
+        if (dsp.trim()) {
+          const acceptance = checkDsp(dsp, best.plugin.parameters);
+          if (acceptance.ok) {
+            candidate = { ...best.plugin, dspFunction: dsp };
+            action = `model rework${reworked.notes ? ` (${reworked.notes.slice(0, 90)})` : ""}`;
+            changeSummary = reworked.notes ? reworked.notes.slice(0, 90) : "reworked the DSP for richer character";
+          } else {
+            action = `model rework rejected by acceptance check (${acceptance.evidence.slice(0, 90)})`;
+          }
+        } else {
+          action = "model rework returned no code";
+        }
+      } catch (err: any) {
+        if (err?.name === "AbortError") throw err;
+        action = `model rework failed (${String(err?.message || err).slice(0, 80)})`;
+      }
+    }
+
+    // Strategy 2: deterministic search, also the LLM-failure fallback. The
+    // FIRST pass on any given best is always the safe, always-succeeds,
+    // never-touches-code voicing nudge (matching voicingVariant's original
+    // "safe on ANY plugin, including a build that just arrived via a seed"
+    // guarantee); EVEN iterations reach for a STRUCTURAL variant instead (a
+    // different signal path -- widens WHAT gets searched, not just knob
+    // positions) on whatever the current best is, which may itself already
+    // be a voiced variant from the prior odd iteration, so the two search
+    // dimensions compound instead of competing for the same iteration
+    // budget. structuralVariant falls back to null (handled below) when the
+    // base body can't be safely wrapped (e.g. an early-return recipe).
+    // structuralVariant is given its OWN call counter (not `n`) so its
+    // internal append/prepend alternation and primitive cycling stay
+    // independent of -- rather than perfectly correlated with, and thereby
+    // cancelled by -- the outer schedule's own parity.
+    if (!candidate) {
+      const structural = n % 2 === 0 ? structuralVariant(best.plugin, opts.prompt, ++structuralCalls) : null;
+      if (structural) {
+        candidate = structural.plugin;
+        action = action ? `${action}; tried structural variant instead` : `structural variant (${structural.changeSummary})`;
+        changeSummary = structural.changeSummary;
+      } else {
+        candidate = voicingVariant(best.plugin, ++voicingCalls);
+        action = action ? `${action}; tried voicing variant instead` : `voicing variant (seeded nudge ${voicingCalls})`;
+        const deltas = paramDeltas(best.plugin, candidate);
+        changeSummary = deltas.length > 0 ? deltas.join(", ") : "voicing nudge (no audible change)";
+      }
+    }
+
+    // A rework strategy can still land on a build byte-identical to one
+    // already fully resolved this run -- e.g. a voicing nudge that clamps to
+    // an already-tried extreme, or two different strategies converging on
+    // the same result. Reuse that prior gate result instead of paying for a
+    // full render + FFT pass to re-derive an answer already known, and say
+    // so plainly in the trace rather than silently reporting a duplicate as
+    // fresh work. The gate is a deterministic function of the plugin, so
+    // reusing a cached result for an identical input is exact, not an
+    // approximation.
+    const candSig = signature(candidate);
+    const cached = triedSignatures.get(candSig);
+    const candidateGate = cached ? cached.gate : gateOf(candidate);
+    const score = cached ? cached.score : refinementScore(candidateGate);
+    if (cached) {
+      action = `${action} -- identical to an earlier attempt this run, skipped re-scoring`;
+      changeSummary = `${changeSummary} (duplicate, not re-scored)`;
+    } else {
+      triedSignatures.set(candSig, { gate: candidateGate, score });
+    }
+    const accepted = score > bestScore;
+    const label = `v${n + 1}`;
+    if (accepted) {
+      best = { plugin: candidateGate.plugin, gate: candidateGate };
+      bestScore = score;
+    }
+    trace.push({ iteration: n, action, accepted, score, changeSummary });
+    collected.push({ label, plugin: candidateGate.plugin, gate: candidateGate, score, changeSummary });
+    opts.onCandidate?.(n, iterations, { label, score, accepted, changeSummary });
+  }
+
+  // Rank distinct versions best-first for the leaderboard and blind test.
+  // `signature` (defined above) keeps the user from auditioning identical
+  // clones here too.
+  const seen = new Set<string>();
+  const unique: Collected[] = [];
+  for (const c of collected) {
+    const sig = signature(c.plugin);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    unique.push(c);
+  }
+  unique.sort((a, b) => b.score - a.score);
+  const candidates: RankedCandidate[] = unique.slice(0, 3).map((c, i) => ({
+    label: c.label,
+    plugin: c.plugin,
+    gate: c.gate,
+    score: c.score,
+    rank: i + 1,
+    changeSummary: c.changeSummary,
+  }));
+
+  // Attach the trace to whichever report ships (the doc's honesty rule:
+  // "perfected" must be shown as scores, not claimed). Seeds go in as
+  // iteration 0 so the report shows the whole competition, while the
+  // returned `iterations` stays rework-passes-only.
+  const refinement: NonNullable<BuildReport["refinement"]> = [...seedTrace, ...trace].map((t) => ({ ...t }));
+  best.gate.report.refinement = refinement;
+  if (best.plugin.buildReport) best.plugin.buildReport.refinement = refinement;
+
+  return { plugin: best.plugin, gate: best.gate, iterations: trace, initialScore, bestScore, candidates };
+}

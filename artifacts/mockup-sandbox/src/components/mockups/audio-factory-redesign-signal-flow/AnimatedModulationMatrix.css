@@ -1,0 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Sora:wght@400;500;600;700&display=swap');
+
+.amx-root { font-family: 'Sora', sans-serif; }
+.amx-mono { font-family: 'DM Mono', monospace; }
+.amx-grain { background-image: radial-gradient(rgba(36,48,46,.12) .7px, transparent .7px); background-size: 5px 5px; }
+.amx-rack { background: linear-gradient(90deg,#293532 0 25px,#3a4842 25px calc(100% - 25px),#293532 calc(100% - 25px)); box-shadow: 0 28px 42px rgba(44,43,34,.19), inset 0 0 0 1px rgba(12,23,20,.65); }
+.amx-grid { background-image: linear-gradient(rgba(172,185,164,.1) 1px,transparent 1px),linear-gradient(90deg,rgba(172,185,164,.1) 1px,transparent 1px); background-size: 24px 24px; }
+.amx-flow { stroke-dasharray: 7 10; animation: amx-dash 1.6s linear infinite; }
+.amx-flow-slow { stroke-dasharray: 4 12; animation: amx-dash 2.8s linear infinite; }
+.amx-pulse { animation: amx-pulse 1.4s ease-in-out infinite; }
+@keyframes amx-dash { to { stroke-dashoffset: -34; } }
+@keyframes amx-pulse { 0%,100% { opacity: .35; transform: scale(.75); } 50% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .amx-flow, .amx-flow-slow, .amx-pulse { animation: none; }
+}

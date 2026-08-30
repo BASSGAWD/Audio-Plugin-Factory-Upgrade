@@ -1,0 +1,614 @@
+/**
+ * Shared local-LLM gateway: config storage, connection testing/model discovery,
+ * and a generic JSON-mode chat call for Ollama / LM Studio.
+ *
+ * Consolidates logic that used to be duplicated between App.tsx and MemoryCore.tsx.
+ * Defaults to a local provider so the app works offline out of the box.
+ */
+
+export type LLMProvider = "gemini" | "openai" | "anthropic" | "online_free" | "ollama" | "lm_studio" | "fusion";
+export type RemoteLLMProvider = "gemini" | "openai" | "anthropic" | "online_free";
+
+/** The local backends a fusion can combine. */
+export type FusionMember = "ollama" | "lm_studio";
+export const FUSION_MEMBERS: FusionMember[] = ["ollama", "lm_studio"];
+
+/** A member's standalone config: the same URLs/models, acting as one provider. */
+export function memberConfig(cfg: LLMConfig, member: FusionMember): LLMConfig {
+  return { ...cfg, provider: member };
+}
+
+export interface LLMConfig {
+  provider: LLMProvider;
+  ollamaUrl: string;
+  ollamaModel: string;
+  lmStudioUrl: string;
+  lmStudioModel: string;
+  /** Remote model ids are selected client-side but credentials stay server-side. */
+  openaiModel?: string;
+  anthropicModel?: string;
+  /** Last server-reported free model, informational only; requests always use auto. */
+  onlineFreeActiveModel?: string;
+  lowVramMode?: boolean;
+  maxContextMessages?: number;
+  systemPromptStyle?: "standard" | "compact";
+}
+
+export const STORAGE_KEY_LLM_CONFIG = "orange_juce_llm_config";
+
+// Use 127.0.0.1, not "localhost" -- Node's fetch (undici), used by the server-side
+// /api/proxy relay, can try IPv6 (::1) first when resolving "localhost" on Windows
+// and fail with a generic "fetch failed" if the local server only listens on IPv4.
+// 127.0.0.1 sidesteps DNS resolution entirely and works from both the browser and Node.
+// "orangey" is this project's own fine-tune (Qwen3 8B + LoRA, trained in
+// local-model/train/) -- see local-model/README.md for the full training
+// story. It measurably beats the generic qwen2.5-coder:14b default on the
+// two things that matter most for this app: real-time-DSP safety (init
+// guards, soft-limited output, no per-sample allocation -- averaged ~76/100
+// across a factory-prompt eval vs ~65/100) and does so in a smaller, faster
+// model. It has NOT been shown to beat a general-purpose model on open-ended
+// reasoning outside the plugin-JSON contract, so if a future evaluation
+// needs that breadth, that's the dimension to watch, not this one.
+export const DEFAULT_LLM_CONFIG: LLMConfig = {
+  provider: "ollama",
+  ollamaUrl: "http://127.0.0.1:11434",
+  ollamaModel: "orangey",
+  lmStudioUrl: "http://127.0.0.1:1234",
+  lmStudioModel: "qwen/qwen3-14b",
+  openaiModel: "gpt-5-nano",
+  anthropicModel: "claude-haiku-4-5",
+  lowVramMode: false,
+  maxContextMessages: 4,
+  systemPromptStyle: "standard",
+};
+
+function normalizeLocalhost(cfg: LLMConfig): LLMConfig {
+  return {
+    ...cfg,
+    ollamaUrl: cfg.ollamaUrl.replace("://localhost", "://127.0.0.1"),
+    lmStudioUrl: cfg.lmStudioUrl.replace("://localhost", "://127.0.0.1"),
+  };
+}
+
+export function getLLMConfig(): LLMConfig {
+  const raw = localStorage.getItem(STORAGE_KEY_LLM_CONFIG);
+  if (!raw) return { ...DEFAULT_LLM_CONFIG };
+  try {
+    return normalizeLocalhost({ ...DEFAULT_LLM_CONFIG, ...JSON.parse(raw) });
+  } catch (e) {
+    return { ...DEFAULT_LLM_CONFIG };
+  }
+}
+
+export function saveLLMConfig(cfg: LLMConfig): void {
+  localStorage.setItem(STORAGE_KEY_LLM_CONFIG, JSON.stringify(cfg));
+}
+
+export function isLocalProvider(cfg: Pick<LLMConfig, "provider">): boolean {
+  return cfg.provider === "ollama" || cfg.provider === "lm_studio" || cfg.provider === "fusion";
+}
+
+export function isRemoteProvider(cfg: Pick<LLMConfig, "provider">): cfg is Pick<LLMConfig, "provider"> & { provider: RemoteLLMProvider } {
+  return cfg.provider === "gemini" || cfg.provider === "openai" || cfg.provider === "anthropic" || cfg.provider === "online_free";
+}
+
+export function selectedModel(cfg: LLMConfig): string {
+  switch (cfg.provider) {
+    case "ollama": return cfg.ollamaModel;
+    case "lm_studio": return cfg.lmStudioModel;
+    case "openai": return cfg.openaiModel || DEFAULT_LLM_CONFIG.openaiModel!;
+    case "anthropic": return cfg.anthropicModel || DEFAULT_LLM_CONFIG.anthropicModel!;
+    case "online_free": return "auto";
+    case "gemini": return "gemini-3.5-flash";
+    default: return "";
+  }
+}
+
+/**
+ * Fetch helper that hits localhost directly, or routes through the server's
+ * /api/proxy relay for non-local targets (tunnels, remote hosts) to dodge
+ * browser mixed-content/CORS limits.
+ */
+async function fetchViaServerProxy(
+  targetUrl: string,
+  options: { method?: string; headers?: Record<string, string>; body?: any; signal?: AbortSignal },
+  defaultHeaders: Record<string, string>
+): Promise<Response> {
+  const relayResponse = await fetch("/api/proxy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: options.signal,
+    body: JSON.stringify({
+      targetUrl,
+      method: options.method || "GET",
+      headers: defaultHeaders,
+      body: options.body,
+    }),
+  });
+
+  if (!relayResponse.ok) {
+    const errorJson = await relayResponse.json().catch(() => ({}));
+    throw new Error(
+      errorJson.error ||
+        (relayResponse.status === 404
+          ? "This app's backend isn't serving /api/proxy — run the app via `npm run dev` (or `npm start`), not a static file server."
+          : `Server proxy failed with code ${relayResponse.status}`)
+    );
+  }
+
+  const relayData = await relayResponse.json();
+  if (!relayData.ok) {
+    // Surface the UPSTREAM error body (e.g. Ollama's "model 'x' not found",
+    // LM Studio's "No models loaded") -- that's the actionable message.
+    const upstream = relayData.jsonPayload?.error;
+    const upstreamMsg = typeof upstream === "string" ? upstream : upstream?.message;
+    throw new Error(upstreamMsg || relayData.responseText || `Remote server returned error code ${relayData.status}`);
+  }
+
+  return {
+    ok: true,
+    status: relayData.status,
+    json: async () => relayData.jsonPayload || JSON.parse(relayData.responseText || "{}"),
+    text: async () => relayData.responseText || "",
+  } as Response;
+}
+
+export async function fetchLLMRoute(
+  targetUrl: string,
+  options: { method?: string; headers?: Record<string, string>; body?: any; signal?: AbortSignal } = {}
+): Promise<Response> {
+  const isLocal = targetUrl.includes("localhost") || targetUrl.includes("127.0.0.1");
+
+  const defaultHeaders = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "bypass-tunnel-reminder": "true",
+    "ngrok-skip-browser-warning": "true",
+    ...options.headers,
+  };
+
+  if (isLocal) {
+    // Ollama/LM Studio run on a different port than this app (e.g. 11434 vs 3000),
+    // so a direct browser fetch is cross-origin and gets silently blocked by CORS
+    // unless the local server happens to allow this exact origin. Try direct first
+    // (works when the target allows it, and needs no server hop), and fall back to
+    // routing through this app's own /api/proxy relay -- which runs in Node and
+    // isn't subject to browser CORS -- on any failure.
+    try {
+      return await fetch(targetUrl, {
+        method: options.method || "GET",
+        headers: defaultHeaders,
+        signal: options.signal,
+        body: options.body ? JSON.stringify(options.body) : undefined,
+      });
+    } catch (err) {
+      return await fetchViaServerProxy(targetUrl, options, defaultHeaders);
+    }
+  }
+
+  return await fetchViaServerProxy(targetUrl, options, defaultHeaders);
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  models: string[];
+  message: string;
+}
+
+export async function testProviderConnection(
+  provider: "ollama" | "lm_studio",
+  cfg: LLMConfig
+): Promise<ConnectionTestResult> {
+  const url = provider === "ollama" ? cfg.ollamaUrl : cfg.lmStudioUrl;
+  const path = provider === "ollama" ? "/api/tags" : "/v1/models";
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const res = await fetchLLMRoute(`${url}${path}`, { method: "GET", signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`Server returned status ${res.status}`);
+    const data = await res.json();
+    const models: string[] =
+      provider === "ollama"
+        ? (data.models || []).map((m: any) => m.name)
+        : (data.data || []).map((m: any) => m.id);
+
+    return {
+      ok: true,
+      models,
+      message: models.length > 0 ? `Connected. ${models.length} model(s) available.` : "Connected, but no models are loaded.",
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      models: [],
+      message: err?.name === "AbortError" ? "Connection timed out after 2.5 seconds." : err.message || "Connection failed.",
+    };
+  }
+}
+
+export interface FusionAvailability {
+  /** True when EVERY member is reachable with at least one model loaded. */
+  available: boolean;
+  members: Array<{ provider: FusionMember; ok: boolean; models: string[]; message: string }>;
+  /** Human-readable reason when not available. */
+  reason: string;
+}
+
+/**
+ * Probe every fusion member in parallel and report whether a fusion is
+ * actually possible right now. Honest by construction: a fusion is only
+ * offered when BOTH backends answer with a loaded model — never on hope.
+ */
+export async function detectFusion(cfg: LLMConfig): Promise<FusionAvailability> {
+  const results = await Promise.all(
+    FUSION_MEMBERS.map(async (provider) => {
+      const r = await testProviderConnection(provider, cfg);
+      return { provider, ok: r.ok && r.models.length > 0, models: r.models, message: r.message };
+    })
+  );
+  const missing = results.filter((r) => !r.ok);
+  return {
+    available: missing.length === 0,
+    members: results,
+    reason:
+      missing.length === 0
+        ? ""
+        : missing
+            .map((m) => `${m.provider === "ollama" ? "Ollama" : "LM Studio"}: ${m.message}`)
+            .join(" · "),
+  };
+}
+
+/**
+ * Probe Ollama then LM Studio and return an updated config pointed at
+ * whichever one responds, preferring an already-loaded model if present.
+ * Leaves the config untouched if neither is reachable.
+ */
+export async function autoDetectProvider(cfg: LLMConfig): Promise<LLMConfig> {
+  // Both optional services are probed together, and each probe has its own
+  // bounded timeout. Prefer Ollama only when both happen to be available to
+  // preserve the established local default.
+  const [ollama, lmStudio] = await Promise.all([
+    testProviderConnection("ollama", cfg),
+    testProviderConnection("lm_studio", cfg),
+  ]);
+  if (ollama.ok) {
+    const model = ollama.models.includes(cfg.ollamaModel) ? cfg.ollamaModel : ollama.models[0] || cfg.ollamaModel;
+    return { ...cfg, provider: "ollama", ollamaModel: model };
+  }
+
+  if (lmStudio.ok) {
+    const model = lmStudio.models.includes(cfg.lmStudioModel) ? cfg.lmStudioModel : lmStudio.models[0] || cfg.lmStudioModel;
+    return { ...cfg, provider: "lm_studio", lmStudioModel: model };
+  }
+
+  return cfg;
+}
+
+/**
+ * Tolerant JSON extraction for model responses. Even in JSON mode, local
+ * models occasionally wrap the object in markdown fences or prepend chatter;
+ * each such near-miss used to throw and burn the whole generation. Salvage
+ * the outermost {...} instead.
+ */
+/** Scan for the first COMPLETE balanced JSON object, respecting strings and
+ *  escapes — survives leading chatter AND trailing text/objects, which the
+ *  naive first-{...last-} slice does not. Returns the deficit (open braces
+ *  minus close braces at end of string) too, so a caller can attempt a
+ *  same-content repair before giving up on an object that never closed. */
+function extractFirstJsonObject(text: string): string | null {
+  return scanBalancedJsonObject(text).object;
+}
+
+function scanBalancedJsonObject(text: string): { object: string | null; deficit: number; start: number } {
+  const start = text.indexOf("{");
+  if (start === -1) return { object: null, deficit: 0, start: -1 };
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return { object: text.slice(start, i + 1), deficit: 0, start };
+    }
+  }
+  return { object: null, deficit: depth, start };
+}
+
+/** Local models often emit RAW control characters (real newlines, tabs)
+ *  inside JSON string values instead of the escaped \n \t forms — escape
+ *  them in place so JSON.parse can handle the rest of the object normally.
+ *  Braces and other structural characters are untouched. */
+function escapeRawControlCharsInStrings(text: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) { escaped = false; out += ch; continue; }
+      if (ch === "\\") { escaped = true; out += ch; continue; }
+      if (ch === '"') { inString = false; out += ch; continue; }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Strips a leading reasoning/thinking preamble a "thinking" model can emit
+ * before its actual JSON answer -- Qwen3 with thinking enabled (this
+ * project's own base model, trained for thinking DISABLED -- see
+ * local-model/README.md's "empty <think></think> block" convention) and
+ * other popular local models people load into Ollama/LM Studio (DeepSeek-R1
+ * distills, QwQ, ...) all use this pattern. Without stripping it, a model
+ * reasoning ABOUT the JS/JSON it's about to write is very likely to mention
+ * `{`/`}` characters inside its own thinking block, and the "find the first
+ * { and its balanced closing }" scan below can lock onto the wrong pair or
+ * fail outright -- a plausible, concrete cause of "this local model doesn't
+ * work" reports that has nothing to do with the model's actual answer.
+ *
+ * Only strips a WELL-FORMED (opened AND closed) block. An unclosed one means
+ * the response is genuinely truncated mid-thought -- a different failure
+ * this function should not paper over by inventing where the thinking
+ * would have ended.
+ */
+function stripReasoningPreamble(text: string): string {
+  return text.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "").trim();
+}
+
+export function parseModelJson(raw: string): any {
+  const text = stripReasoningPreamble((raw || "").trim());
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    const unfenced = text.replace(/^[\s\S]*?```(?:json)?\s*\n?/i, "").replace(/\n?```[\s\S]*$/, "").trim() || text;
+    try {
+      return JSON.parse(unfenced);
+    } catch {
+      // Small local models occasionally stop generating one token early and
+      // never emit the final closing brace of the outer object — the JSON is
+      // otherwise well-formed. Escape any raw control characters first (a
+      // model can do both at once: stray literal newlines AND a missing
+      // closer), then if there's an unclosed object with a deficit of
+      // exactly 1, repair by appending that one "}". Deliberately narrow: a
+      // deficit of 1 is the specific failure observed in the wild (verified
+      // against real pluginsmith-ft output — 7 opens vs 6 closes, the model
+      // stopped one token early). Anything larger means genuine mid-structure
+      // truncation, where inventing that much closing syntax would silently
+      // fabricate content rather than recover a near-miss, so it falls
+      // through to the "genuinely malformed" path instead.
+      const controlEscaped = escapeRawControlCharsInStrings(unfenced.trimEnd());
+      const scanned = scanBalancedJsonObject(controlEscaped);
+      if (!scanned.object && scanned.start >= 0 && scanned.deficit === 1) {
+        try {
+          return JSON.parse(controlEscaped + "}");
+        } catch {
+          // fall through to the normal balanced-extraction path
+        }
+      }
+
+      const balanced = extractFirstJsonObject(unfenced) ?? extractFirstJsonObject(text);
+      if (balanced) {
+        try {
+          return JSON.parse(balanced);
+        } catch {
+          try {
+            return JSON.parse(escapeRawControlCharsInStrings(balanced));
+          } catch {
+            // fall through to the legacy widest-slice attempt
+          }
+        }
+      }
+      const start = unfenced.indexOf("{");
+      const end = unfenced.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        return JSON.parse(unfenced.slice(start, end + 1)); // let this one throw -- it's genuinely malformed
+      }
+      throw new Error("Model response contained no parsable JSON object.");
+    }
+  }
+}
+
+export interface LocalChatMessage {
+  role: "user" | "model";
+  text: string;
+}
+
+export interface LocalLLMCallParams {
+  config: LLMConfig;
+  systemPrompt: string;
+  userText: string;
+  history?: LocalChatMessage[];
+  temperature?: number;
+  signal?: AbortSignal;
+}
+
+export type LLMCallParams = LocalLLMCallParams;
+
+function abortError(): Error {
+  const error = new Error("LLM request was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+/** Race local members without leaving paid/compute work running after a winner. */
+async function callFusionLLM(params: LocalLLMCallParams): Promise<any> {
+  if (params.signal?.aborted) throw abortError();
+  const controllers = FUSION_MEMBERS.map(() => new AbortController());
+  const onParentAbort = () => controllers.forEach((controller) => controller.abort());
+  params.signal?.addEventListener("abort", onParentAbort, { once: true });
+  const errors: Error[] = [];
+
+  try {
+    return await new Promise<any>((resolve, reject) => {
+      let remaining = FUSION_MEMBERS.length;
+      FUSION_MEMBERS.forEach((member, index) => {
+        callLocalLLM({
+          ...params,
+          config: memberConfig(params.config, member),
+          signal: controllers[index].signal,
+        }).then((value) => {
+          // A JSON result is the local-call validity contract. Abort every
+          // loser before resolving so neither local backend keeps generating.
+          controllers.forEach((controller, loser) => {
+            if (loser !== index) controller.abort();
+          });
+          resolve(value);
+        }).catch((error) => {
+          errors[index] = error instanceof Error ? error : new Error(String(error));
+          remaining--;
+          if (remaining === 0) {
+            if (params.signal?.aborted) {
+              reject(abortError());
+              return;
+            }
+            reject(new Error(`Fusion: no member responded (${errors.map((e, i) => `${FUSION_MEMBERS[i]}: ${e?.message || "failed"}`).join(" | ")})`));
+          }
+        });
+      });
+    });
+  } finally {
+    params.signal?.removeEventListener("abort", onParentAbort);
+  }
+}
+
+/**
+ * Generic JSON-mode chat completion against whichever local provider is
+ * configured. Throws if the provider isn't local or the request fails;
+ * callers are expected to fall back (offline heuristics, cached templates).
+ */
+export async function callLocalLLM(params: LocalLLMCallParams): Promise<any> {
+  const { config, systemPrompt, userText, history = [], temperature = 0.6, signal } = params;
+
+  // FUSION: fan the same request out to every member in parallel and take the
+  // first valid response. Two real wins over a single backend: latency (the
+  // faster model answers) and resilience (one backend down/unloaded doesn't
+  // fail the call). Quality-contest fusion (both answers judged) happens at
+  // the orchestration layer where a verifier exists — see the refinement
+  // loop's alternating fusion refiner.
+  if (config.provider === "fusion") {
+    return callFusionLLM(params);
+  }
+  const maxContext = config.maxContextMessages ?? 4;
+
+  const messages: Array<{ role: string; content: string }> = [{ role: "system", content: systemPrompt }];
+  history.slice(-maxContext).forEach((msg) => {
+    messages.push({ role: msg.role === "user" ? "user" : "assistant", content: msg.text });
+  });
+  messages.push({ role: "user", content: userText });
+
+  if (config.provider === "ollama") {
+    const res = await fetchLLMRoute(`${config.ollamaUrl}/api/chat`, {
+      method: "POST",
+      signal,
+      body: {
+        model: config.ollamaModel,
+        messages,
+        stream: false,
+        format: "json",
+        options: { temperature },
+      },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const detail = typeof body?.error === "string" ? body.error : body?.error?.message;
+      throw new Error(detail ? `Ollama: ${detail}` : `Ollama gateway returned status ${res.status}`);
+    }
+    const data = await res.json();
+    return parseModelJson(data.message?.content || "{}");
+  }
+
+  if (config.provider === "lm_studio") {
+    const request = (withJsonFormat: boolean) =>
+      fetchLLMRoute(`${config.lmStudioUrl}/v1/chat/completions`, {
+        method: "POST",
+        signal,
+        body: {
+          model: config.lmStudioModel,
+          messages,
+          temperature,
+          // Newer LM Studio builds reject OpenAI's "json_object" (they want
+          // "json_schema" or "text"); on a 400 we retry with NO format field
+          // and let parseModelJson salvage the JSON from plain text.
+          ...(withJsonFormat ? { response_format: { type: "json_object" } } : {}),
+        },
+      });
+
+    let res: Response;
+    try {
+      res = await request(true);
+      if (!res.ok && res.status === 400) throw new Error("response_format rejected (400)");
+    } catch (err: any) {
+      if (err?.name === "AbortError" || !/400|response_format/i.test(err?.message || "")) throw err;
+      res = await request(false);
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const detail = typeof body?.error === "string" ? body.error : body?.error?.message;
+      throw new Error(detail ? `LM Studio: ${detail}` : `LM Studio gateway returned status ${res.status}`);
+    }
+    const data = await res.json();
+    return parseModelJson(data.choices?.[0]?.message?.content || "{}");
+  }
+
+  throw new Error(`callLocalLLM: provider "${config.provider}" is not a local provider.`);
+}
+
+/**
+ * Provider-neutral chat entry point. Local providers retain their direct
+ * gateway behavior; remote providers always go through the authenticated app
+ * server and never receive credentials in the browser.
+ */
+export async function callLLM(params: LLMCallParams): Promise<any> {
+  if (isLocalProvider(params.config)) return callLocalLLM(params);
+  if (!isRemoteProvider(params.config)) throw new Error(`callLLM: unsupported provider "${params.config.provider}".`);
+
+  const response = await fetch("/api/llm/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: params.signal,
+    body: JSON.stringify({
+      provider: params.config.provider,
+      model: selectedModel(params.config),
+      messages: [
+        { role: "system", content: params.systemPrompt },
+        ...(params.history ?? []).map((message) => ({
+          role: message.role === "model" ? "assistant" : "user",
+          content: message.text,
+        })),
+        { role: "user", content: params.userText },
+      ],
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.code ? `${payload.code}: ${payload.error || "LLM gateway request failed."}` : payload.error || `LLM gateway returned status ${response.status}`);
+    (error as Error & { status?: number; code?: string }).status = response.status;
+    (error as Error & { status?: number; code?: string }).code = payload.code;
+    throw error;
+  }
+  const result = payload.result ?? payload;
+  // Keep response metadata available to UI callers without changing the
+  // structured response contract expected by existing generation code.
+  return result && typeof result === "object" && !Array.isArray(result)
+    ? { ...result, __llmMeta: { provider: payload.provider, model: payload.model } }
+    : result;
+}

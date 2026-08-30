@@ -1,0 +1,7 @@
+- [Generated plugin UI benchmark](generated-plugin-ui-benchmark.md) — Use the approved demo faceplate quality as the minimum visual direction for generated plugins.
+- [JUCE validation on Replit](juce-validation-on-replit.md) — Native JUCE builds need Nix dev packages and explicit compiler flags in ad-hoc shells.
+- [Sidechain capability truth](sidechain-capability-truth.md) — Prove key-dependent audio behavior; never infer support from prompt wording or source text alone.
+- [Native export truth](native-export-truth.md) — Claim exportability only when native output preserves the validated project’s DSP, controls, and performance topology.
+- [Audio project brief truth](audio-project-brief-truth.md) — Brief decisions must change the runtime model; category revisions retain identity but never inherit unrelated proof.
+- [Adaptive project discovery](adaptive-project-discovery.md) — Detect missing intent and ask targeted creative or functional questions before composing software.
+- [Hosted sync proof](routable-app-storage-sync.md) — Domain fakes are insufficient; cross-device proof must traverse the same hosted auth and storage path as users.

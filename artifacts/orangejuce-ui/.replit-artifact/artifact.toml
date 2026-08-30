@@ -1,0 +1,19 @@
+kind = "design-system"
+previewPath = "/orangejuce-ui/"
+title = "ORANGEJUCE UI"
+description = "A warm broadcast-console design system for an autonomous audio-plugin builder, balancing beginner guidance, advanced DAW workflows, and the optional Orangey assistant."
+version = "1.0.0"
+id = "artifacts/orangejuce-ui"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/orangejuce-ui/" ]
+localPort = 22835
+
+[services.development]
+run = "pnpm --filter @workspace/orangejuce-ui run dev"
+
+[services.env]
+PORT = "22835"
+BASE_PATH = "/orangejuce-ui/"

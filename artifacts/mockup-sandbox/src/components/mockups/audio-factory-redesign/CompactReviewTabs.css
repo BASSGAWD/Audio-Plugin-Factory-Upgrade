@@ -1,0 +1,10 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Outfit:wght@400;500;600;700&display=swap');
+
+.crt-root{font-family:Outfit,sans-serif;background:#edf0e8;color:#23352f}
+.crt-mono{font-family:"DM Mono",monospace}
+.crt-serif{font-family:"Instrument Serif",serif}
+.crt-grid{background-image:linear-gradient(rgba(35,53,47,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(35,53,47,.05) 1px,transparent 1px);background-size:34px 34px}
+.crt-enter{animation:crt-enter .55s both}
+.crt-bars span{transform-origin:center;animation:crt-pulse 1.2s ease-in-out infinite}
+@keyframes crt-enter{from{transform:translateY(11px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes crt-pulse{50%{transform:scaleY(.44);opacity:.5}}

@@ -1,0 +1,1335 @@
+/**
+ * Topology bank: the engineering CHOICES within a plugin family.
+ *
+ * The golden recipe bank answers "what is a compressor"; this bank answers
+ * "which compressor" -- feed-forward RMS for glue, peak-detector for drums,
+ * feedback with color for vocals, lookahead soft-knee for mastering. Each
+ * family's DEFAULT topology is its golden recipe, so a prompt with no
+ * requirements builds exactly what it always built; the alternates only win
+ * when the requirements (src/utils/requirements.ts) point at them, and they
+ * additionally compete as best-of-N seeds under the same strictly-higher
+ * refinement rule as everything else.
+ *
+ * Contract for every body (same as dspRecipes):
+ *   - the string is the BODY of function(inputSample, params, state)
+ *   - exactly ONE return statement (chainStage/composers block-wrap bodies)
+ *   - guard every log/division, clamp every feedback below 1
+ *   - nonlinearities use the shared 2x oversampled triangular-decimator
+ *     idiom (oversampledWaveshape() in dspPrimitives.ts), not a plain
+ *     2-tap box average -- see that function's doc for why
+ *   - every parameter audibly works min->max and honors its name's semantics
+ *     (the gate measures both; a topology that fails does not ship)
+ */
+
+import { DSP_RECIPES, DspRecipe } from "./dspRecipes";
+import { PluginFamily } from "./pluginSpec";
+import { CharacterGoal, SourceMaterial } from "./requirements";
+import { oversampledWaveshape } from "./dspPrimitives";
+
+export interface TopologyTags {
+  /** Structural name, e.g. "feed-forward-rms", "fdn-plate". */
+  topology: string;
+  /** Character goals this design serves ("any" never appears here). */
+  character: CharacterGoal[];
+  /** Source material this design suits. */
+  sources: SourceMaterial[];
+  /** "lookahead" designs are excluded when the latency budget is live. */
+  latency: "zero" | "lookahead";
+  cpu: "light" | "medium";
+}
+
+export interface DspTopology {
+  id: string;
+  family: PluginFamily;
+  title: string;
+  /** The one-sentence engineering rationale, shown to the user. */
+  rationale: string;
+  parameters: DspRecipe["parameters"];
+  body: string;
+  tags: TopologyTags;
+  /** The family's golden-recipe default; wins whenever requirements are neutral. */
+  isDefault?: boolean;
+}
+
+const golden = (id: string): DspRecipe => {
+  const r = DSP_RECIPES.find((x) => x.id === id);
+  if (!r) throw new Error(`Golden recipe "${id}" missing from DSP_RECIPES`);
+  return r;
+};
+
+export const DSP_TOPOLOGIES: DspTopology[] = [
+  /* ================================================================ */
+  /* DYNAMICS: ten compressor designs                                  */
+  /* ================================================================ */
+  {
+    id: "comp_ff_rms",
+    family: "dynamics",
+    title: golden("dynamics").title,
+    rationale: "the proven general-purpose design — feed-forward dB-domain envelope, musical on anything",
+    parameters: golden("dynamics").parameters,
+    body: golden("dynamics").body,
+    tags: { topology: "feed-forward-rms", character: ["transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "comp_peak_punch",
+    family: "dynamics",
+    title: "Peak-detector punch compressor (fast instant-peak envelope, user attack, quick release)",
+    rationale: "drums want a peak detector and a real Attack knob — slow the attack to let transients crack through, then clamp the body",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -20, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 6, unit: ":1" },
+      { id: "attack", name: "Attack", min: 0.05, max: 30, defaultValue: 1, unit: "ms" },
+      { id: "release", name: "Release", min: 10, max: 400, defaultValue: 60, unit: "ms" },
+      { id: "knee", name: "Knee", min: 0, max: 18, defaultValue: 3, unit: "dB" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -20;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 6);
+let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 1);
+let release = params.release !== undefined ? params.release : 60;
+let knee = params.knee !== undefined ? params.knee : 3;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let mix = params.mix !== undefined ? params.mix : 1;
+let x = Math.abs(inputSample);
+// Peak detector with a genuinely fast attack range: on drums, slowing the
+// attack lets the stick crack through before the body is clamped. Release
+// is short here by range -- this design is meant to recover between hits.
+let aC = 1 - Math.exp(-1 / (attack * 44.1));
+let rC = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aC : rC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let halfKnee = knee / 2;
+let gainDb = 0;
+if (overDb >= halfKnee) {
+  gainDb = -overDb * (1 - 1 / ratio);
+} else if (overDb > -halfKnee) {
+  let kt = overDb + halfKnee;
+  gainDb = -(1 - 1 / ratio) * kt * kt / (2 * Math.max(0.01, knee));
+}
+let g = Math.pow(10, (gainDb + makeup) / 20);
+let comp = Math.tanh(inputSample * g);
+return comp * mix + inputSample * (1 - mix);`,
+    tags: { topology: "feed-forward-peak", character: ["aggressive"], sources: ["drums"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_feedback_glue",
+    family: "dynamics",
+    title: "Feedback-topology glue compressor (detector listens to the OUTPUT, gentle warmth stage)",
+    rationale: "the vintage trick — detecting the already-compressed output self-smooths the gain curve, and a touch of tanh warmth flatters vocals and busses",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -26, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 12, defaultValue: 3, unit: ":1" },
+      { id: "attack", name: "Attack", min: 1, max: 120, defaultValue: 25, unit: "ms" },
+      { id: "release", name: "Release", min: 50, max: 1200, defaultValue: 300, unit: "ms" },
+      { id: "warmth", name: "Warmth", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.prevOut = 0; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -26;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 3);
+let attack = params.attack !== undefined ? params.attack : 25;
+let release = params.release !== undefined ? params.release : 300;
+let warmth = params.warmth !== undefined ? params.warmth : 0.35;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let mix = params.mix !== undefined ? params.mix : 1;
+// Feedback detection: the envelope follows the ALREADY-COMPRESSED output,
+// which self-smooths the gain curve -- the vintage glue character. Attack
+// and release stay slower here than a peak design by range, so the knobs
+// shape that character rather than turning this into a punch compressor.
+let x = Math.abs(state.prevOut);
+let aCoeff = 1 - Math.exp(-1 / (Math.max(1, attack) * 0.001 * 44100));
+let rCoeff = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aCoeff : rCoeff) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (gainDb + makeup) / 20);
+let hot = 1 + warmth * 4;
+let norm = 1 + warmth * 2.2;
+// The Warmth tanh is a real saturator, not a safety clamp, so it gets the
+// same shared 2x oversampled treatment as every other waveshaper in this
+// factory (see oversampledWaveshape in dspPrimitives.ts).
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g * hot)`, gainCompensation: "norm", outputVar: "out" })}
+state.prevOut = out;
+return out * mix + inputSample * (1 - mix);`,
+    tags: { topology: "feedback-colored", character: ["colored"], sources: ["vocals", "mix_bus", "guitar", "bass"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_lookahead_master",
+    family: "dynamics",
+    title: "Lookahead soft-knee mastering compressor (1.5 ms lookahead, 6 dB knee, gentle ratios)",
+    rationale: "mastering can spend latency — the detector reads the input 64 samples before the audio path plays it, so transients are caught without a hard knee's distortion",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -18, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 8, defaultValue: 2.5, unit: ":1" },
+      { id: "attack", name: "Attack", min: 1, max: 60, defaultValue: 8, unit: "ms" },
+      { id: "release", name: "Release", min: 50, max: 1000, defaultValue: 250, unit: "ms" },
+      { id: "knee", name: "Knee", min: 0, max: 24, defaultValue: 6, unit: "dB" },
+      { id: "makeup", name: "Makeup", min: 0, max: 12, defaultValue: 2, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(64); state.p = 0; state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -18;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 2.5);
+let attack = params.attack !== undefined ? params.attack : 8;
+let release = params.release !== undefined ? params.release : 250;
+let knee = Math.max(0.01, params.knee !== undefined ? params.knee : 6);
+let makeup = params.makeup !== undefined ? params.makeup : 2;
+let mix = params.mix !== undefined ? params.mix : 1;
+let x = Math.abs(inputSample);
+// Gentle mastering time constants, now exposed rather than fixed: the
+// detector still reads 64 samples AHEAD of the audio path (below), so
+// transients are caught without needing a hard knee's distortion.
+let aC = 1 - Math.exp(-1 / (Math.max(1, attack) * 0.001 * 44100));
+let rC = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aC : rC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let red = 0;
+if (overDb >= knee / 2) red = overDb * (1 - 1 / ratio);
+else if (overDb > -knee / 2) red = ((overDb + knee / 2) * (overDb + knee / 2)) / (2 * knee) * (1 - 1 / ratio);
+let g = Math.pow(10, (-red + makeup) / 20);
+let delayed = state.buf[state.p];
+state.buf[state.p] = inputSample;
+state.p = (state.p + 1) % 64;
+return Math.tanh(delayed * g) * mix + delayed * (1 - mix);`,
+    tags: { topology: "lookahead-soft-knee", character: ["transparent"], sources: ["master", "mix_bus"], latency: "lookahead", cpu: "light" },
+  },
+  // Four researched, gate-verified compressor designs (researchCorpus.ts:
+  // opto-model, fet-model, multiband-compression, sidechain-filter) that
+  // stayed in the "approved on request" research queue instead of the
+  // permanent bank -- the knowledge auditor kept flagging them as missing
+  // curriculum coverage because approval there is a per-session workflow
+  // action, not a standing part of what the offline builder can reach.
+  // Promoted verbatim (same body, same params) into first-class topology
+  // variants that compete as best-of-N seeds like every other alternate.
+  {
+    id: "comp_opto",
+    family: "dynamics",
+    title: "Opto leveling amplifier (photocell-style program-dependent release, fixed gentle ratio)",
+    rationale: "LA-2A-style: gain reduction comes from a light source driving a photocell whose resistance recovers non-linearly -- release starts fast then slows the longer and harder it has been compressing, the classic program-dependent glue with no ratio or time-constant knobs to fight",
+    parameters: [
+      { id: "reduction", name: "Peak Reduction", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "makeup", name: "Gain", min: 0, max: 24, defaultValue: 5, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.memory = 0; state.init = true; }
+let reduction = params.reduction !== undefined ? params.reduction : 0.5;
+let makeup = params.makeup !== undefined ? params.makeup : 5;
+let thresh = -8 - reduction * 30;
+let x = Math.abs(inputSample);
+// Program-dependent release: the "memory" of recent gain reduction slows
+// the release coefficient down the longer and harder the unit has been
+// compressing -- the defining LA-2A behavior, not just a fixed R.C. time.
+let releaseC = 0.0008 / (1 + state.memory * 40);
+state.env += (x > state.env ? 0.005 : releaseC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let grDb = overDb > 0 ? overDb * (1 - 1 / 3) : 0;
+state.memory += 0.00002 * (Math.min(1, grDb / 12) - state.memory);
+let g = Math.pow(10, (-grDb + makeup) / 20);
+return Math.tanh(inputSample * g);`,
+    tags: { topology: "opto-program-dependent", character: ["colored"], sources: ["vocals", "bass"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_fet_1176",
+    family: "dynamics",
+    title: "FET peak limiter (microsecond attack, fixed threshold, input-driven intensity)",
+    rationale: "1176-style: a FET gain element allows microsecond-class attack fast enough to clamp individual transient wavefronts, with no threshold knob -- Input doubles as intensity, and the FET stage adds harmonic color at high drive",
+    parameters: [
+      { id: "input", name: "Input", min: 0, max: 24, defaultValue: 8, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 4, max: 20, defaultValue: 8, unit: ":1" },
+      { id: "attack", name: "Attack", min: 0.05, max: 5, defaultValue: 0.3, unit: "ms" },
+      { id: "makeup", name: "Output", min: 0, max: 24, defaultValue: 3, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let input = params.input !== undefined ? params.input : 8;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 8);
+let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 0.3);
+let makeup = params.makeup !== undefined ? params.makeup : 3;
+let gIn = Math.pow(10, input / 20);
+let driven = inputSample * gIn;
+let x = Math.abs(driven);
+// Microsecond-class attack -- fast enough to clamp the wavefront of an
+// individual transient, not just its envelope. No threshold: driving more
+// signal into a FIXED point is what sets intensity on the real unit.
+let aC = 1 - Math.exp(-1 / (attack * 44.1));
+state.env += (x > state.env ? aC : 0.0007) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - (-16);
+let grDb = overDb > 0 ? overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (-grDb + makeup) / 20) / Math.pow(gIn, 0.7);
+return Math.tanh(driven * g);`,
+    tags: { topology: "fet-fixed-threshold", character: ["aggressive"], sources: ["drums", "vocals", "guitar"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_multiband_2band",
+    family: "dynamics",
+    title: "2-band multiband compressor (complementary crossover, independent band envelopes)",
+    rationale: "splits the signal with a crossover and compresses each band independently, so low-end energy cannot pump the highs -- the complementary one-pole split keeps the recombined spectrum flat when both bands sit at unity gain",
+    parameters: [
+      { id: "crossover", name: "Crossover", min: 150, max: 4000, defaultValue: 800, unit: "Hz" },
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -24, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 4, unit: ":1" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.smX = 800; state.envL = 0; state.envH = 0; state.init = true; }
+let crossover = params.crossover !== undefined ? params.crossover : 800;
+let thresh = params.threshold !== undefined ? params.threshold : -24;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 4);
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+state.smX += 0.002 * (crossover - state.smX);
+let a = 1 - Math.exp(-2 * Math.PI * state.smX / 44100);
+state.lp += a * (inputSample - state.lp);
+let low = state.lp;
+// Complementary split: high = input - low, so low + high always sums back
+// to the input exactly at unity gain -- no separate highpass state to
+// drift out of phase with the lowpass.
+let high = inputSample - low;
+let xl = Math.abs(low);
+state.envL += (xl > state.envL ? 0.004 : 0.0005) * (xl - state.envL);
+let dbL = 20 * Math.log10(Math.max(1e-6, state.envL));
+let grL = dbL > thresh ? (dbL - thresh) * (1 - 1 / ratio) : 0;
+let xh = Math.abs(high);
+state.envH += (xh > state.envH ? 0.004 : 0.0005) * (xh - state.envH);
+let dbH = 20 * Math.log10(Math.max(1e-6, state.envH));
+let grH = dbH > thresh ? (dbH - thresh) * (1 - 1 / ratio) : 0;
+let mk = Math.pow(10, makeup / 20);
+let out = low * Math.pow(10, -grL / 20) * mk + high * Math.pow(10, -grH / 20) * mk;
+return Math.tanh(out);`,
+    tags: { topology: "2band-complementary-crossover", character: ["transparent"], sources: ["mix_bus", "master"], latency: "zero", cpu: "medium" },
+  },
+  {
+    id: "comp_deesser",
+    family: "dynamics",
+    title: "De-esser (highpass-filtered detector, high-band gain reduction)",
+    rationale: "a compressor whose DETECTOR listens through a filter tuned to the sibilance region, reducing gain only when 'ess' energy spikes -- internal sidechain filtering in its most common form, so the body of the voice passes untouched",
+    parameters: [
+      { id: "frequency", name: "Ess Frequency", min: 1500, max: 8000, defaultValue: 3000, unit: "Hz" },
+      { id: "amount", name: "Amount", min: 0, max: 1, defaultValue: 0.6, unit: "ratio" },
+      { id: "makeup", name: "Makeup", min: 0, max: 12, defaultValue: 0, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.smF = 3000; state.env = 0; state.init = true; }
+let frequency = params.frequency !== undefined ? params.frequency : 3000;
+let amount = params.amount !== undefined ? params.amount : 0.6;
+let makeup = params.makeup !== undefined ? params.makeup : 0;
+state.smF += 0.002 * (frequency - state.smF);
+let a = 1 - Math.exp(-2 * Math.PI * state.smF / 44100);
+state.lp += a * (inputSample - state.lp);
+let low = state.lp;
+// The DETECTOR listens to the high band only -- gain reduction is applied
+// to the high band, but the low band (the body of the voice) passes
+// through completely untouched, which is what keeps a de-esser from
+// sounding like a dull, generally-compressed vocal.
+let high = inputSample - low;
+let xs = Math.abs(high);
+state.env += (xs > state.env ? 0.03 : 0.002) * (xs - state.env);
+let essDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = essDb - (-26 - amount * 22);
+let grDb = overDb > 0 ? Math.min(24, overDb * amount) : 0;
+let mk = Math.pow(10, makeup / 20);
+return Math.tanh((low + high * Math.pow(10, -grDb / 20)) * mk);`,
+    tags: { topology: "sidechain-filtered-deesser", character: ["transparent"], sources: ["vocals"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_parallel",
+    family: "dynamics",
+    title: "Parallel (New York) compressor (crushed wet path blended with pristine dry)",
+    rationale: "runs a fast, deep compressor (high ratio, low threshold) on a SEPARATE wet path and blends it back against the untouched dry signal -- the Blend knob, not the ratio, sets the effect intensity, adding density to quiet material while transients keep their original punch from the dry path",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: -12, defaultValue: -30, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 4, max: 20, defaultValue: 10, unit: ":1" },
+      { id: "blend", name: "Blend", min: 0, max: 1, defaultValue: 0.4, unit: "ratio" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 8, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -30;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 10);
+let blend = params.blend !== undefined ? params.blend : 0.4;
+let makeup = params.makeup !== undefined ? params.makeup : 8;
+let x = Math.abs(inputSample);
+state.env += (x > state.env ? 0.01 : 0.0008) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+// The DRY path never touches the gain computer -- only the wet path is
+// crushed, so transient punch survives blend even at high ratio.
+let wet = inputSample * Math.pow(10, (gainDb + makeup) / 20);
+return Math.tanh(inputSample * (1 - blend) + wet * blend);`,
+    tags: { topology: "parallel-ny-blend", character: ["aggressive"], sources: ["drums", "vocals", "mix_bus"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "comp_midside",
+    family: "dynamics",
+    title: "Mid-side glue compressor (mid-detected linked gain, width control on the side channel)",
+    rationale: "encodes L/R into sum (mid) and difference (side) channels, detects and compresses on the MID channel only, then applies the SAME linked gain reduction to both -- so the stereo image never lurches left or right when one side gets loud -- with an independent Width control scaling the side channel",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -24, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 12, defaultValue: 3, unit: ":1" },
+      { id: "width", name: "Width", min: 0, max: 2, defaultValue: 1.2, unit: "x" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -24;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 3);
+let width = params.width !== undefined ? params.width : 1.2;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let inR = inputR !== undefined ? inputR : inputSample;
+let mid = (inputSample + inR) * 0.5;
+let side = (inputSample - inR) * 0.5;
+let x = Math.abs(mid);
+state.env += (x > state.env ? 0.004 : 0.0005) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let grDb = overDb > 0 ? overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (-grDb + makeup) / 20);
+let m2 = mid * g;
+let s2 = side * width * g;
+state.outR = Math.tanh(m2 - s2);
+return Math.tanh(m2 + s2);`,
+    tags: { topology: "mid-side-linked", character: ["transparent"], sources: ["mix_bus", "master"], latency: "zero", cpu: "light" },
+  },
+  {
+    // Closes the knowledge audit's last real gap ("Sidechain input (external
+    // key)") -- the one prerequisite every other promoted concept didn't
+    // need: a genuinely independent key signal, not a channel of the same
+    // source (that's what inputR/mid-side already are). Adapted from
+    // comp_peak_punch's own peak-detector shape: identical attack/release/
+    // knee/makeup math, the only change is WHAT the detector listens to.
+    id: "comp_sidechain_ext",
+    family: "dynamics",
+    title: "External sidechain compressor (peak detector keyed from a separate input, gain reduction applied to the main signal)",
+    rationale: "a real sidechain duck -- the envelope detector follows inputKey (a kick, a voiceover, any independent source) while the gain reduction it computes is applied to inputSample, so the main signal visibly ducks out of the way of the key -- falls back to ordinary self-detecting compression when no key is connected",
+    parameters: [
+      { id: "threshold", name: "Threshold", min: -48, max: 0, defaultValue: -22, unit: "dB" },
+      { id: "ratio", name: "Ratio", min: 1, max: 20, defaultValue: 8, unit: ":1" },
+      { id: "attack", name: "Attack", min: 0.05, max: 30, defaultValue: 2, unit: "ms" },
+      { id: "release", name: "Release", min: 10, max: 500, defaultValue: 120, unit: "ms" },
+      { id: "makeup", name: "Makeup", min: 0, max: 24, defaultValue: 4, unit: "dB" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.env = 0; state.init = true; }
+let thresh = params.threshold !== undefined ? params.threshold : -22;
+let ratio = Math.max(1, params.ratio !== undefined ? params.ratio : 8);
+let attack = Math.max(0.05, params.attack !== undefined ? params.attack : 2);
+let release = params.release !== undefined ? params.release : 120;
+let makeup = params.makeup !== undefined ? params.makeup : 4;
+let mix = params.mix !== undefined ? params.mix : 1;
+// The detector listens to the KEY (falling back to the main input itself
+// when nothing is connected, so this measures as an ordinary compressor on
+// every render path that never supplies one), but every dB of gain
+// reduction it computes is applied to the MAIN signal below -- this is
+// what makes it an external sidechain duck rather than self-compression.
+let key = inputKey !== undefined ? inputKey : inputSample;
+let x = Math.abs(key);
+let aC = 1 - Math.exp(-1 / (attack * 44.1));
+let rC = 1 - Math.exp(-1 / (Math.max(1, release) * 0.001 * 44100));
+state.env += (x > state.env ? aC : rC) * (x - state.env);
+let envDb = 20 * Math.log10(Math.max(1e-6, state.env));
+let overDb = envDb - thresh;
+let gainDb = overDb > 0 ? -overDb * (1 - 1 / ratio) : 0;
+let g = Math.pow(10, (gainDb + makeup) / 20);
+let comp = Math.tanh(inputSample * g);
+return comp * mix + inputSample * (1 - mix);`,
+    tags: { topology: "external-sidechain-peak", character: ["aggressive"], sources: ["drums", "mix_bus"], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* REVERB: three room designs                                        */
+  /* ================================================================ */
+  {
+    id: "reverb_schroeder",
+    family: "reverb",
+    title: golden("reverb").title,
+    rationale: "the proven general-purpose hall — parallel prime combs with in-loop damping",
+    parameters: golden("reverb").parameters,
+    body: golden("reverb").body,
+    tags: { topology: "schroeder-hall", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "reverb_fdn_plate",
+    family: "reverb",
+    title: "4x4 FDN plate (Hadamard feedback matrix, short mutually-prime lines, bright damping)",
+    rationale: "vocals want a plate — a feedback-delay-network's cross-mixed short lines go dense immediately instead of echoing like a hall",
+    parameters: [
+      { id: "decay", name: "Decay", min: 0, max: 0.95, defaultValue: 0.8, unit: "ratio" },
+      { id: "damp", name: "Damping", min: 0, max: 0.9, defaultValue: 0.25, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.3, unit: "ratio" },
+    ],
+    body: `if (!state.init) {
+  state.b0 = new Float32Array(443); state.b1 = new Float32Array(557);
+  state.b2 = new Float32Array(683); state.b3 = new Float32Array(811);
+  state.i0 = 0; state.i1 = 0; state.i2 = 0; state.i3 = 0;
+  state.d0 = 0; state.d1 = 0; state.d2 = 0; state.d3 = 0;
+  state.init = true;
+}
+let decay = params.decay !== undefined ? params.decay : 0.8;
+let damp = params.damp !== undefined ? params.damp : 0.25;
+let mix = params.mix !== undefined ? params.mix : 0.3;
+let hf = 1 - damp * 0.75;
+let y0 = state.b0[state.i0]; state.d0 += hf * (y0 - state.d0); y0 = state.d0;
+let y1 = state.b1[state.i1]; state.d1 += hf * (y1 - state.d1); y1 = state.d1;
+let y2 = state.b2[state.i2]; state.d2 += hf * (y2 - state.d2); y2 = state.d2;
+let y3 = state.b3[state.i3]; state.d3 += hf * (y3 - state.d3); y3 = state.d3;
+// The Hadamard mixing matrix below is orthonormal, so the loop gain IS fb:
+// with ~600-sample lines, fb must approach 0.9+ for a plate-length tail.
+// (At 0.62 this measured a 0.19 s decay -- an ambience blip, not a plate.)
+let fb = Math.min(0.97, 0.45 + decay * 0.55);
+let m0 = (y0 + y1 + y2 + y3) * 0.5;
+let m1 = (y0 - y1 + y2 - y3) * 0.5;
+let m2 = (y0 + y1 - y2 - y3) * 0.5;
+let m3 = (y0 - y1 - y2 + y3) * 0.5;
+state.b0[state.i0] = inputSample + m0 * fb; state.i0 = (state.i0 + 1) % 443;
+state.b1[state.i1] = inputSample * 0.8 + m1 * fb; state.i1 = (state.i1 + 1) % 557;
+state.b2[state.i2] = inputSample * 0.6 + m2 * fb; state.i2 = (state.i2 + 1) % 683;
+state.b3[state.i3] = inputSample * 0.4 + m3 * fb; state.i3 = (state.i3 + 1) % 811;
+let wet = (y0 + y1 + y2 + y3) * 0.3;
+return Math.tanh(inputSample * (1 - mix) + wet * mix * 1.5);`,
+    tags: { topology: "fdn-plate", character: ["colored", "transparent"], sources: ["vocals", "synth"], latency: "zero", cpu: "medium" },
+  },
+  {
+    id: "reverb_room_er",
+    family: "reverb",
+    title: "Early-reflection room (4 spread taps + damped regeneration, sized by one knob)",
+    rationale: "drums and live sources want a tight ROOM, not a hall — discrete early reflections keep transients readable while Size grows the space",
+    parameters: [
+      { id: "size", name: "Size", min: 0, max: 0.95, defaultValue: 0.5, unit: "ratio" },
+      { id: "damp", name: "Damping", min: 0, max: 0.9, defaultValue: 0.35, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.3, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(8820); state.p = 0; state.d = 0; state.dw = 0; state.init = true; }
+let size = params.size !== undefined ? params.size : 0.5;
+let damp = params.damp !== undefined ? params.damp : 0.35;
+let mix = params.mix !== undefined ? params.mix : 0.3;
+let base = 260 + size * 5800;
+let t1 = Math.max(1, Math.floor(base * 0.31));
+let t2 = Math.max(2, Math.floor(base * 0.53));
+let t3 = Math.max(3, Math.floor(base * 0.79));
+let t4 = Math.max(4, Math.floor(base));
+let s1 = state.buf[(state.p - t1 + 8820) % 8820];
+let s2 = state.buf[(state.p - t2 + 8820) % 8820];
+let s3 = state.buf[(state.p - t3 + 8820) % 8820];
+let s4 = state.buf[(state.p - t4 + 8820) % 8820];
+let wet = s1 * 0.32 + s2 * 0.27 + s3 * 0.23 + s4 * 0.28;
+let hf = 1 - damp * 0.8;
+state.d += hf * (s4 - state.d);
+let regen = 0.22 + size * 0.6;
+state.buf[state.p] = inputSample + state.d * regen;
+state.p = (state.p + 1) % 8820;
+state.dw += hf * (wet - state.dw);
+wet = state.dw;
+return Math.tanh(inputSample * (1 - mix) + wet * mix * 1.1);`,
+    tags: { topology: "early-reflection-room", character: ["transparent"], sources: ["drums", "guitar"], latency: "zero", cpu: "light" },
+  },
+  {
+    // Adapted from researchCorpus.ts's "convolution" entry (same IR
+    // synthesis engine, same params) -- promoting it surfaced a real defect
+    // the corpus module was never checked against: a bare 1024-tap one-shot
+    // FIR (no feedback) can only ring for ~23ms before the buffer fully
+    // flushes, which functionalFitnessTest.ts's decay-time probe correctly
+    // measured as indistinguishable from "a near-instant blip," not a
+    // reverb (same class of fix as reverb_fdn_plate's own history: an
+    // inadequate decay tail means add/raise feedback gain, not lower the
+    // bar). Recirculating the wet signal back INTO the 1024-tap convolution
+    // buffer was tried first and rejected: the loudest tap (ir[0], an
+    // almost-immediate self-read) dominates as a per-SAMPLE feedback mode
+    // whose decay rate is set by the IR's own shape and barely responds to
+    // an external feedback gain at all -- every attempt landed on the same
+    // measured ~46ms drop regardless of the gain used. Real algorithmic
+    // reverbs that combine convolution with a long tail don't recirculate
+    // through the IR itself either -- they add a SEPARATE late-reverberation
+    // feedback stage after a short/dense early-reflection convolution, which
+    // is what this does: the 1024-tap FIR still provides the dense, colored
+    // early-reflection character (unchanged), and an independent single-tap
+    // feedback line (state.tail, proven shape -- same "one-pole momentum +
+    // regen scalar" reverb_room_er already uses) supplies the actual decay,
+    // fed BY the convolution's output rather than routed back through it.
+    // See dspTopologies.ts's own file header re: the promotion pattern
+    // already used for opto/FET/multiband/de-esser/mid-side/wavetable/FM/
+    // ping-pong.
+    id: "reverb_convolution",
+    family: "reverb",
+    title: "Convolution reverb (procedurally-synthesized room IR, direct FIR — 1024 taps, with a regenerating tail)",
+    rationale: "a direct FIR against a synthesized decaying, tone-shaped-noise impulse response for dense, room-accurate early reflections, feeding an independent single-tap regenerating line for the actual decay tail -- denser than a comb/FDN network up front, at the cost of a 1024-tap-per-sample budget",
+    parameters: [
+      { id: "size", name: "Size", min: 0.1, max: 1, defaultValue: 0.6, unit: "ratio" },
+      { id: "decay", name: "Decay", min: 0.1, max: 0.98, defaultValue: 0.7, unit: "ratio" },
+      { id: "tone", name: "Tone", min: 800, max: 12000, defaultValue: 5000, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+    ],
+    // The IR lives in a buffer allocated ONCE (init guard); it is refilled
+    // in place (no allocation) only when Size/Decay/Tone change, so a swept
+    // knob costs one refill per render, not one per sample. The regenerating
+    // tail line is a second, separate fixed buffer (also allocated once).
+    body: `if (!state.init) {
+  state.ir = new Float32Array(1024);
+  state.buf = new Float32Array(1024);
+  state.w = 0;
+  state.key = -1;
+  state.tail = new Float32Array(9000);
+  state.tp = 0;
+  state.init = true;
+}
+let size = params.size !== undefined ? params.size : 0.6;
+let decay = params.decay !== undefined ? params.decay : 0.7;
+let tone = params.tone !== undefined ? params.tone : 5000;
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let key = Math.round(size * 200) * 100000 + Math.round(decay * 1000) * 100 + Math.round(tone / 120);
+if (key !== state.key) {
+  let taps = Math.max(64, Math.floor(size * 1024));
+  let rng = 22222;
+  let lp = 0;
+  let toneA = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+  let decayRate = 3 + (1 - decay) * 60;
+  let norm = 0;
+  for (let k = 0; k < 1024; k++) {
+    if (k < taps) {
+      rng = (rng * 1664525 + 1013904223) | 0;
+      let wn = (rng / 2147483648);
+      let env = Math.exp(-decayRate * k / taps);
+      lp += toneA * (wn - lp);
+      let early = k < 6 ? 0.9 : 0;
+      let v = (lp + early * wn) * env;
+      state.ir[k] = v;
+      norm += v * v;
+    } else {
+      state.ir[k] = 0;
+    }
+  }
+  let g = norm > 1e-9 ? 0.7 / Math.sqrt(norm) : 0;
+  for (let k = 0; k < taps; k++) state.ir[k] *= g;
+  state.key = key;
+}
+state.buf[state.w] = inputSample;
+let acc = 0;
+for (let k = 0; k < 1024; k++) {
+  let idx = state.w - k;
+  if (idx < 0) idx += 1024;
+  acc += state.ir[k] * state.buf[idx];
+}
+state.w = (state.w + 1) % 1024;
+// Separate long regenerating tail: a single ~180ms feedback line fed by the
+// convolution's own dense output, same proven shape as reverb_room_er's
+// own regen line. Math.tanh bounds the fed-back read every sample, so this
+// is stable at any Decay setting regardless of the convolution's own gain.
+let tailRead = state.tail[(state.tp - 7938 + 9000) % 9000];
+let regen = 0.5 + decay * 0.46;
+state.tail[state.tp] = acc * 0.6 + Math.tanh(tailRead) * regen;
+state.tp = (state.tp + 1) % 9000;
+let wet = acc + tailRead * 0.35;
+return Math.tanh(inputSample * (1 - mix) + wet * mix * 1.2);`,
+    tags: { topology: "direct-fir-convolution", character: ["colored", "transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "medium" },
+  },
+
+  /* ================================================================ */
+  /* DELAY: three echo designs                                         */
+  /* ================================================================ */
+  {
+    id: "delay_tape",
+    family: "delay",
+    title: golden("delay").title,
+    rationale: "the proven default — repeats darken as they regenerate, like tape",
+    parameters: golden("delay").parameters,
+    body: golden("delay").body,
+    tags: { topology: "tape-damped-loop", character: ["colored", "lofi"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "delay_digital",
+    family: "delay",
+    title: "Pristine digital delay (undamped loop — every repeat is an exact copy)",
+    rationale: "transparent material wants repeats that stay full-bandwidth instead of darkening — no lowpass in the regeneration loop",
+    parameters: [
+      { id: "time", name: "Time", min: 20, max: 1500, defaultValue: 350, unit: "ms" },
+      { id: "feedback", name: "Feedback", min: 0, max: 0.9, defaultValue: 0.4, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(96000); state.ptr = 0; state.init = true; }
+let time = params.time !== undefined ? params.time : 350;
+let fb = Math.min(0.9, params.feedback !== undefined ? params.feedback : 0.4);
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let d = Math.max(1, Math.min(95999, Math.floor(time * 44.1)));
+let read = (state.ptr - d + 96000) % 96000;
+let wet = state.buf[read];
+state.buf[state.ptr] = inputSample + wet * fb;
+state.ptr = (state.ptr + 1) % 96000;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "digital-clean-loop", character: ["transparent"], sources: ["vocals", "synth", "master"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "delay_pingpong",
+    family: "delay",
+    title: "Ping-pong delay (cross-fed L/R lines, alternating repeats, width control)",
+    rationale: "cross-feeds two delay lines -- input enters the left line, the left tap regenerates into the right line and the right back into the left, so each repeat alternates sides -- with a Width control scaling how far the bounce spreads from center",
+    parameters: [
+      { id: "time", name: "Time", min: 50, max: 1200, defaultValue: 350, unit: "ms" },
+      { id: "feedback", name: "Feedback", min: 0, max: 0.9, defaultValue: 0.45, unit: "ratio" },
+      { id: "width", name: "Width", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.bufL = new Float32Array(96000); state.bufR = new Float32Array(96000); state.p = 0; state.init = true; }
+let time = params.time !== undefined ? params.time : 350;
+let fb = Math.min(0.9, params.feedback !== undefined ? params.feedback : 0.45);
+let width = params.width !== undefined ? params.width : 1;
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let inR = inputR !== undefined ? inputR : inputSample;
+let x = (inputSample + inR) * 0.5;
+let d = Math.max(1, Math.min(52900, Math.floor(time * 44.1)));
+let read = (state.p - d + 96000) % 96000;
+let wetL = state.bufL[read];
+let wetR = state.bufR[read];
+state.bufL[state.p] = x + wetR * fb;
+state.bufR[state.p] = wetL * fb;
+state.p = (state.p + 1) % 96000;
+let ms = (wetL + wetR) * 0.5;
+let wl = ms + (wetL - ms) * width;
+let wr = ms + (wetR - ms) * width;
+state.outR = Math.tanh(inR * (1 - mix) + wr * mix * 1.3);
+return Math.tanh(inputSample * (1 - mix) + wl * mix * 1.3);`,
+    tags: { topology: "cross-fed-pingpong", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+  },
+  {
+    // Promoted verbatim from researchCorpus.ts's "multi-tap" entry (same
+    // body, same params) -- same promotion pattern as reverb_convolution
+    // above and the 8 earlier promotions this file's header describes.
+    id: "delay_multitap",
+    family: "delay",
+    title: "Multi-tap rhythmic delay (3 pattern taps on one line, damped regeneration)",
+    rationale: "reads one delay line at three offsets at once instead of a single repeat, producing a rhythmic pattern from one write head -- distinct from ping-pong's cross-fed stereo bounce or the tape/digital loop's single steady echo",
+    parameters: [
+      { id: "time", name: "Time", min: 50, max: 1200, defaultValue: 400, unit: "ms" },
+      { id: "feedback", name: "Feedback", min: 0, max: 0.85, defaultValue: 0.35, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 0.35, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.buf = new Float32Array(96000); state.ptr = 0; state.damp = 0; state.init = true; }
+let time = params.time !== undefined ? params.time : 400;
+let fb = Math.min(0.85, params.feedback !== undefined ? params.feedback : 0.35);
+let mix = params.mix !== undefined ? params.mix : 0.35;
+let d = Math.max(4, Math.min(52900, Math.floor(time * 44.1)));
+let d1 = Math.max(1, Math.floor(d * 0.5));
+let d2 = Math.max(2, Math.floor(d * 0.75));
+let t1 = state.buf[(state.ptr - d1 + 96000) % 96000];
+let t2 = state.buf[(state.ptr - d2 + 96000) % 96000];
+let t3 = state.buf[(state.ptr - d + 96000) % 96000];
+let wet = t1 * 0.32 + t2 * 0.28 + t3 * 0.4;
+state.damp += 0.35 * (t3 - state.damp);
+state.buf[state.ptr] = inputSample + state.damp * fb;
+state.ptr = (state.ptr + 1) % 96000;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "multi-tap-rhythmic", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* DISTORTION: four drive designs                                    */
+  /* ================================================================ */
+  {
+    id: "dist_softclip",
+    family: "distortion",
+    title: golden("distortion").title,
+    rationale: "the proven default — symmetric soft clip with gain compensation and a tone filter",
+    parameters: golden("distortion").parameters,
+    body: golden("distortion").body,
+    tags: { topology: "softclip-symmetric", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "dist_tube_asym",
+    family: "distortion",
+    title: "Asymmetric tube stage (biased tanh — even harmonics, DC-compensated, 2x oversampled)",
+    rationale: "warmth lives in EVEN harmonics — a biased transfer curve clips the two half-waves differently, like a single-ended tube stage",
+    parameters: [
+      { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 8, unit: "dB" },
+      { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4200, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 8; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
+let drive = params.drive !== undefined ? params.drive : 8;
+let tone = params.tone !== undefined ? params.tone : 4200;
+let mix = params.mix !== undefined ? params.mix : 1;
+state.smDrive += 0.002 * (drive - state.smDrive);
+let g = Math.pow(10, state.smDrive / 20);
+let bias = 0.22;
+let biasRest = Math.tanh(bias);
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g + bias) - biasRest`, gainCompensation: "Math.pow(g, 0.65)" })}
+let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+state.lp += a * (wet - state.lp);
+wet = state.lp;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "asymmetric-tube", character: ["colored"], sources: ["guitar", "bass", "vocals"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "dist_fuzz",
+    family: "distortion",
+    title: "Hard fuzz (softsign fold-back curve, heavy compensation, fizz-taming tone filter)",
+    rationale: "aggression wants a flatter-topped curve than tanh — softsign squashes into a near-square while the 2x oversampling and tone filter keep the fizz out of the gate's red zone",
+    parameters: [
+      { id: "drive", name: "Drive", min: 0, max: 36, defaultValue: 14, unit: "dB" },
+      { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 3600, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.smDrive = 14; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
+let drive = params.drive !== undefined ? params.drive : 14;
+let tone = params.tone !== undefined ? params.tone : 3600;
+let mix = params.mix !== undefined ? params.mix : 1;
+state.smDrive += 0.002 * (drive - state.smDrive);
+let g = Math.pow(10, state.smDrive / 20);
+// softsign's fold-back shoulders are sharper than tanh's, so the plain box
+// average this used to use left more image energy behind than the shared
+// halfband decimator below cuts.
+${oversampledWaveshape({ shape: (x) => `(${x} * g) / (1 + Math.abs(${x} * g))`, gainCompensation: "Math.pow(g, 0.7)" })}
+let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+state.lp += a * (wet - state.lp);
+wet = state.lp;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "softsign-fuzz", character: ["aggressive", "lofi"], sources: ["guitar", "drums", "synth"], latency: "zero", cpu: "light" },
+  },
+  {
+    id: "dist_dynamic_sat",
+    family: "distortion",
+    title: "Dynamic saturator (envelope-tracked drive, 2x oversampled, tone filter)",
+    rationale: "tracks the input envelope and increases waveshaper drive on louder material -- how an analog stage distorts progressively rather than uniformly, so quiet passages stay clean while peaks push into real saturation",
+    parameters: [
+      { id: "drive", name: "Drive", min: 0, max: 24, defaultValue: 10, unit: "dB" },
+      { id: "response", name: "Response", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "tone", name: "Tone", min: 500, max: 12000, defaultValue: 4200, unit: "Hz" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.lp = 0; state.env = 0; state.smDrive = 10; state.prevIn = 0; state.prevShaped = 0; state.init = true; }
+let drive = params.drive !== undefined ? params.drive : 10;
+let response = params.response !== undefined ? params.response : 0.5;
+let tone = params.tone !== undefined ? params.tone : 4200;
+let mix = params.mix !== undefined ? params.mix : 1;
+state.smDrive += 0.002 * (drive - state.smDrive);
+let x = Math.abs(inputSample);
+state.env += (x > state.env ? 0.008 : 0.0009) * (x - state.env);
+let envNorm = Math.min(1, state.env * 3.5);
+let dynDb = state.smDrive * (1 - response * 0.6 + response * envNorm);
+let g = Math.pow(10, dynDb / 20);
+${oversampledWaveshape({ shape: (x) => `Math.tanh(${x} * g)`, gainCompensation: "Math.pow(g, 0.65)" })}
+let a = 1 - Math.exp(-2 * Math.PI * tone / 44100);
+state.lp += a * (wet - state.lp);
+wet = state.lp;
+return Math.tanh(inputSample * (1 - mix) + wet * mix);`,
+    tags: { topology: "envelope-tracked-drive", character: ["colored"], sources: ["vocals", "guitar", "bass"], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* SYNTHESIZER: two voice-generation designs beyond subtractive       */
+  /* ================================================================ */
+  {
+    id: "synth_pad",
+    family: "synthesizer",
+    title: golden("synth").title,
+    rationale: "the proven default — two detuned oscillators through a state-variable lowpass, warm and simple",
+    parameters: golden("synth").parameters,
+    body: golden("synth").body,
+    tags: { topology: "detuned-2osc-svf", character: ["colored"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "synth_wavetable",
+    family: "synthesizer",
+    title: "Morphing wavetable oscillator (4 band-limited tables, interpolated scan, airy noise layer)",
+    rationale: "reads a stored single-cycle waveform with a phase accumulator and interpolated lookup, then crossfades between adjacent band-limited tables to sweep timbre continuously -- from a pure sine to a bright sawtooth-ish stack -- without the aliasing a naive high-partial lookup would add at low pitches",
+    parameters: [
+      { id: "pitch", name: "Pitch", min: 55, max: 880, defaultValue: 220, unit: "Hz" },
+      { id: "morph", name: "Morph", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "cutoff", name: "Cutoff", min: 800, max: 12000, defaultValue: 4000, unit: "Hz" },
+      { id: "level", name: "Level", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+    ],
+    body: `if (!state.init) {
+  state.tables = [];
+  for (let t = 0; t < 4; t++) {
+    let tab = new Float32Array(2048);
+    for (let i = 0; i < 2048; i++) {
+      let ph = 2 * Math.PI * i / 2048;
+      let v = 0;
+      if (t === 0) v = Math.sin(ph);
+      else if (t === 1) { for (let k = 1; k <= 5; k += 2) v += Math.sin(k * ph) / (k * k); v *= 1.2; }
+      else if (t === 2) { for (let k = 1; k <= 16; k++) v += Math.sin(k * ph) / k; v *= 0.55; }
+      else { for (let k = 1; k <= 9; k += 2) v += Math.sin(k * ph) / k; v *= 0.75; }
+      tab[i] = v;
+    }
+    state.tables.push(tab);
+  }
+  state.ph = 0; state.lp = 0; state.smP = 220; state.rng = 12345; state.init = true;
+}
+let pitch = params.pitch !== undefined ? params.pitch : 220;
+let morph = Math.min(1, Math.max(0, params.morph !== undefined ? params.morph : 0.5));
+let cutoff = params.cutoff !== undefined ? params.cutoff : 4000;
+let level = params.level !== undefined ? params.level : 0.5;
+state.smP += 0.002 * (pitch - state.smP);
+state.ph += state.smP * 2048 / 44100;
+if (state.ph >= 2048) state.ph -= 2048;
+let pos = morph * 3;
+let ti = Math.min(2, Math.floor(pos));
+let frac = pos - ti;
+let i0 = Math.floor(state.ph);
+let i1 = (i0 + 1) % 2048;
+let sf = state.ph - i0;
+let ta = state.tables[ti];
+let tb = state.tables[ti + 1];
+let va = ta[i0] * (1 - sf) + ta[i1] * sf;
+let vb = tb[i0] * (1 - sf) + tb[i1] * sf;
+let osc = va * (1 - frac) + vb * frac;
+state.rng = (state.rng * 1664525 + 1013904223) | 0;
+let air = (state.rng / 2147483648) * 0.05;
+let a = 1 - Math.exp(-2 * Math.PI * cutoff / 44100);
+state.lp += a * (osc + air - state.lp);
+return Math.tanh(state.lp * level * 0.8);`,
+    tags: { topology: "morphing-wavetable", character: ["colored"], sources: ["synth" as SourceMaterial], latency: "zero", cpu: "medium" },
+  },
+  {
+    id: "synth_fm",
+    family: "synthesizer",
+    title: "2-operator FM voice (phase-modulated carrier, ratio + index timbre control)",
+    rationale: "a modulator oscillator at ratio*frequency phase-modulates the carrier -- Chowning's founding FM result: integer carrier:modulator ratios give harmonic spectra, non-integer ratios give bells and metallic inharmonics, all from two sine calls and one multiply, no lookup tables or filters needed",
+    parameters: [
+      { id: "pitch", name: "Pitch", min: 55, max: 880, defaultValue: 220, unit: "Hz" },
+      { id: "opRatio", name: "Op Ratio", min: 0.5, max: 8, defaultValue: 2, unit: "x" },
+      { id: "fmAmount", name: "FM Amount", min: 0, max: 8, defaultValue: 2.5, unit: "rad" },
+      { id: "level", name: "Level", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+    ],
+    body: `if (!state.init) { state.phC = 0; state.phM = 0; state.smP = 220; state.smI = 2.5; state.init = true; }
+let pitch = params.pitch !== undefined ? params.pitch : 220;
+let opRatio = Math.max(0.1, params.opRatio !== undefined ? params.opRatio : 2);
+let fmAmount = params.fmAmount !== undefined ? params.fmAmount : 2.5;
+let level = params.level !== undefined ? params.level : 0.5;
+state.smP += 0.002 * (pitch - state.smP);
+state.smI += 0.002 * (fmAmount - state.smI);
+state.phM += 2 * Math.PI * state.smP * opRatio / 44100;
+if (state.phM > 2 * Math.PI) state.phM -= 2 * Math.PI;
+state.phC += 2 * Math.PI * state.smP / 44100;
+if (state.phC > 2 * Math.PI) state.phC -= 2 * Math.PI;
+let osc = Math.sin(state.phC + state.smI * Math.sin(state.phM));
+return Math.tanh(osc * level * 0.8);`,
+    tags: { topology: "2op-fm", character: ["colored"], sources: ["synth" as SourceMaterial], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* EQ: two band-shaping designs                                      */
+  /* ================================================================ */
+  {
+    id: "eq_3band",
+    family: "eq",
+    title: golden("eq").title,
+    rationale: "the proven default — three real crossover-split bands with per-band gain, correct for broad tonal shaping",
+    parameters: golden("eq").parameters,
+    body: golden("eq").body,
+    tags: { topology: "3band-crossover-shelf", character: ["transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "eq_biquad_bell",
+    family: "eq",
+    title: "RBJ peaking bell EQ (cookbook biquad, smoothed sweepable center)",
+    rationale: "a single surgical bell -- the RBJ cookbook biquad (A/alpha/cos-w0 coefficient derivation) targets ONE frequency with a real Q-controlled bandwidth, instead of three fixed crossover-split bands, for a scoop/boost a broad 3-band EQ can't reach precisely",
+    parameters: [
+      { id: "freq", name: "Center Freq", min: 200, max: 8000, defaultValue: 1000, unit: "Hz" },
+      { id: "boost", name: "Boost", min: -12, max: 12, defaultValue: 6, unit: "dB" },
+      { id: "q", name: "Q", min: 0.4, max: 4, defaultValue: 1, unit: "Q" },
+    ],
+    body: `if (!state.init) { state.x1 = 0; state.x2 = 0; state.yy1 = 0; state.yy2 = 0; state.smF = 1000; state.init = true; }
+let freq = params.freq !== undefined ? params.freq : 1000;
+let boost = params.boost !== undefined ? params.boost : 6;
+let q = Math.max(0.4, params.q !== undefined ? params.q : 1);
+state.smF += 0.002 * (freq - state.smF);
+let A = Math.pow(10, boost / 40);
+let w0 = 2 * Math.PI * Math.min(16000, state.smF) / 44100;
+let alpha = Math.sin(w0) / (2 * q);
+let cosw = Math.cos(w0);
+let a0 = 1 + alpha / A;
+let b0 = (1 + alpha * A) / a0;
+let b1 = -2 * cosw / a0;
+let b2 = (1 - alpha * A) / a0;
+let a1 = -2 * cosw / a0;
+let a2 = (1 - alpha / A) / a0;
+let y = b0 * inputSample + b1 * state.x1 + b2 * state.x2 - a1 * state.yy1 - a2 * state.yy2;
+state.x2 = state.x1; state.x1 = inputSample;
+state.yy2 = state.yy1; state.yy1 = y;
+return Math.tanh(y);`,
+    tags: { topology: "rbj-peaking-biquad", character: ["transparent"], sources: ["any" as SourceMaterial], latency: "zero", cpu: "light" },
+  },
+
+  /* ================================================================ */
+  /* PITCH: the golden tuner, plus a key-tracking variant              */
+  /* ================================================================ */
+  {
+    // Registering the golden recipe as this family's DEFAULT topology is
+    // load-bearing, not bookkeeping: rankTopologies falls back to
+    // isDefault when requirements are neutral, so without an entry here a
+    // single specialist variant would win every generic "autotune" or
+    // "octave-up pitch shifter" prompt by default.
+    id: "pitch_autotune_golden",
+    family: "pitch",
+    title: golden("pitch").title,
+    rationale: "the proven general-purpose tuner — autocorrelation F0 detection, key/scale snap, formant-preserving resynthesis",
+    parameters: golden("pitch").parameters,
+    body: golden("pitch").body,
+    // Tagged "vocals" like the specialist below it, deliberately: both are
+    // vocal tools, and rankTopologies gives a source match +3. Matching tags
+    // means the +0.5 isDefault bonus is what breaks the tie, so an ordinary
+    // "autotune my vocals" gets this one and the specialist has to be asked
+    // for. (Declaring this "any" instead would work for ranking but would be
+    // a lie the quality gate believes -- it picks test material from these
+    // tags, and grading a vocal tuner on non-vocal signal drops it below the
+    // shipping floor.)
+    tags: { topology: "autocorrelation-snap", character: ["transparent"], sources: ["vocals"], latency: "zero", cpu: "light" },
+    isDefault: true,
+  },
+  {
+    id: "pitch_beat_locked_autotune",
+    family: "pitch",
+    title: "Beat-locked autotune (sidechain chroma key detection, lookahead, automatic modulation tracking)",
+    rationale:
+      "the golden autotune infers key from the VOCAL's own history, so it can only learn a key after the singer has already sung it -- and a wrong early note poisons the histogram. This keys off the BACKING TRACK through the sidechain instead: a 12-bin chroma profile of the instrumental is matched against all 24 major/minor key profiles, and the vocal is delayed by the lookahead so the key is decided from music that arrives AFTER the sample being corrected. A separate fast profile watches for modulations and commits a key change only when it disagrees with the established key persistently, so a passing borrowed chord doesn't yank the tuning",
+    parameters: [
+      { id: "lookahead", name: "Lookahead", min: 0, max: 120, defaultValue: 60, unit: "ms" },
+      { id: "sensitivity", name: "Key Sensitivity", min: 0, max: 1, defaultValue: 0.5, unit: "ratio" },
+      { id: "speed", name: "Retune Speed", min: 0, max: 100, defaultValue: 18, unit: "ms" },
+      { id: "strength", name: "Strength", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+      { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+    ],
+    body: `if (!state.init) {
+  state.buf = new Float32Array(8192);      // vocal ring (analysis + lookahead + resynth)
+  state.wp = 0;
+  // Seed the read heads ONCE, lookahead samples behind the write head, then
+  // let them free-run exactly like the golden autotune (advance by the FULL
+  // ratio every sample, wrap at BUF) -- that free-run IS the pitch shift.
+  // An earlier version of this recompiled an "anchor" position every single
+  // sample and forced the heads back onto it, which pins the AVERAGE
+  // playback rate to 1x no matter what ratio says and cancels the shift --
+  // measured against a 45-cent-sharp probe tone it left correction ~30 cents
+  // off instead of the ~5 cents this same architecture reaches in the golden
+  // recipe. Seed-once and free-run is what makes ratio != 1 actually work.
+  let lookInit = params.lookahead !== undefined ? params.lookahead : 60;
+  let lookSampInit = Math.max(0, Math.min(4096, Math.round(lookInit * 44.1)));
+  state.rp1 = (8192 - lookSampInit) % 8192;
+  state.rp2 = (state.rp1 + 1024) % 8192;   // half a grain apart; Hann pair sums to 1
+  // A second, plain (non-pitch-shifted) delay line for the DRY signal: it
+  // advances at a fixed rate of 1/sample, so the dry portion of the mix
+  // stays a constant "lookahead" behind the input regardless of how far the
+  // pitch-shifted read heads have drifted -- otherwise turning the Mix knob
+  // down would phase-smear against a wet signal at a different, drifting delay.
+  state.dp = (8192 - lookSampInit) % 8192;
+  // The two read heads are offset by half a grain so their Hann windows
+  // sum to 1 -- but that means whichever one has LESS ring distance to
+  // travel wraps into real, written audio a whole half-grain (1024
+  // samples) before the other, and starts contributing through its own
+  // Hann taper well before the requested lookahead has actually elapsed.
+  // Rather than reason about which head wraps first (it depends on the
+  // exact lookahead value), mute output explicitly until BOTH heads are
+  // guaranteed to be reading real history, then start cleanly.
+  state.primed = 0;
+  state.primeTarget = lookSampInit;
+  state.hop = 0;
+  state.detF = 220;
+  state.ratio = 1;
+  // 12 pitch classes x 3 octaves of two-pole resonators, run on the
+  // SIDECHAIN. Three octaves is the point: a single octave's worth of
+  // filters only hears notes that happen to land in it, so a chord voiced
+  // an octave up contributes nothing to its own pitch class and the key
+  // comes out a fourth off.
+  state.rz1 = new Float32Array(48);
+  state.rz2 = new Float32Array(48);
+  state.chFast = new Float32Array(12);     // recent chroma -- sees modulations
+  state.chSlow = new Float32Array(12);     // established chroma -- stable key
+  state.tonic = 0;
+  state.isMinor = 0;
+  state.candTonic = -1;
+  state.candMinor = 0;
+  state.candHold = 0;
+  state.locked = 0;         // 0 until the very first key is established
+  state.lockCand = -1;
+  state.lockCandMinor = 0;
+  state.lockHold = 0;
+  state.init = true;
+}
+let BUF = 8192;
+let GRAIN = 2048;
+// Lookahead is read ONCE, in the init block above, to seed the read-head
+// delay -- it is deliberately an engagement-time setting, not a live knob:
+// like the latency control on real lookahead hardware, changing how far the
+// read head trails the write head mid-stream is inherently disruptive
+// (it would mean jumping the read position), so it takes effect at the next
+// time the plugin is instantiated rather than smoothly re-slewing live.
+let sensitivity = params.sensitivity !== undefined ? params.sensitivity : 0.5;
+let speed = params.speed !== undefined ? params.speed : 18;
+let strength = params.strength !== undefined ? params.strength : 1;
+let mix = params.mix !== undefined ? params.mix : 1;
+
+// ---- 1. Sidechain chroma. Falls back to the vocal itself when nothing is
+//         patched in, so the plugin still works with no key source.
+let side = inputKey !== undefined ? inputKey : inputSample;
+
+// A resonant bandpass per pitch class PER OCTAVE (C3/C4/C5 bands), with the
+// three octaves of each pitch class folded into one chroma bin -- that fold
+// is what makes this a chroma profile rather than a spectrum, and covers the
+// range real instrumental parts are actually voiced in. A two-pole resonator
+// is the cheapest per-bin energy reading available without an FFT, and 36 of
+// them is a fixed, bounded cost with no allocation.
+// Pole radius sets the bandwidth, and it has to be tight enough to RESOLVE a
+// semitone or every bin bleeds into its neighbours and the detected key comes
+// out a fourth off. bandwidth ~= (1-r)*SR/pi, so r=0.9997 gives ~4Hz -- inside
+// the ~7.8Hz semitone spacing at C3, the lowest band scanned. Four octaves
+// (C3-C6) is what real parts are actually voiced across: stopping at C4 meant
+// an ordinary A3-rooted minor progression never registered its own tonic.
+for (let k = 0; k < 12; k++) {
+  let e = 0;
+  for (let oct = 0; oct < 4; oct++) {
+    let idx = oct * 12 + k;
+    let f = 130.81 * Math.pow(2, oct + k / 12);   // C3, C4, C5, C6 bands
+    let w = 2 * Math.PI * f / 44100;
+    let r = 0.9997;
+    let a1r = 2 * r * Math.cos(w);
+    let a2r = r * r;
+    let y = side + a1r * state.rz1[idx] - a2r * state.rz2[idx];
+    state.rz2[idx] = state.rz1[idx];
+    state.rz1[idx] = y;
+    // Normalized by (1-r) so a sharper filter doesn't just mean a bigger
+    // number -- the chroma bins stay comparable to the input's own scale.
+    e += Math.abs(y) * (1 - r);
+  }
+  // Rectified energy into two profiles on genuinely different timescales.
+  // Both must be LONGER than a chord: a profile whose time constant is a
+  // fraction of a bar tracks the current CHORD, not the key, and the
+  // change detector below then "modulates" on every IV chord.
+  //   fast ~2s  (a couple of bars -- fast enough to catch a real modulation)
+  //   slow ~10s (the established key)
+  state.chFast[k] = state.chFast[k] * 0.999989 + e * 0.000011;
+  state.chSlow[k] = state.chSlow[k] * 0.9999977 + e * 0.0000023;
+}
+
+// ---- 2. Match each chroma profile against all 24 keys, every 1024 samples.
+//         Krumhansl-style: correlate the normalized profile against a major
+//         and a minor template rotated to each of the 12 tonics.
+state.hop++;
+if (state.hop >= 1024) {
+  state.hop = 0;
+  // Templates: scale degrees weighted by tonal importance (tonic/dominant
+  // heaviest). Written inline as plain arrays -- no allocation per sample,
+  // this branch runs once every 1024 samples.
+  let majT = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+  let minT = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+  let bestKey = function (prof) {
+    let sum = 0;
+    for (let k = 0; k < 12; k++) sum += prof[k];
+    if (sum < 1e-9) return { tonic: -1, minor: 0, score: 0 };
+    let mean = sum / 12;
+    let bT = 0; let bM = 0; let bS = -1e9;
+    for (let t = 0; t < 12; t++) {
+      let sMaj = 0; let sMin = 0;
+      for (let k = 0; k < 12; k++) {
+        let v = prof[(t + k) % 12] - mean;
+        sMaj += v * majT[k];
+        sMin += v * minT[k];
+      }
+      if (sMaj > bS) { bS = sMaj; bT = t; bM = 0; }
+      if (sMin > bS) { bS = sMin; bT = t; bM = 1; }
+    }
+    return { tonic: bT, minor: bM, score: bS / (sum + 1e-9) };
+  };
+
+  let slow = bestKey(state.chSlow);
+  let fast = bestKey(state.chFast);
+
+  if (!state.locked) {
+    // Initial acquisition: require the SLOW profile to agree with itself for
+    // a sustained run of hops before trusting it, rather than snapping to
+    // whatever the very first sliver of accumulated energy suggests (that
+    // first reading is nearly always noise -- chSlow has barely begun to
+    // integrate). Sensitivity sets how many agreeing hops that takes: a
+    // deliberately SHORTER scale than modulation tracking below (roughly
+    // 0.2-1.4s vs. 1.4-4.6s) because establishing the starting key should
+    // happen quickly, while changing an already-established key should not.
+    if (slow.tonic >= 0) {
+      if (slow.tonic === state.lockCand && slow.minor === state.lockCandMinor) {
+        state.lockHold++;
+      } else {
+        state.lockCand = slow.tonic;
+        state.lockCandMinor = slow.minor;
+        state.lockHold = 1;
+      }
+      let needLock = 60 - Math.round(sensitivity * 50);
+      if (state.lockHold >= needLock) {
+        state.tonic = slow.tonic;
+        state.isMinor = slow.minor;
+        state.locked = 1;
+      }
+    }
+  }
+
+  // ---- 3. Modulation tracking. The fast profile disagreeing with the
+  //         current key is only a key CHANGE if it keeps disagreeing --
+  //         otherwise a borrowed chord or a passing tone would yank the
+  //         tuning mid-phrase. Sensitivity sets how many agreeing hops it
+  //         takes (about 1.4s at max sensitivity, 4.6s at min).
+  if (state.locked && fast.tonic >= 0 && (fast.tonic !== state.tonic || fast.minor !== state.isMinor)) {
+    if (fast.tonic === state.candTonic && fast.minor === state.candMinor) {
+      state.candHold++;
+    } else {
+      state.candTonic = fast.tonic;
+      state.candMinor = fast.minor;
+      state.candHold = 1;
+    }
+    // Sustained disagreement required before committing, in 1024-sample
+    // hops: ~1.4s at max sensitivity, ~4.6s at min. Deliberately longer
+    // than one chord so a IV or a borrowed chord can never read as a key
+    // change -- only a genuine modulation holds this long.
+    let need = 200 - Math.round(sensitivity * 140);
+    if (state.candHold >= need) {
+      state.tonic = state.candTonic;
+      state.isMinor = state.candMinor;
+      state.candTonic = -1;
+      state.candHold = 1;
+    }
+  } else {
+    state.candTonic = -1;
+  }
+}
+
+// ---- 4. Write the vocal into the ring and detect its pitch. The read head
+//         trails the write head by the lookahead, so the key applied to a
+//         sample was decided from sidechain audio that arrived LATER than it.
+state.buf[state.wp] = inputSample;
+state.wp = (state.wp + 1) % BUF;
+
+// Autocorrelation F0 on the vocal, every 512 samples, over the most recent
+// window (60-1000 Hz covers the sung range). Ported from the golden
+// autotune's proven detector -- an earlier version of this scanned for the
+// single GLOBAL max-correlation lag, which is exactly the bug this project's
+// own history warns about: a periodic tone autocorrelates just as strongly
+// at 2x/3x its true period, so a global argmax locks onto an octave-down
+// subharmonic about as often as the true fundamental, and a bare integer lag
+// (no interpolation) is only ~15 cents of resolution near 440Hz -- close
+// enough to a semitone boundary to flip which note the scale-snap thinks
+// it's hearing and send the correction a full semitone the WRONG way (this
+// is what a 45-cent-sharp probe tone measured: corrected to +48 cents
+// instead of the ~5 the golden recipe reaches with this same fix in place).
+if ((state.wp & 511) === 0) {
+  let N = 1024;
+  let start = (state.wp - N + BUF) % BUF;
+  let energy = 0;
+  for (let i = 0; i < N; i++) { let v = state.buf[(start + i) % BUF]; energy += v * v; }
+  if (energy > 1e-3) {
+    let corrAtLag = function (lag) {
+      let c = 0;
+      for (let i = 0; i < N - lag; i += 2) {
+        c += state.buf[(start + i) % BUF] * state.buf[(start + i + lag) % BUF];
+      }
+      return c / (energy + 1e-9);
+    };
+    // Scan from the SHORTEST lag upward and take the first genuine local
+    // peak -- not the global max -- so the true (highest) fundamental wins
+    // over any longer-period subharmonic.
+    let prevPrev = corrAtLag(42);
+    let prev = corrAtLag(43);
+    let foundLag = 0;
+    let foundCorr = 0;
+    let cM = 0;
+    let cP = 0;
+    for (let lag = 44; lag <= 735; lag++) {
+      let corr = corrAtLag(lag);
+      if (prev > prevPrev && prev >= corr && prev > 0.28) {
+        foundLag = lag - 1;
+        foundCorr = prev;
+        cM = prevPrev;
+        cP = corr;
+        break;
+      }
+      prevPrev = prev;
+      prev = corr;
+    }
+    if (foundLag > 0) {
+      // Parabolic interpolation across the peak's neighbors for sub-lag
+      // precision.
+      let denom = cM - 2 * foundCorr + cP;
+      let delta = Math.abs(denom) > 1e-9 ? 0.5 * (cM - cP) / denom : 0;
+      if (delta > 1) delta = 1;
+      if (delta < -1) delta = -1;
+      state.detF = 44100 / (foundLag + delta);
+      // A slow-tracking companion used ONLY for the discrete note decision
+      // below -- the raw per-hop detF still carries a few cents of detector
+      // jitter even after interpolation, and right at a semitone's 50-cent
+      // rounding boundary that jitter flips the chosen note. The correction
+      // ratio still tracks the raw, responsive state.detF; only nearMidi is
+      // judged from this smoothed one.
+      if (state.noteDetF === undefined) state.noteDetF = state.detF;
+      state.noteDetF += 0.08 * (state.detF - state.noteDetF);
+    }
+  }
+}
+
+// ---- 5. Snap the detected note into the CURRENT key's scale.
+let mask = state.isMinor ? 1453 : 2741;   // natural minor / major, 12-bit sets
+let midiRaw = 69 + 12 * Math.log(Math.max(40, state.detF) / 440) / Math.log(2);
+let midiSmoothed = 69 + 12 * Math.log(Math.max(40, state.noteDetF !== undefined ? state.noteDetF : state.detF) / 440) / Math.log(2);
+let nearMidi = Math.round(midiSmoothed);
+let rel = ((nearMidi - state.tonic) % 12 + 12) % 12;
+let snapRel = rel;
+for (let r = 0; r <= 6; r++) {
+  let up = (rel + r) % 12;
+  let dn = (rel - r + 12) % 12;
+  if ((mask >> up) & 1) { snapRel = up; break; }
+  if ((mask >> dn) & 1) { snapRel = dn; break; }
+}
+let snappedMidi = nearMidi - rel + snapRel;
+// Strength blends between the RAW sung pitch and the snapped one -- the raw
+// one, not the smoothed decision pitch, so a partial-strength setting still
+// tracks the singer's actual pitch responsively rather than the debounced
+// note estimate.
+let corrMidi = midiRaw + strength * (snappedMidi - midiRaw);
+let targetF = 440 * Math.pow(2, (corrMidi - 69) / 12);
+let target = targetF / (state.detF + 1e-9);
+if (target < 0.5) target = 0.5;
+if (target > 2) target = 2;
+
+let alpha = speed < 0.5 ? 1 : 1 - Math.exp(-1 / (speed * 0.001 * 44100 + 1));
+state.ratio += alpha * (target - state.ratio);
+
+// ---- 6. Resynthesize: two Hann-windowed read heads a half grain apart,
+//         free-running through the ring at the correction ratio -- the same
+//         proven mechanism the golden autotune uses. The heads were SEEDED
+//         once (in the init block) to start lookSamples behind the write
+//         head; from here they just advance like golden, no re-anchoring.
+let i0a = Math.floor(state.rp1) % BUF; if (i0a < 0) i0a += BUF;
+let i1a = (i0a + 1) % BUF;
+let fracA = state.rp1 - Math.floor(state.rp1);
+let sampleA = state.buf[i0a] * (1 - fracA) + state.buf[i1a] * fracA;
+let i0b = Math.floor(state.rp2) % BUF; if (i0b < 0) i0b += BUF;
+let i1b = (i0b + 1) % BUF;
+let fracB = state.rp2 - Math.floor(state.rp2);
+let sampleB = state.buf[i0b] * (1 - fracB) + state.buf[i1b] * fracB;
+let posA = state.rp1 % GRAIN; if (posA < 0) posA += GRAIN;
+let posB = state.rp2 % GRAIN; if (posB < 0) posB += GRAIN;
+let winA = 0.5 - 0.5 * Math.cos((2 * Math.PI * posA) / GRAIN);
+let winB = 0.5 - 0.5 * Math.cos((2 * Math.PI * posB) / GRAIN);
+let wet = sampleA * winA + sampleB * winB;
+state.rp1 += state.ratio; if (state.rp1 >= BUF) state.rp1 -= BUF; if (state.rp1 < 0) state.rp1 += BUF;
+state.rp2 += state.ratio; if (state.rp2 >= BUF) state.rp2 -= BUF; if (state.rp2 < 0) state.rp2 += BUF;
+
+// Dry is read from the separate constant-rate delay line so the Mix knob
+// stays phase-aligned with the wet signal no matter how far the pitch-shift
+// heads above have drifted from the nominal lookahead.
+let dry = state.buf[Math.floor(state.dp)];
+state.dp += 1; if (state.dp >= BUF) state.dp -= BUF;
+if (state.primed < state.primeTarget) { state.primed++; return 0; }
+return Math.tanh(dry * (1 - mix) + wet * mix);`,
+    // Same "vocals" tag as the golden default above, so neither outranks the
+    // other on source and isDefault decides -- this design only makes sense
+    // when a key source is actually asked for, and is reached through the
+    // explicit prompt route in offlineBuilder (wantsBeatLockedKey), the same
+    // way convolution and the external-sidechain compressor are.
+    tags: { topology: "beat-locked-autotune", character: ["transparent"], sources: ["vocals"], latency: "lookahead", cpu: "medium" },
+  },
+];
+
+export function topologiesForFamily(family: PluginFamily): DspTopology[] {
+  return DSP_TOPOLOGIES.filter((t) => t.family === family);
+}

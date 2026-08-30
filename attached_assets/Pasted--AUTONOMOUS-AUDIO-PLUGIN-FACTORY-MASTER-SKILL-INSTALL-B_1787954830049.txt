@@ -1,0 +1,1066 @@
+# AUTONOMOUS AUDIO PLUGIN FACTORY — MASTER SKILL INSTALL & BUILD PROMPT
+
+You are operating inside my autonomous audio-plugin/software generator project.
+
+Your job is to turn this Replit project into a highly autonomous engineering system capable of designing, implementing, testing, debugging, validating, and packaging professional-quality audio software and plugins.
+
+This is NOT a request to merely install a few coding skills.
+
+You must:
+
+1. Research the current Agent Skills ecosystem.
+2. Install the best existing skills that materially improve this system.
+3. Avoid irrelevant skills.
+4. Create custom audio/JUCE skills where no sufficiently good existing skill exists.
+5. Build an internal skill architecture so skills work together rather than conflicting.
+6. Verify that the installed skills actually exist and load correctly.
+7. Do not claim completion until the installation and verification have actually succeeded.
+
+---
+
+# PHASE 1 — INSPECT THE EXISTING PROJECT
+
+Before changing anything:
+
+* Inspect the complete repository.
+* Determine the current architecture.
+* Determine whether this project already has:
+
+  * `.agents/`
+  * `skills/`
+  * `.claude/`
+  * `AGENTS.md`
+  * `CLAUDE.md`
+  * `SKILL.md`
+  * JUCE
+  * CMake
+  * C++
+  * TypeScript
+  * React
+  * Node
+  * Python
+  * testing infrastructure
+  * plugin build infrastructure
+  * plugin validation
+  * DSP modules
+  * plugin templates
+  * agent orchestration
+  * model routing
+  * task queues
+  * subagents
+  * logging
+  * persistent memory
+
+DO NOT overwrite existing functionality blindly.
+
+Create a short internal assessment before modifying the project.
+
+---
+
+# PHASE 2 — INSTALL THE BEST GENERAL AGENT SKILLS
+
+Use the current Skills ecosystem and verify each package before installing it.
+
+Use the `skills` CLI where appropriate:
+
+npx skills add <owner>/<repo>
+
+Do NOT blindly install random skills.
+
+Prioritize skills that improve autonomous software engineering.
+
+Install the best current versions of skills corresponding to these capabilities:
+
+## CORE AGENT ENGINEERING
+
+### REQUIRED
+
+* find-skills
+* tdd
+* improve-codebase-architecture
+* code-review
+* systematic-debugging
+* writing-plans
+* brainstorming
+* subagent-driven-development
+* resolving-merge-conflicts
+* git guardrails / safe git workflow
+* verification / completion verification
+* diagnosing bugs
+* implementation / task execution
+* research / technical research
+* skill creation / skill writing
+
+Where multiple repositories provide the same capability:
+
+1. Prefer official or highly trusted sources.
+2. Prefer actively maintained repositories.
+3. Prefer skills with strong adoption.
+4. Prefer skills whose instructions are specific rather than vague.
+5. Do not install duplicate/conflicting implementations unless there is a clear reason.
+
+---
+
+# PHASE 3 — AUDIO/JUCE RESEARCH
+
+Now research the current ecosystem for existing skills specifically related to:
+
+* JUCE
+* C++
+* audio DSP
+* VST3
+* AU
+* CLAP
+* CMake
+* realtime audio
+* DSP testing
+* plugin development
+* audio engineering
+* plugin validation
+* audio UI
+* Web Audio
+* Rust audio
+* Faust
+* RT-safe C++
+* SIMD
+* FFT
+* oversampling
+* filters
+* dynamics processing
+* synthesis
+* plugin packaging
+
+Search the current Skills ecosystem rather than assuming a skill exists.
+
+If a sufficiently good existing skill exists, install it.
+
+If it does NOT exist, create a custom skill.
+
+Do not create a custom skill merely because an existing high-quality skill already covers the requirement.
+
+---
+
+# PHASE 4 — CREATE THE CUSTOM AUDIO ENGINEERING SKILL STACK
+
+Create a modular collection of specialized skills.
+
+DO NOT create one giant `audio-plugin-super-skill`.
+
+Each skill must have a focused responsibility.
+
+Use this architecture:
+
+.agents/
+└── skills/
+
+```
+├── audio-plugin-architecture/
+│   └── SKILL.md
+│
+├── juce-development/
+│   └── SKILL.md
+│
+├── realtime-audio-cpp/
+│   └── SKILL.md
+│
+├── audio-dsp-engineering/
+│   └── SKILL.md
+│
+├── dsp-algorithm-design/
+│   └── SKILL.md
+│
+├── dsp-testing/
+│   └── SKILL.md
+│
+├── plugin-parameters/
+│   └── SKILL.md
+│
+├── plugin-state-management/
+│   └── SKILL.md
+│
+├── plugin-ui-design/
+│   └── SKILL.md
+│
+├── audio-performance-optimization/
+│   └── SKILL.md
+│
+├── cmake-audio-builds/
+│   └── SKILL.md
+│
+├── plugin-validation/
+│   └── SKILL.md
+│
+├── pluginval/
+│   └── SKILL.md
+│
+├── audio-plugin-release/
+│   └── SKILL.md
+│
+├── reference-implementation-research/
+│   └── SKILL.md
+│
+├── audio-code-review/
+│   └── SKILL.md
+│
+├── realtime-safety-review/
+│   └── SKILL.md
+│
+└── audio-regression-testing/
+    └── SKILL.md
+```
+
+---
+
+# PHASE 5 — JUCE DEVELOPMENT SKILL
+
+Create `juce-development`.
+
+It must teach the agent professional JUCE development including:
+
+* AudioProcessor
+* AudioProcessorEditor
+* AudioProcessorValueTreeState
+* parameter architecture
+* ValueTree
+* state serialization
+* preset systems
+* AudioBuffer
+* MidiBuffer
+* buses
+* bus layouts
+* sample-rate changes
+* block-size changes
+* channel-count changes
+* parameter automation
+* parameter smoothing
+* attachments
+* DSP module architecture
+* AudioProcessorGraph
+* JUCE DSP classes
+* GUI/audio-thread separation
+* threading
+* timers
+* memory management
+* plugin formats
+* standalone applications
+* CMake
+* Projucer where legacy compatibility matters
+
+Prefer modern JUCE/CMake architecture.
+
+Do not teach obsolete patterns as the preferred architecture.
+
+---
+
+# PHASE 6 — REALTIME AUDIO C++ SKILL
+
+This skill is CRITICAL.
+
+Create `realtime-audio-cpp`.
+
+The skill must aggressively enforce realtime-safe programming.
+
+The agent must understand that the audio callback is a realtime execution environment.
+
+Explicitly identify dangerous operations including:
+
+* dynamic allocation
+* deallocation
+* blocking mutexes
+* filesystem operations
+* network operations
+* logging that can block
+* UI operations
+* unpredictable container growth
+* expensive synchronization
+* unbounded loops
+* unnecessary locks
+* memory contention
+
+Teach:
+
+* lock-free communication
+* atomics
+* SPSC queues
+* preallocation
+* fixed-size buffers
+* realtime-safe ownership
+* denormal handling
+* NaN/Inf protection
+* SIMD
+* cache behavior
+* branch behavior
+* CPU budgeting
+* audio thread priorities
+* parameter smoothing
+
+Every generated DSP implementation should be reviewed against this skill.
+
+---
+
+# PHASE 7 — AUDIO DSP ENGINEERING
+
+Create `audio-dsp-engineering`.
+
+Cover:
+
+## FILTERS
+
+* lowpass
+* highpass
+* bandpass
+* notch
+* shelving
+* peak filters
+* state variable filters
+* biquads
+* ladder filters
+* zero-delay feedback where appropriate
+
+## DYNAMICS
+
+* compressor
+* limiter
+* expander
+* gate
+* multiband dynamics
+* upward compression
+* transient shaping
+* sidechain detection
+* envelope followers
+
+## SATURATION
+
+* waveshaping
+* soft clipping
+* hard clipping
+* tape-style saturation
+* tube-style nonlinearities
+* diode-style nonlinearities
+* asymmetric distortion
+* harmonic generation
+* oversampling
+* anti-aliasing
+
+## TIME-BASED
+
+* delay
+* ping-pong delay
+* chorus
+* flanger
+* phaser
+* comb filtering
+* algorithmic reverb
+* convolution reverb
+
+## FREQUENCY DOMAIN
+
+* FFT
+* STFT
+* windowing
+* spectral processing
+* phase handling
+* overlap-add
+* overlap-save
+
+## SYNTHESIS
+
+* oscillators
+* wavetable
+* subtractive
+* FM
+* AM
+* granular
+* envelopes
+* LFO
+* modulation matrix
+
+## STEREO
+
+* stereo width
+* M/S
+* correlation
+* phase
+* panning
+* balance
+* mono compatibility
+
+Every algorithm should include:
+
+* mathematical explanation
+* implementation considerations
+* numerical stability considerations
+* CPU considerations
+* realtime considerations
+* testing strategy
+
+---
+
+# PHASE 8 — DSP TESTING
+
+Create `dsp-testing`.
+
+The agent must generate automated tests for DSP.
+
+Tests should include where applicable:
+
+* impulse response
+* frequency response
+* step response
+* DC response
+* gain accuracy
+* phase behavior
+* latency
+* sample-rate invariance
+* block-size invariance
+* channel behavior
+* parameter boundaries
+* parameter automation
+* NaN detection
+* Inf detection
+* denormal behavior
+* clipping behavior
+* noise floor
+* THD
+* THD+N
+* oversampling correctness
+* bypass correctness
+
+Do not accept "it sounds right" as the only validation.
+
+---
+
+# PHASE 9 — PLUGIN PARAMETERS
+
+Create `plugin-parameters`.
+
+Standardize:
+
+* parameter IDs
+* naming
+* ranges
+* normalized values
+* skew
+* units
+* defaults
+* automation
+* smoothing
+* metadata
+* state persistence
+* preset compatibility
+* version compatibility
+
+The generator should avoid breaking parameter IDs after release.
+
+---
+
+# PHASE 10 — PLUGIN STATE
+
+Create `plugin-state-management`.
+
+Cover:
+
+* APVTS
+* ValueTree
+* serialization
+* preset loading
+* preset saving
+* version migration
+* backwards compatibility
+* corrupt state handling
+* parameter restoration
+* deterministic initialization
+
+---
+
+# PHASE 11 — AUDIO UI
+
+Create `plugin-ui-design`.
+
+The UI skill must prevent generic AI-generated "dark rectangle + sliders" interfaces.
+
+Teach:
+
+* professional audio UI hierarchy
+* meters
+* knobs
+* sliders
+* switches
+* buttons
+* waveform displays
+* spectrum analyzers
+* gain reduction meters
+* modulation displays
+* responsive layout
+* HiDPI
+* DPI scaling
+* accessibility
+* keyboard interaction
+* mouse interaction
+* hover states
+* drag behavior
+* double-click reset
+* visual feedback
+* parameter grouping
+* visual hierarchy
+
+Prioritize professional audio software aesthetics inspired by high-quality commercial plugin design without copying proprietary designs.
+
+---
+
+# PHASE 12 — CMAKE / BUILD SYSTEM
+
+Create `cmake-audio-builds`.
+
+Standardize:
+
+* modern CMake
+* JUCE integration
+* reproducible builds
+* Debug builds
+* Release builds
+* sanitizers
+* compiler warnings
+* LTO where appropriate
+* platform detection
+* VST3
+* AU where supported
+* standalone
+* CLAP where appropriate
+* architecture selection
+* dependency management
+
+The system must make builds reproducible.
+
+---
+
+# PHASE 13 — PLUGIN VALIDATION
+
+Create `plugin-validation` and `pluginval`.
+
+The factory must treat validation as a mandatory release gate.
+
+Pipeline:
+
+BUILD
+→ TEST
+→ PLUGIN VALIDATION
+→ REVIEW
+→ RELEASE
+
+Use pluginval when available.
+
+Test:
+
+* plugin discovery
+* initialization
+* editor
+* audio processing
+* state
+* automation
+* parameters
+* bus configuration
+* channel configuration
+* sample rates
+* block sizes
+* stress conditions
+* invalid/extreme parameter values
+
+A plugin is NOT considered complete merely because it compiles.
+
+---
+
+# PHASE 14 — AUDIO PERFORMANCE OPTIMIZATION
+
+Create `audio-performance-optimization`.
+
+Teach:
+
+* profiling
+* CPU measurement
+* SIMD
+* vectorization
+* cache locality
+* memory layout
+* branch reduction
+* denormal prevention
+* oversampling CPU tradeoffs
+* latency analysis
+* allocation analysis
+* realtime scheduling
+
+Optimization must happen AFTER correctness unless a design constraint requires otherwise.
+
+Never optimize blindly.
+
+Measure first.
+
+---
+
+# PHASE 15 — REFERENCE IMPLEMENTATION RESEARCH
+
+Create `reference-implementation-research`.
+
+Before inventing complicated DSP algorithms:
+
+1. Identify established algorithms.
+2. Research technical references.
+3. Research authoritative documentation.
+4. Compare multiple approaches.
+5. Identify numerical pitfalls.
+6. Select an implementation strategy.
+7. Document why the architecture was selected.
+8. Create tests based on expected behavior.
+
+Do not hallucinate DSP mathematics.
+
+Do not fabricate citations.
+
+If external research is available, prefer authoritative technical sources, academic literature, official SDK/JUCE documentation, and reputable open-source implementations.
+
+---
+
+# PHASE 16 — AUDIO CODE REVIEW
+
+Create `audio-code-review`.
+
+Every generated plugin should be reviewed for:
+
+* C++ correctness
+* JUCE correctness
+* DSP correctness
+* realtime safety
+* numerical stability
+* thread safety
+* parameter correctness
+* state correctness
+* UI correctness
+* CPU usage
+* memory behavior
+* portability
+* maintainability
+
+The reviewer must be able to reject code.
+
+Do not make the reviewer merely praise the implementation.
+
+---
+
+# PHASE 17 — REALTIME SAFETY REVIEW
+
+Create `realtime-safety-review`.
+
+This should specifically inspect every audio callback and DSP processing path.
+
+Flag:
+
+* allocations
+* locks
+* filesystem access
+* network calls
+* UI interaction
+* unpredictable execution
+* unsafe shared state
+* expensive logging
+* unbounded processing
+
+Treat violations as high severity.
+
+---
+
+# PHASE 18 — AUDIO REGRESSION TESTING
+
+Create `audio-regression-testing`.
+
+The factory should save reference outputs for DSP components where practical.
+
+When DSP code changes:
+
+INPUT
+→ OLD REFERENCE
+→ NEW IMPLEMENTATION
+→ DIFFERENCE ANALYSIS
+
+Detect:
+
+* unexpected waveform changes
+* gain changes
+* phase changes
+* latency changes
+* noise changes
+* stability changes
+* parameter behavior changes
+
+Allow intentional changes to update reference data only with explicit reasoning.
+
+---
+
+# PHASE 19 — PLUGIN RELEASE ENGINEERING
+
+Create `audio-plugin-release`.
+
+Handle:
+
+* semantic versioning
+* release builds
+* artifact organization
+* plugin bundles
+* installers
+* presets
+* documentation
+* changelogs
+* checksums
+* signing where configured
+* notarization where configured
+* release validation
+
+Never publish a release artifact that hasn't passed the validation pipeline.
+
+---
+
+# PHASE 20 — BUILD THE FACTORY'S AUTONOMOUS DEVELOPMENT LOOP
+
+After installing and creating the skills, implement or improve the agent workflow so it follows:
+
+USER REQUEST
+↓
+REQUIREMENTS ANALYSIS
+↓
+TECHNICAL RESEARCH
+↓
+ARCHITECTURE
+↓
+IMPLEMENTATION PLAN
+↓
+SCAFFOLD
+↓
+DSP IMPLEMENTATION
+↓
+PARAMETERS
+↓
+STATE
+↓
+UI
+↓
+UNIT TESTS
+↓
+DSP TESTS
+↓
+BUILD
+↓
+PLUGIN VALIDATION
+↓
+REALTIME SAFETY REVIEW
+↓
+CODE REVIEW
+↓
+REGRESSION TEST
+↓
+FIX FAILURES
+↓
+REBUILD
+↓
+REVALIDATE
+↓
+PACKAGE
+↓
+DOCUMENT
+↓
+FINAL VERIFICATION
+
+The system must automatically iterate when a stage fails.
+
+---
+
+# PHASE 21 — FAILURE HANDLING
+
+Use systematic debugging.
+
+When something fails:
+
+1. Capture the exact error.
+2. Reproduce it.
+3. Identify the failing subsystem.
+4. Inspect relevant code.
+5. Form a hypothesis.
+6. Make the smallest justified change.
+7. Rebuild.
+8. Run the relevant test.
+9. Run regression tests.
+10. Continue only when evidence supports the fix.
+
+DO NOT repeatedly make random changes.
+
+After repeated failures, reconsider the architecture.
+
+---
+
+# PHASE 22 — SUBAGENT ARCHITECTURE
+
+If the existing Replit architecture supports specialized agents/subagents, create logical roles:
+
+### Architect Agent
+
+Owns system architecture.
+
+### DSP Engineer
+
+Owns algorithms and DSP implementation.
+
+### JUCE Engineer
+
+Owns plugin architecture and framework integration.
+
+### Realtime Engineer
+
+Owns audio-thread safety.
+
+### UI Engineer
+
+Owns plugin interface.
+
+### Test Engineer
+
+Owns automated tests.
+
+### Validation Engineer
+
+Owns pluginval and compatibility validation.
+
+### Code Reviewer
+
+Reviews implementation independently.
+
+### Release Engineer
+
+Owns packaging and release artifacts.
+
+Do not allow every agent to modify everything indiscriminately.
+
+Use clear ownership boundaries.
+
+---
+
+# PHASE 23 — FACTORY QUALITY GATES
+
+Create explicit gates.
+
+## GATE 1 — ARCHITECTURE
+
+Must have:
+
+* requirements
+* architecture
+* DSP plan
+* parameter plan
+* test plan
+
+## GATE 2 — IMPLEMENTATION
+
+Must:
+
+* compile
+* pass unit tests
+* pass DSP tests
+
+## GATE 3 — REALTIME
+
+Must:
+
+* pass realtime safety review
+* contain no known audio-thread violations
+
+## GATE 4 — PLUGIN
+
+Must:
+
+* load
+* process audio
+* expose parameters
+* save/restore state
+* handle automation
+
+## GATE 5 — VALIDATION
+
+Must pass plugin validation.
+
+## GATE 6 — RELEASE
+
+Must:
+
+* produce reproducible release artifacts
+* contain documentation
+* contain version information
+* pass final verification
+
+---
+
+# PHASE 24 — CREATE A FACTORY SKILL REGISTRY
+
+Create a machine-readable registry describing each installed skill.
+
+For example:
+
+skills/registry.json
+
+Each skill should contain:
+
+* name
+* category
+* purpose
+* dependencies
+* triggers
+* priority
+* compatible workflows
+* source
+* version if available
+* whether it is external or custom
+
+This allows the autonomous agent to determine which skills should be activated for a task.
+
+---
+
+# PHASE 25 — SKILL CONFLICT MANAGEMENT
+
+Do not allow multiple skills to issue contradictory instructions.
+
+Establish priority:
+
+1. Safety / realtime correctness
+2. Project architecture
+3. Audio correctness
+4. Tests
+5. Validation
+6. Performance
+7. UI
+8. Convenience
+
+If a generic coding skill conflicts with an audio-specific rule, the audio-specific rule wins.
+
+---
+
+# PHASE 26 — DO NOT INSTALL IRRELEVANT SKILLS
+
+Do NOT fill the project with:
+
+* marketing skills
+* social media skills
+* video generation
+* unrelated cloud infrastructure
+* unrelated databases
+* unrelated mobile development
+* unrelated enterprise software
+* random framework skills
+
+unless the existing project actually requires them.
+
+The goal is a specialized **AUTONOMOUS AUDIO SOFTWARE FACTORY**, not a generic AI toolbox.
+
+---
+
+# PHASE 27 — VERIFY EVERYTHING
+
+After installation:
+
+1. List installed skills.
+2. Confirm every expected skill exists.
+3. Confirm every custom skill has valid `SKILL.md`.
+4. Check for malformed frontmatter.
+5. Check for duplicate skills.
+6. Check for contradictory instructions.
+7. Check that the agent can discover the skills.
+8. Run a small test task.
+9. Verify the correct skills activate.
+10. Report failures honestly.
+
+Use the skills CLI to verify installation and updates where appropriate.
+
+Do not claim success without actually checking.
+
+---
+
+# PHASE 28 — RUN A FACTORY TEST
+
+After everything is installed, perform a small non-destructive test.
+
+Ask the internal agent to design a simple plugin specification:
+
+"Create a JUCE VST3 gain plugin with input gain, output gain, bypass, meters, state persistence, parameter automation, and a professional UI."
+
+Do NOT necessarily build the final plugin yet.
+
+Instead verify that the agent correctly:
+
+* activates the architecture skill
+* activates JUCE skill
+* activates realtime skill
+* activates DSP skill
+* activates parameter skill
+* activates UI skill
+* activates testing skill
+* creates a plan
+* creates validation requirements
+* identifies realtime constraints
+
+Then report what happened.
+
+---
+
+# FINAL REQUIREMENT
+
+Do not stop after installing the generic skills.
+
+The ultimate objective is:
+
+## TURN THIS REPLIT PROJECT INTO AN AUTONOMOUS PROFESSIONAL AUDIO SOFTWARE FACTORY.
+
+It should eventually be capable of taking a request such as:
+
+"Make me a warm analog-style tape saturation plugin with adjustable drive, bias, tape speed, wow/flutter, noise, mix, oversampling, and a premium interface."
+
+and autonomously produce:
+
+1. requirements
+2. technical research
+3. DSP architecture
+4. parameter architecture
+5. JUCE project
+6. DSP implementation
+7. UI
+8. tests
+9. validation
+10. debugging
+11. optimization
+12. release build
+13. documentation
+
+with minimal human intervention.
+
+Do not merely tell me how to do these things.
+
+**DO THEM IN THIS REPLIT PROJECT.**
+
+Begin now.
+
+First inspect the project.
+
+Then research the current skills ecosystem.
+
+Then install the best relevant existing skills.
+
+Then create the missing audio/JUCE skills.
+
+Then integrate them.
+
+Then verify everything.
+
+At the end, give me a concise report containing:
+
+* skills installed
+* custom skills created
+* files created/modified
+* conflicts found
+* tests performed
+* validation performed
+* remaining problems
+* recommended next step for making the factory more autonomous

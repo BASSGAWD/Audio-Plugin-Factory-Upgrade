@@ -25,6 +25,7 @@ import { AudioPlugin, ChatMessage, PluginParameter } from "../types";
 import type { ElementNote } from "../utils/editPass";
 import Visualizer from "./Visualizer";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
+import RigStack from "./RigStack";
 import GenerativeFaceplate from "./GenerativeFaceplate";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./BuildProgressBar";
 import { PluginManual } from "./PluginManual";
@@ -763,6 +764,26 @@ export default function SimpleStudio({
                   // Percent bounds preserve the authored artboard geometry as
                   // this compact studio surface responsively changes width.
                   if (resolved) {
+                    // Amp/cab/mic previously each rendered individually at
+                    // layoutShowpieceRow's flat-row coordinates -- a
+                    // 100px dead gap between cab and mic, no vertical
+                    // relationship at all. Detect the rig triple across
+                    // ALL groups (not just one, since which hierarchy
+                    // group they land in isn't guaranteed) and render it
+                    // as ONE composed RigStack spanning their union bounds
+                    // instead, skipping their individual per-param cells.
+                    const rigTypes = new Set(["amp", "cab", "mic", "mic_stand"]);
+                    const rigParams = plugin.parameters.filter((p) => rigTypes.has(p.controlType || ""));
+                    const rigIds = new Set(rigParams.map((p) => p.id));
+                    const rigBounds = rigParams
+                      .map((p) => resolved.controls.find((c) => c.parameterId === p.id)?.bounds)
+                      .filter((b): b is NonNullable<typeof b> => Boolean(b));
+                    const rigUnion = rigBounds.length > 0 ? {
+                      x: Math.min(...rigBounds.map((b) => b.x)),
+                      y: Math.min(...rigBounds.map((b) => b.y)),
+                      right: Math.max(...rigBounds.map((b) => b.x + b.width)),
+                      bottom: Math.max(...rigBounds.map((b) => b.y + b.height)),
+                    } : null;
                     return (
                       <div
                         className="relative w-full"
@@ -772,6 +793,7 @@ export default function SimpleStudio({
                         {resolved.hierarchy.map((group) => (
                           <div key={group.id} role="group" aria-label={group.label}>
                             {group.parameterIds.map((id) => {
+                              if (rigIds.has(id)) return null;
                               const control = resolved.controls.find((c) => c.parameterId === id);
                               const p = plugin.parameters.find((candidate) => candidate.id === id);
                               if (!control || !p) return null;
@@ -789,6 +811,29 @@ export default function SimpleStudio({
                             })}
                           </div>
                         ))}
+                        {rigUnion && (
+                          <div
+                            data-rig-slot="true"
+                            className="absolute"
+                            style={{
+                              left: `${(rigUnion.x / resolved.artboard.width) * 100}%`,
+                              top: `${(rigUnion.y / resolved.artboard.height) * 100}%`,
+                              width: `${((rigUnion.right - rigUnion.x) / resolved.artboard.width) * 100}%`,
+                              height: `${((rigUnion.bottom - rigUnion.y) / resolved.artboard.height) * 100}%`,
+                            }}
+                          >
+                            {wrapAnnotatable(
+                              rigParams.find((p) => p.controlType === "amp") ?? rigParams[0],
+                              <RigStack
+                                ampParam={rigParams.find((p) => p.controlType === "amp")}
+                                cabParam={rigParams.find((p) => p.controlType === "cab")}
+                                micParam={rigParams.find((p) => p.controlType === "mic" || p.controlType === "mic_stand")}
+                                allParams={plugin.parameters}
+                                onChange={onSliderChange}
+                              />
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   }
@@ -796,11 +841,26 @@ export default function SimpleStudio({
                   return (
                     <>
                       {showpiece.length > 0 && (
-                        <div className="flex flex-col gap-2">
-                          {showpiece.map((p) =>
-                            wrapAnnotatable(p, <PluginControl param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />)
-                          )}
-                        </div>
+                        // showpiece is ALWAYS exactly amp/cab/mic/mic_stand
+                        // (groupParamsForPlayback's own definition) -- a
+                        // single RigStack replaces what used to be a plain
+                        // flex-col stack (amp-over-cab-over-mic only by
+                        // coincidental array order, not an engineered rig).
+                        // Annotate mode previously targeted each of the 3
+                        // individually; RigStack composes them into one
+                        // unit, so wrapAnnotatable now targets the rig as a
+                        // whole (amp, falling back to cab, then mic) rather
+                        // than losing the feature here silently.
+                        wrapAnnotatable(
+                          showpiece.find((p) => p.controlType === "amp") ?? showpiece[0],
+                          <RigStack
+                            ampParam={showpiece.find((p) => p.controlType === "amp")}
+                            cabParam={showpiece.find((p) => p.controlType === "cab")}
+                            micParam={showpiece.find((p) => p.controlType === "mic" || p.controlType === "mic_stand")}
+                            allParams={plugin.parameters}
+                            onChange={onSliderChange}
+                          />
+                        )
                       )}
 
                       {visualizers.length > 0 && (

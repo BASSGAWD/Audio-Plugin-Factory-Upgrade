@@ -7,6 +7,7 @@ import RefineControl from "../src/components/RefineControl";
 import { CustomKnob } from "../src/components/UIDesigner";
 import { PluginManual, PluginManualContent } from "../src/components/PluginManual";
 import { PluginControl } from "../src/components/PluginControl";
+import RigStack from "../src/components/RigStack";
 import { resolvePanelStyle } from "../src/utils/uiRenderPatterns";
 import { resolveChassisProfile } from "../src/utils/chassisProfiles";
 import { resolveVisualIdentity } from "../src/utils/visualIdentity";
@@ -263,6 +264,42 @@ function knobParam(overrides: Partial<PluginParameter> = {}): PluginParameter {
     <PluginControl param={ctrlParam({ controlType: "meter" as any, name: "Meter", min: -60, max: 0, value: -60 })} allParams={[]} onChange={noop} />
   );
   check("MeterControl: lit segment count actually tracks the value (decisive gap between empty and full)", meterFull !== meterEmpty && meterEmpty.includes("#10b98122"));
+}
+
+/* ---- Track 3c: RigStack composes amp/cab/mic into a real rig instead of
+ * layoutShowpieceRow's flat row (100px dead gap between cab and mic, zero
+ * vertical relationship). Decisive check: the rig actually places the head
+ * ABOVE the cab -- relative geometry, not just "both are present somewhere
+ * in the markup" (which a flat row would also satisfy). RigStack has no
+ * absolute positioning of its own, so in plain document flow, earlier DOM
+ * order genuinely means "renders above" -- a legitimate, testable proxy for
+ * relative geometry from static server-rendered markup. ---- */
+{
+  const ctrlParam = (overrides: Partial<PluginParameter> = {}): PluginParameter =>
+    ({ id: "p", name: "Test", min: 0, max: 1, value: 0, defaultValue: 0, unit: "", ...overrides } as PluginParameter);
+  const noop = () => {};
+  const ampParam = ctrlParam({ id: "amp_head", name: "Amp", controlType: "amp" as any });
+  const cabParam = ctrlParam({ id: "cabinet", name: "Cab", controlType: "cab" as any, cabSize: "4x12" as any });
+  const micParam = ctrlParam({ id: "mic_position", name: "Mic", controlType: "mic" as any });
+  const rigHtml = renderToStaticMarkup(
+    <RigStack ampParam={ampParam} cabParam={cabParam} micParam={micParam} allParams={[ampParam, cabParam, micParam]} onChange={noop} />
+  );
+  const ampIdx = rigHtml.indexOf('data-amp-head="true"');
+  const cabIdx = rigHtml.indexOf('data-cab-size="4x12"');
+  check("RigStack: renders the real amp head and cabinet chassis, not placeholders", ampIdx >= 0 && cabIdx >= 0);
+  check("RigStack: places the head ABOVE the cab (relative geometry, not just presence)", ampIdx >= 0 && cabIdx >= 0 && ampIdx < cabIdx);
+  check("RigStack: mic strip present in full mode", /Mic/.test(rigHtml));
+
+  const rigCompactHtml = renderToStaticMarkup(
+    <RigStack ampParam={ampParam} cabParam={cabParam} micParam={micParam} allParams={[ampParam, cabParam, micParam]} onChange={noop} compact />
+  );
+  check("RigStack: compact mode hides the mic strip (sized for the Canvas card, not the full rig)", !/cursor-ew-resize/.test(rigCompactHtml));
+  check("RigStack: compact mode is non-interactive (pointer-events disabled so it doesn't fight the card's own drag)", /pointer-events-none/.test(rigCompactHtml));
+
+  // Amp alone (no cab) shouldn't crash or render a cab-shaped shadow --
+  // RigStack must handle a partial rig, not just the full triple.
+  const ampOnlyHtml = renderToStaticMarkup(<RigStack ampParam={ampParam} allParams={[ampParam]} onChange={noop} />);
+  check("RigStack: renders sensibly with only an amp param (no cab/mic)", /data-amp-head="true"/.test(ampOnlyHtml) && !/data-cab-size/.test(ampOnlyHtml));
 }
 
 /* ---- Panel material: the faceplate paints a REAL hardware substrate.

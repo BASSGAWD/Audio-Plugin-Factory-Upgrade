@@ -21,7 +21,7 @@ export const ResolvedKnobContext = createContext<Record<string, VisualIdentityRe
  * fixed-layout, interact-to-play widgets.
  */
 
-interface ControlProps {
+export interface ControlProps {
   param: PluginParameter;
   allParams: PluginParameter[];
   onChange: (paramId: string, value: number) => void;
@@ -433,7 +433,10 @@ function PadControl({ param, onChange }: ControlProps) {
   );
 }
 
-function AmpHeadControl({ param }: ControlProps) {
+// Exported so RigStack.tsx can compose these three into a real amp rig
+// (head sitting on top of cab, mic in front) instead of PluginControl's own
+// dispatch switch positioning them as independent, uncoordinated boxes.
+export function AmpHeadControl({ param }: ControlProps) {
   // The hero of every amp_sim build. A real head is a tolex-wrapped BOX with
   // a recessed, brightly-lit control fascia across its face and a jewel lamp
   // -- not a flat card with text on it, which is what this used to render.
@@ -530,7 +533,7 @@ const TOLEX_CSS: Record<string, { color: string; image: string; size: string }> 
   metalgrid: { color: "#2c2f34", image: "repeating-linear-gradient(0deg, rgba(255,255,255,0.07) 0 1px, transparent 1px 6px), repeating-linear-gradient(90deg, rgba(0,0,0,0.4) 0 1px, transparent 1px 6px)", size: "12px 12px, 12px 12px" },
 };
 
-function CabinetControl({ param }: ControlProps) {
+export function CabinetControl({ param }: ControlProps) {
   // A real cabinet: tolex-covered box, grille cloth stretched over the
   // baffle, and the ACTUAL number of speakers its cabSize names -- a 4x12
   // shows four drivers, a 1x12 shows one. Both cabSize and ampTolexPattern
@@ -615,7 +618,7 @@ function CabinetControl({ param }: ControlProps) {
   );
 }
 
-function MicPositionControl({ param, onChange }: ControlProps) {
+export function MicPositionControl({ param, onChange }: ControlProps) {
   // Simple Mode can only drive a parameter's numeric value (not the extra
   // valX/valY fine-tuning fields the Pro Designer exposes), so this renders
   // as a single functional "distance from cone" drag instead of a 2D pad --

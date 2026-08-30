@@ -34,6 +34,7 @@ import {
   CARD_FOOTPRINT_GAP,
 } from "../utils/canvasFactory";
 import { PluginControl, groupParamsForPlayback } from "./PluginControl";
+import RigStack from "./RigStack";
 import GenerativeFaceplate from "./GenerativeFaceplate";
 import { PluginManual } from "./PluginManual";
 import { resolveSkinFontFamily } from "../utils/customSkin";
@@ -155,6 +156,14 @@ const CanvasPluginCard: React.FC<CardProps> = ({
       : regular.slice(0, 8);
   }, [grouped, plugin?.resolvedUi]);
   const hasShowpiece = (grouped?.showpiece.length ?? 0) > 0 || (grouped?.pads.length ?? 0) > 0;
+  // Just the amp/cab (mic omitted in compact mode -- RigStack itself hides
+  // it when compact) subset of showpiece, so a pad-only build (no rig)
+  // doesn't render an empty/pointless RigStack above the "open in Studio"
+  // link.
+  const rigShowpiece = useMemo(
+    () => (grouped?.showpiece ?? []).filter((p) => p.controlType === "amp" || p.controlType === "cab"),
+    [grouped]
+  );
 
   const building = card.status === "building" || card.status === "queued";
   const currentStageIdx = STAGE_SEQUENCE.indexOf((card.stage as (typeof STAGE_SEQUENCE)[number]) ?? "spec");
@@ -344,6 +353,24 @@ const CanvasPluginCard: React.FC<CardProps> = ({
                   isPlaying={live}
                 />
               ))}
+            </div>
+          )}
+          {rigShowpiece.length > 0 && (
+            // A real, if non-interactive, preview of the rig -- previously
+            // the card hid amp/cab/mic entirely behind the link-out button
+            // below (no compact showpiece rendering existed on this card
+            // at all). pointer-events-none (set inside RigStack's own
+            // compact mode) keeps it from fighting the card's own drag
+            // gesture the way the interactive knob grid above already
+            // guards against via onPointerDown/stopPropagation.
+            <div className="max-w-[180px] mx-auto">
+              <RigStack
+                ampParam={rigShowpiece.find((p) => p.controlType === "amp")}
+                cabParam={rigShowpiece.find((p) => p.controlType === "cab")}
+                allParams={plugin.parameters}
+                onChange={onParamChange}
+                compact
+              />
             </div>
           )}
           {hasShowpiece && (

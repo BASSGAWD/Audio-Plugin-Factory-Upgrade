@@ -6,6 +6,11 @@
  * OpenAPI spec version: 0.2.0
  */
 
-export interface HealthStatus {
-  status: string;
-}
+export type BenchmarkReportStatus = typeof BenchmarkReportStatus[keyof typeof BenchmarkReportStatus];
+
+
+export const BenchmarkReportStatus = {
+  passed: 'passed',
+  failed: 'failed',
+  warning: 'warning',
+} as const;

@@ -6,6 +6,12 @@
  * OpenAPI spec version: 0.2.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface CreateOrganizationRequest {
+  /**
+     * @minLength 1
+     * @maxLength 120
+     */
+  name: string;
+  /** @pattern ^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$ */
+  slug: string;
 }

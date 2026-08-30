@@ -6,6 +6,12 @@
  * OpenAPI spec version: 0.2.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface CreateProjectRequest {
+  /**
+     * @minLength 1
+     * @maxLength 160
+     */
+  name: string;
+  /** @maxLength 2000 */
+  description?: string;
 }

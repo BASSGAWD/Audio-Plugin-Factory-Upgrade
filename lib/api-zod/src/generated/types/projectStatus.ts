@@ -6,6 +6,10 @@
  * OpenAPI spec version: 0.2.0
  */
 
-export interface HealthStatus {
-  status: string;
-}
+export type ProjectStatus = typeof ProjectStatus[keyof typeof ProjectStatus];
+
+
+export const ProjectStatus = {
+  active: 'active',
+  archived: 'archived',
+} as const;

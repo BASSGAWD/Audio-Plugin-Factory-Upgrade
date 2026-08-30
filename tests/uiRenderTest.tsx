@@ -8,6 +8,8 @@ import { CustomKnob } from "../src/components/UIDesigner";
 import { PluginManual, PluginManualContent } from "../src/components/PluginManual";
 import { PluginControl } from "../src/components/PluginControl";
 import { resolvePanelStyle } from "../src/utils/uiRenderPatterns";
+import { resolveChassisProfile } from "../src/utils/chassisProfiles";
+import { resolveVisualIdentity } from "../src/utils/visualIdentity";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { runQualityGate } from "../src/utils/qualityGate";
 import { buildPluginManual } from "../src/utils/featureManifest";
@@ -55,11 +57,50 @@ check("different plugins -> different art", html1 !== html3);
 /* present in the rendered markup, not just constructed and discarded.     */
 {
   check("faceplate mounts a real material <filter> (feTurbulence/lighting, not just gradients)", html1.includes("<filter") && html1.includes("feTurbulence") && html1.includes("feDiffuseLighting") && html1.includes("feSpecularLighting"));
-  check("faceplate renders 4 corner screws", (html1.match(/rounded-full pointer-events-none/g) || []).length === 4);
+  // Screw count now varies per-family via ChassisProfile (Track 3b) --
+  // compute the expected count from the real resolver rather than
+  // hardcoding a guess, per this project's decisive-gap discipline.
+  const reverbIdentity = gate.plugin.resolvedUi?.identityRecipe ?? resolveVisualIdentity(gate.plugin);
+  const reverbProfile = resolveChassisProfile(reverbIdentity.hardwareMotif);
+  check("faceplate renders exactly the screws its ChassisProfile specifies", (html1.match(/rounded-full pointer-events-none/g) || []).length === reverbProfile.screwCorners.length, `motif=${reverbIdentity.hardwareMotif} expected=${reverbProfile.screwCorners.length}`);
   check("faceplate renders its plugin's name as an engraved nameplate", html1.includes(gate.plugin.name));
   check("different plugins -> different material filter ids (not the same recipe reused verbatim)", (html1.match(/id="material-[^"]+"/) || [])[0] !== (html3.match(/id="material-[^"]+"/) || [])[0]);
   check("faceplate silhouette is chamfered (clip-path polygon), not a plain rectangle", html1.includes("clip-path") && html1.includes("polygon("));
   check("faceplate renders a top rail/fascia band with vent holes", (html1.match(/border-radius:50%/g) || []).length >= 5);
+}
+
+/* ---- Track 3b: per-family chassis geometry actually differs -- today's  */
+/* decisive gap was that EVERY plugin shared one byte-identical chassis    */
+/* (same chamfer, same screw count, same rail) regardless of family.       */
+{
+  const distIdentity = distGate.plugin.resolvedUi?.identityRecipe ?? resolveVisualIdentity(distGate.plugin);
+  const distProfile = resolveChassisProfile(distIdentity.hardwareMotif);
+  const reverbIdentity = gate.plugin.resolvedUi?.identityRecipe ?? resolveVisualIdentity(gate.plugin);
+  const reverbProfile = resolveChassisProfile(reverbIdentity.hardwareMotif);
+  check(
+    "two different families resolve to different hardwareMotifs (precondition for the chassis check below)",
+    reverbIdentity.hardwareMotif !== distIdentity.hardwareMotif,
+    `reverb=${reverbIdentity.hardwareMotif} distortion=${distIdentity.hardwareMotif}`
+  );
+  check(
+    "two different families get a DIFFERENT chassis silhouette",
+    reverbProfile.silhouette !== distProfile.silhouette,
+    `reverb=${reverbProfile.silhouette} distortion=${distProfile.silhouette}`
+  );
+  check(
+    "two different families get a DIFFERENT chamfer (not the same octagon reused)",
+    reverbProfile.chamferPx !== distProfile.chamferPx,
+    `reverb=${reverbProfile.chamferPx}px distortion=${distProfile.chamferPx}px`
+  );
+  check(
+    "two different families get a DIFFERENT screw count/placement",
+    reverbProfile.screwCorners.length !== distProfile.screwCorners.length,
+    `reverb=${reverbProfile.screwCorners.length} distortion=${distProfile.screwCorners.length}`
+  );
+  check(
+    "the rendered markup actually reflects the resolved chassis profile (data attributes, not just the pure function)",
+    html1.includes(`data-chassis-silhouette="${reverbProfile.silhouette}"`) && html3.includes(`data-chassis-silhouette="${distProfile.silhouette}"`)
+  );
 }
 
 /* ---- PluginManual: the auto-generated per-plugin manual actually renders */

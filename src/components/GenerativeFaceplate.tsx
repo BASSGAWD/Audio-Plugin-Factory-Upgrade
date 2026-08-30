@@ -5,6 +5,7 @@ import { resolveMaterial, materialFilterDefs, MaterialContext } from "../utils/m
 import { panelTextureCss } from "../utils/uiRenderPatterns";
 import { buildPluginManual, hasSeenGuide, markGuideSeen, ManualContext } from "../utils/featureManifest";
 import { identityPanelStyle, resolveVisualIdentity } from "../utils/visualIdentity";
+import { resolveChassisProfile, chassisClipPath, ChassisProfile } from "../utils/chassisProfiles";
 import { validateResolvedUiContract } from "../utils/semanticUi";
 import { ResolvedKnobContext, VisualIdentityContext } from "./PluginControl";
 
@@ -227,26 +228,29 @@ function buildArtwork(plugin: AudioPlugin): Artwork {
   return { node, movers, elementRefs };
 }
 
-/** Corner screw rotation angles -- fixed, not seeded: a slightly-imperfect
- *  "hand-tightened" look reads as authentic on every plugin without needing
- *  its own RNG plumbing (screws don't need to vary meaningfully by plugin
- *  identity the way the material/background art does). */
-const SCREW_ANGLES = [18, -22, 32, -12] as const;
-
-function ScrewHead({ corner, angle }: { corner: "tl" | "tr" | "bl" | "br"; angle: number }) {
-  // Inset far enough (14px) to clear CHASSIS_CHAMFER's corner cut (10px)
-  // with margin -- a screw sitting closer to the corner than the chamfer
-  // itself would get its own circle clipped by that cut.
+// Typed as React.FC (matching PluginControl.tsx/FactoryCanvas.tsx's own
+// convention for any component that gets rendered via .map()+key) rather
+// than a plain destructured-param function -- this project has no
+// @types/react installed, so React.FC<P> resolves to `any` and JSX usage
+// isn't prop-checked against it, which is exactly what lets `key` (a
+// React-managed prop, not a real one) pass through without TS treating it
+// as an unknown property the way it would on an ordinary typed function.
+const ScrewHead: React.FC<{ corner: "tl" | "tr" | "bl" | "br"; angle: number; size: number; inset: number }> = ({ corner, angle, size, inset }) => {
+  // Inset far enough to clear the chassis profile's own chamfer cut with
+  // margin -- a screw sitting closer to the corner than the chamfer itself
+  // would get its own circle clipped by that cut. Caller (ChassisDetails)
+  // is responsible for passing a profile whose screwInsetPx already clears
+  // its chamferPx.
   const pos: React.CSSProperties =
-    corner === "tl" ? { top: 14, left: 14 } : corner === "tr" ? { top: 14, right: 14 } : corner === "bl" ? { bottom: 14, left: 14 } : { bottom: 14, right: 14 };
+    corner === "tl" ? { top: inset, left: inset } : corner === "tr" ? { top: inset, right: inset } : corner === "bl" ? { bottom: inset, left: inset } : { bottom: inset, right: inset };
   return (
     <div
       aria-hidden="true"
       className="absolute rounded-full pointer-events-none"
       style={{
         ...pos,
-        width: 9,
-        height: 9,
+        width: size,
+        height: size,
         background: "radial-gradient(circle at 35% 30%, #86868f, #303036 65%, #131315)",
         boxShadow: "0 1px 2px rgba(0,0,0,0.65), inset 0 0.5px 1px rgba(255,255,255,0.18)",
       }}
@@ -265,21 +269,7 @@ function ScrewHead({ corner, angle }: { corner: "tl" | "tr" | "bl" | "br"; angle
       />
     </div>
   );
-}
-
-/** Corner-cut size (px) for the faceplate's own clip-path, below. Kept as a
- *  named constant since ScrewHead/nameplate insets are sized to clear it
- *  with margin -- if this changes, those need to grow with it. */
-const CHASSIS_CHAMFER = 10;
-
-/** Octagonal (corners chamfered) clip-path -- a plain rounded rectangle is
- *  literally what every generic web card looks like; a milled/chamfered
- *  panel silhouette is a recognizable, deliberate "this is a piece of
- *  hardware" cue instead. Safe against clipping ancestors (unlike an
- *  overflowing rack-ear decoration would be) because it only SHRINKS the
- *  visible area -- it can never be clipped further away in a way that
- *  loses more than intended. */
-const CHASSIS_CLIP = `polygon(${CHASSIS_CHAMFER}px 0, calc(100% - ${CHASSIS_CHAMFER}px) 0, 100% ${CHASSIS_CHAMFER}px, 100% calc(100% - ${CHASSIS_CHAMFER}px), calc(100% - ${CHASSIS_CHAMFER}px) 100%, ${CHASSIS_CHAMFER}px 100%, 0 calc(100% - ${CHASSIS_CHAMFER}px), 0 ${CHASSIS_CHAMFER}px)`;
+};
 
 /** A thin fascia strip across the very top of the faceplate, with a row of
  *  small vent-hole dots -- the "control panel"/rack-unit read a plain
@@ -287,20 +277,23 @@ const CHASSIS_CLIP = `polygon(${CHASSIS_CHAMFER}px 0, calc(100% - ${CHASSIS_CHAM
  *  faceplate's existing bounds (no overflow), so it can't be clipped away
  *  by a scrolling ancestor the way an overflowing rack-ear decoration
  *  could be (FactoryCanvas.tsx's card body scrolls with overflow-hidden on
- *  the x-axis -- confirmed earlier this session). */
-function TopRail({ motif }: { motif: string }) {
+ *  the x-axis -- confirmed earlier this session). heightPx comes from the
+ *  plugin's ChassisProfile -- 0 means this silhouette has no rail at all
+ *  (a stompbox pedal doesn't have a rack-style vent strip), and the caller
+ *  skips rendering TopRail entirely rather than rendering a zero-height one. */
+function TopRail({ motif, heightPx }: { motif: string; heightPx: number }) {
   return (
     <div
       aria-hidden="true"
       className="absolute inset-x-0 top-0 pointer-events-none"
       style={{
-        height: 13,
+        height: heightPx,
         background: "linear-gradient(180deg, rgba(0,0,0,0.34), rgba(0,0,0,0.04))",
         borderBottom: "1px solid rgba(0,0,0,0.35)",
         boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)",
       }}
     >
-      <div className="absolute flex gap-1" style={{ top: 5, left: "50%", transform: "translateX(-50%)" }}>
+      <div className="absolute flex gap-1" style={{ top: Math.max(2, heightPx / 2.6), left: "50%", transform: "translateX(-50%)" }}>
         {Array.from({ length: motif === "rack" ? 5 : motif === "instrument" ? 3 : 7 }, (_, i) => (
           <div key={i} style={{ width: 2.5, height: 2.5, borderRadius: "50%", background: "rgba(0,0,0,0.5)" }} />
         ))}
@@ -318,19 +311,17 @@ function TopRail({ motif }: { motif: string }) {
  * throughout, so it never intercepts clicks meant for the actual controls
  * rendered on top of it.
  */
-function ChassisDetails({ plugin, fontFamily, textColor, modelLabel, tokens }: { plugin: AudioPlugin; fontFamily: string; textColor: string; modelLabel: string; tokens: string[] }) {
+function ChassisDetails({ plugin, fontFamily, textColor, modelLabel, tokens, profile, screwAngles }: { plugin: AudioPlugin; fontFamily: string; textColor: string; modelLabel: string; tokens: string[]; profile: ChassisProfile; screwAngles: number[] }) {
   return (
     <>
-      <ScrewHead corner="tl" angle={SCREW_ANGLES[0]} />
-      <ScrewHead corner="tr" angle={SCREW_ANGLES[1]} />
-      <ScrewHead corner="bl" angle={SCREW_ANGLES[2]} />
-      <ScrewHead corner="br" angle={SCREW_ANGLES[3]} />
+      {profile.screwCorners.map((corner, i) => (
+        <ScrewHead key={corner} corner={corner} angle={screwAngles[i] ?? 0} size={profile.screwSizePx} inset={profile.screwInsetPx} />
+      ))}
       <div
         aria-hidden="true"
         className="absolute pointer-events-none select-none"
         style={{
-          bottom: 14,
-          right: 24,
+          ...profile.nameplatePos,
           fontSize: 8.5,
           fontWeight: 700,
           letterSpacing: "0.1em",
@@ -444,6 +435,20 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
   );
   const panelCss = useMemo(() => panelTextureCss(panelStyle), [panelStyle]);
 
+  // Per-family chassis geometry (silhouette, chamfer, screw placement, rail,
+  // nameplate position) -- was one byte-identical shape for every plugin;
+  // now keyed off the same hardwareMotif the panel/knob/meter styles already
+  // key off. Screw angles are seeded per-PLUGIN (not per-family) from the
+  // same identity.seed buildArtwork's own RNG derives from, via a fresh
+  // mulberry32 instance -- independent draws, no cross-contamination with
+  // buildArtwork's sequence.
+  const chassisProfile = useMemo(() => resolveChassisProfile(identity.hardwareMotif), [identity.hardwareMotif]);
+  const chassisClip = useMemo(() => chassisClipPath(chassisProfile.chamferPx), [chassisProfile.chamferPx]);
+  const screwAngles = useMemo(() => {
+    const rand = mulberry32(identity.seed);
+    return chassisProfile.screwCorners.map(() => (rand() * 2 - 1) * 35);
+  }, [identity.seed, chassisProfile.screwCorners.length]);
+
   // Per-plugin manual + first-launch guide mode -- resolved once per plugin
   // (buildPluginManual is pure/cheap) and provided the same way materialCtx
   // is: computed here, consumed via useContext by PluginControl.tsx's
@@ -537,8 +542,11 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
       data-identity-family={identity.family}
       data-hardware-motif={identity.hardwareMotif}
       data-panel-recipe={identity.panel}
+      data-chassis-silhouette={chassisProfile.silhouette}
+      data-chassis-chamfer={chassisProfile.chamferPx}
+      data-chassis-screw-count={chassisProfile.screwCorners.length}
       className={`relative overflow-hidden ${className}`}
-      style={{ ["--gfp-live" as any]: 0, ...skinStyle, clipPath: CHASSIS_CLIP, ...style }}
+      style={{ ["--gfp-live" as any]: 0, ...skinStyle, clipPath: chassisClip, ...style }}
     >
       {/* Panel substrate: the plugin's real hardware material, painted UNDER
           the generative artwork so the art tints a physical surface instead
@@ -558,8 +566,8 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
           background: `radial-gradient(ellipse at 50% 115%, ${accent}55 0%, ${accent}18 40%, transparent 65%)`,
         }}
       />
-      <TopRail motif={identity.hardwareMotif} />
-      <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} modelLabel={identity.modelLabel} tokens={identity.styleTokens} />
+      {chassisProfile.railHeightPx > 0 && <TopRail motif={identity.hardwareMotif} heightPx={chassisProfile.railHeightPx} />}
+      <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} modelLabel={identity.modelLabel} tokens={identity.styleTokens} profile={chassisProfile} screwAngles={screwAngles} />
       <SemanticControlSections plugin={plugin} />
       <MaterialContext.Provider value={materialCtx}>
         <VisualIdentityContext.Provider value={identity}>

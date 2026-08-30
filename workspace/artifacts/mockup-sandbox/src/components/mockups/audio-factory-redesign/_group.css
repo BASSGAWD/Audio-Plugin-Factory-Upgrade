@@ -1,0 +1,107 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Sans:wdth,wght@75..100,400..700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Orbitron:wght@400;500;700;900&display=swap");
+
+.af-root {
+  --af-orange: #f97316;
+  --af-panel: #0a0a0a;
+  font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+  background: #0a0a0a;
+  color: #e5e5e5;
+}
+
+.af-root .font-display { font-family: "Outfit", "Inter", sans-serif; }
+.af-root .font-mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+.af-root, .af-root * { box-sizing: border-box; }
+.af-root button, .af-root select, .af-root input { font: inherit; }
+.af-root button { cursor: pointer; }
+
+.af-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+.af-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
+.af-scroll::-webkit-scrollbar-track { background: transparent; }
+.af-scroll::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 999px; }
+.af-scroll::-webkit-scrollbar-thumb:hover { background: #71717a; }
+
+.af-canvas-grid {
+  background-color: #171717;
+  background-image: radial-gradient(#303030 1.4px, transparent 1.4px);
+  background-size: 20px 20px;
+}
+
+.af-faceplate {
+  background:
+    radial-gradient(circle at 50% -35%, rgba(99,102,241,.13), transparent 50%),
+    linear-gradient(145deg, #15151b, #0e0e13 68%, #121218);
+  border: 2px solid #292933;
+  box-shadow: 0 25px 60px rgba(0,0,0,.6), inset 0 1px rgba(255,255,255,.035);
+}
+
+.af-knob {
+  background: radial-gradient(circle at 36% 28%, #555866, #252630 46%, #0c0d11 73%);
+  border: 2px solid #4a4b56;
+  box-shadow: 0 5px 10px rgba(0,0,0,.65), inset 0 0 0 2px #181920;
+}
+.af-knob::after {
+  content: "";
+  position: absolute;
+  width: 2px;
+  height: 15px;
+  left: calc(50% - 1px);
+  top: 5px;
+  border-radius: 2px;
+  background: #fb923c;
+  box-shadow: 0 0 5px rgba(249,115,22,.7);
+  transform-origin: 1px 19px;
+  transform: rotate(var(--angle));
+}
+
+@keyframes afPulse { 50% { opacity: .45; } }
+.af-pulse { animation: afPulse 1.7s ease-in-out infinite; }
+
+/* The upgraded cockpit is intentionally isolated from the baseline mockup. */
+.oj-cockpit {
+  --ink: #181b1a;
+  --deep: #202421;
+  --panel: #292e2a;
+  --edge: #454b45;
+  --fog: #d8d5ca;
+  --muted: #9da199;
+  --orange: #fb6a20;
+  --orange-soft: #ffad73;
+  --lime: #b8d85a;
+  font-family: "Instrument Sans", sans-serif;
+  background: #1b1f1c;
+  color: var(--fog);
+}
+.oj-cockpit * { box-sizing: border-box; }
+.oj-cockpit button { cursor: pointer; }
+.oj-cockpit .oj-mono { font-family: "DM Mono", monospace; }
+.oj-cockpit .oj-metal {
+  background: linear-gradient(145deg, #323833 0%, #242925 48%, #1e231f 100%);
+  border: 1px solid #4b514b;
+  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 10px 22px rgba(0,0,0,.2);
+}
+.oj-cockpit .oj-face {
+  background:
+    linear-gradient(90deg, rgba(251,106,32,.045) 1px, transparent 1px),
+    linear-gradient(rgba(251,106,32,.035) 1px, transparent 1px),
+    radial-gradient(circle at 18% 8%, rgba(251,106,32,.18), transparent 28%),
+    linear-gradient(145deg,#343a35,#242925 58%,#1e231f);
+  background-size: 24px 24px,24px 24px,auto,auto;
+}
+.oj-cockpit .oj-knob {
+  background: radial-gradient(circle at 34% 28%, #838982 0 5%, #464c46 28%, #242824 60%, #151814 74%);
+  border: 1px solid #697069;
+  box-shadow: 0 5px 11px #10130f, inset 0 1px rgba(255,255,255,.18);
+}
+.oj-cockpit .oj-knob:after {
+  content:""; position:absolute; width:2px; height:14px; background:var(--orange-soft);
+  left:calc(50% - 1px); top:5px; border-radius:2px;
+  transform-origin: 1px 18px; transform:rotate(var(--rotation));
+}
+.oj-cockpit .oj-vu { background: repeating-linear-gradient(90deg, #b8d85a 0 4px, transparent 4px 7px); }
+.oj-cockpit .oj-rise { animation: oj-rise .45s cubic-bezier(.2,.8,.2,1) both; }
+.oj-cockpit .oj-delay1 { animation-delay:.06s; }.oj-cockpit .oj-delay2 { animation-delay:.12s; }
+@keyframes oj-rise { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }

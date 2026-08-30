@@ -5,7 +5,13 @@
  * Company-ready OrangeJUCE API contracts for health, organizations, projects, plugin generation, benchmarking, and artifacts.
  * OpenAPI spec version: 0.2.0
  */
+import type { Timestamped } from './timestamped';
 
-export interface HealthStatus {
-  status: string;
-}
+export type Plugin = Timestamped & {
+  organizationId: string;
+  projectId: string;
+  name: string;
+  category: string;
+  description?: string;
+  currentVersionId?: string;
+};

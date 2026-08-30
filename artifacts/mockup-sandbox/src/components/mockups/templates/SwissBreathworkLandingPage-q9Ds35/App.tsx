@@ -97,7 +97,7 @@ function BreathEngine() {
   const [phaseIdx, setPhaseIdx] = useState(0);
   const [second, setSecond] = useState(1);
   const [cycles, setCycles] = useState(0);
-  const ref = useRef(null);
+  const ref = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   useEffect(() => {
     if (!running) return;
@@ -115,7 +115,9 @@ function BreathEngine() {
         return s + 1;
       });
     }, 1000);
-    return () => clearInterval(ref.current);
+    return () => {
+      if (ref.current) clearInterval(ref.current);
+    };
   }, [running, phaseIdx]);
 
   const phase = breathPhases[phaseIdx];
@@ -197,7 +199,7 @@ function BreathEngine() {
 
 export default function App() {
   const [active, setActive] = useState(0);
-  const [openRow, setOpenRow] = useState(null);
+  const [openRow, setOpenRow] = useState<number | null>(null);
   const m = movements[active];
 
   return (

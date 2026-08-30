@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useCallback, useState, useEffect, useRef } from "react";
 import {
   Sparkles,
   MessageSquare,
@@ -26,7 +26,8 @@ import {
   Cpu,
   BookOpen,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  AudioLines
 } from "lucide-react";
 import { AudioPlugin, ChatMessage, DSPAnalysisResult, DspCritiqueItem, Agent, PluginParameter } from "./types";
 import { DEFAULT_AGENTS } from "./defaultAgents";
@@ -38,6 +39,7 @@ import {
   autoDetectProvider,
   testProviderConnection,
   callLocalLLM,
+  callLLM,
   isLocalProvider,
   parseModelJson,
   fetchLLMRoute as fetchAppLLMRoute,
@@ -54,6 +56,7 @@ import {
 import { verifyAndRepairDsp } from "./utils/pluginVerifier";
 import { runQualityGate, formatBuildReport, measurePreviewTrim, sanitizeSample } from "./utils/qualityGate";
 import { buildOfflineCandidates } from "./utils/offlineBuilder";
+import { routingContractFor } from "./utils/sidechainContract";
 import { recordLessons } from "./utils/learnedPitfalls";
 import { buildPortableScaffolds } from "./utils/portableCodegen";
 import { buildRecipeContext } from "./utils/dspRecipes";
@@ -70,11 +73,12 @@ import UIDesigner from "./components/UIDesigner";
 import MemoryCore from "./components/MemoryCore";
 import ResearchLab from "./components/ResearchLab";
 import { initRoamingResearch } from "./utils/roamingResearch";
-import { PLUGIN_STORAGE_KEY, savePersistedPlugin, preserveRejectedPlugin } from "./utils/pluginPersistence";
+import { PLUGIN_STORAGE_KEY, savePersistedPlugin, preserveRejectedPlugin, normalizePersistedPlugin } from "./utils/pluginPersistence";
 import PresetManager from "./components/PresetManager";
 import GitHubAudioDiscovery from "./components/GitHubAudioDiscovery";
 import NativeBuildPanel from "./components/NativeBuildPanel";
 import SimpleStudio from "./components/SimpleStudio";
+import DAWStudio from "./daw/DAWStudio";
 import FactoryCanvas from "./components/FactoryCanvas";
 import ModelPicker, { EngineId } from "./components/ModelPicker";
 import RefineControl from "./components/RefineControl";
@@ -88,8 +92,11 @@ import { loadCanvasWorkspace, saveCanvasWorkspace, placeNewCard, CanvasCard } fr
 import { runRefinementLoop, refinementScore, isNearTie, MAX_REFINE_LOOPS, RankedCandidate } from "./utils/refinementLoop";
 import { classifyEditIntent } from "./utils/editIntent";
 import { runEditPass, ElementNote } from "./utils/editPass";
+import { hasExternalSidechain } from "./utils/sidechainContract";
 import { SPECTRUM_ANALYZER_RECIPE } from "./utils/uiRenderPatterns";
 import { gatherLiveBuildContext, createProxyWebFetcher } from "./utils/researchEngine";
+import type { AudioSoftwareProject, ClassificationEvidence, AudioProjectKind, LegacyPlugin } from "./audioProjects";
+import { buildThenAdaptEffect, normalizeAudioSoftwareProjectCandidate, updateBriefDecision, classifyAudioSoftwarePrompt, promoteMeasuredEvidence } from "./audioProjects";
 
 export function sanitizeDspCode(codeString: string): string {
   let sanitizedCode = codeString;
@@ -274,6 +281,8 @@ const WORKSPACE_TAB_GROUPS: Array<{ label: string; tabs: WorkspaceTab[] }> = [
   },
 ];
 const STORAGE_KEY_CHAT = "audio_factory_chat_history";
+const STORAGE_KEY_AUDIO_PROJECT = "orangejuce_audio_project";
+const STORAGE_KEY_AUDIO_CLASSIFICATION = "orangejuce_audio_classification";
 
 // Prefilled starting high-fidelity Auto-Tune vocal pitch corrector plugin
 const DEFAULT_STARTING_PLUGIN: AudioPlugin = {
@@ -503,11 +512,11 @@ export default function App() {
   // Simple mode = ChatGPT-style single chat screen (default). Pro mode = full
   // workspace. Canvas mode = the factory floor: every prompt becomes a
   // draggable plugin card on an infinite canvas.
-  const [uiMode, setUiMode] = useState<"simple" | "pro" | "canvas">(() => {
+  const [uiMode, setUiMode] = useState<"simple" | "pro" | "canvas" | "daw">(() => {
     const saved = localStorage.getItem(STORAGE_KEY_UI_MODE);
-    return saved === "pro" ? "pro" : saved === "canvas" ? "canvas" : "simple";
+    return saved === "pro" ? "pro" : saved === "canvas" ? "canvas" : saved === "daw" ? "daw" : "simple";
   });
-  const switchUiMode = (mode: "simple" | "pro" | "canvas") => {
+  const switchUiMode = (mode: "simple" | "pro" | "canvas" | "daw") => {
     setUiMode(mode);
     localStorage.setItem(STORAGE_KEY_UI_MODE, mode);
   };
@@ -521,11 +530,59 @@ export default function App() {
   // returned -- stopping the loop on unmount would defeat the feature.
   useEffect(() => { initRoamingResearch(); }, []);
   const [plugin, setPlugin] = useState<AudioPlugin>(DEFAULT_STARTING_PLUGIN);
+  // Mirror of the most recently saved plugin. React state updates are async, so
+  // callers that need the freshly-built plugin synchronously (e.g. the effect
+  // audio-project flow, which must adapt the exact plugin it just produced)
+  // read this ref instead of the possibly-stale `plugin` state value.
+  const latestPluginRef = useRef<AudioPlugin>(DEFAULT_STARTING_PLUGIN);
   const [selectedAgentId, setSelectedAgentId] = useState<string>("nexus");
   const [inputMessage, setInputMessage] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-  const [apiHealth, setApiHealth] = useState<{ status: string; hasApiKey: boolean } | null>(null);
+  const [audioProject, setAudioProject] = useState<AudioSoftwareProject | null>(() => {
+    // Persistence-safe: a project stored under an older contract version is
+    // migrated forward and revalidated before it is trusted on load.
+    try {
+      const cached = localStorage.getItem(STORAGE_KEY_AUDIO_PROJECT);
+      if (!cached) return null;
+      const normalized = normalizeAudioSoftwareProjectCandidate(JSON.parse(cached));
+      return normalized.project ?? null;
+    } catch {
+      return null;
+    }
+  });
+  const [audioProjectLoading, setAudioProjectLoading] = useState(false);
+  const [audioProjectError, setAudioProjectError] = useState<string | null>(null);
+  // The most recent classification (understood/ambiguity/questions), used by the
+  // intake confirmation and revision flow. Persisted keyed to the project id so
+  // a stale classification from a different project is never shown.
+  const [audioClassification, setAudioClassification] = useState<ClassificationEvidence | null>(() => {
+    try {
+      const cached = localStorage.getItem(STORAGE_KEY_AUDIO_CLASSIFICATION);
+      if (!cached) return null;
+      // New format: { projectId, kind, classification }
+      const wrapper = JSON.parse(cached) as { projectId?: string; kind?: string; classification?: ClassificationEvidence };
+      if (wrapper && wrapper.projectId && wrapper.classification) {
+        // Only use if the stored project still matches by id and kind.
+        const projectCached = localStorage.getItem(STORAGE_KEY_AUDIO_PROJECT);
+        if (!projectCached) return null;
+        const projectData = JSON.parse(projectCached) as { id?: string; kind?: string } | null;
+        if (projectData?.id === wrapper.projectId && projectData?.kind === wrapper.kind) {
+          return wrapper.classification;
+        }
+        // Mismatch: drop the stale classification.
+        return null;
+      }
+      // Old format (raw ClassificationEvidence): cannot verify coherence, drop it.
+      return null;
+    } catch {
+      return null;
+    }
+  });
+  // null means "not checked yet". Backend/model availability is optional, so
+  // startup (especially a canvas preview) stays local until a Gemini action
+  // actually needs the server.
+  const [apiHealth, setApiHealth] = useState<{ status: string; hasApiKey: boolean; providers?: Partial<Record<"gemini" | "openai" | "anthropic" | "online_free", boolean>> } | null>(null);
   const [localLlmStatus, setLocalLlmStatus] = useState<{
     provider: "ollama" | "lm_studio" | "fusion";
     model: string;
@@ -640,10 +697,26 @@ export default function App() {
   // construction), so a key source silently reverts to "none" there.
   const [keySourceType, setKeySourceType] = useState<"none" | "synth" | "sine" | "noise" | "live_input">("none");
   const [selectedKeyDeviceId, setSelectedKeyDeviceId] = useState<string | null>(null);
+  const [sidechainLevel, setSidechainLevel] = useState(0);
+  const [sidechainConsumed, setSidechainConsumed] = useState(false);
+  const [sidechainConnected, setSidechainConnected] = useState(false);
   const liveKeyStreamRef = useRef<MediaStream | null>(null);
   const liveKeySourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const keySourceTypeRef = useRef(keySourceType);
   useEffect(() => { keySourceTypeRef.current = keySourceType; }, [keySourceType]);
+  // Keep the synchronous plugin mirror in step with any state-driven plugin
+  // change (initial load, restore, revision) so the effect audio-project flow
+  // always adapts the plugin that is actually loaded.
+  useEffect(() => { latestPluginRef.current = plugin; }, [plugin]);
+  useEffect(() => {
+    if (!hasExternalSidechain(plugin)) {
+      keySourceTypeRef.current = "none";
+      setKeySourceType("none");
+      setSidechainLevel(0);
+      setSidechainConsumed(false);
+      setSidechainConnected(false);
+    }
+  }, [plugin.id, plugin.routing]);
 
   // Mirror sourceType/isPlaying in refs so changeSourceType's live-input
   // restart path (stopAudioEngine() -> togglePlaySimulation()) sees the NEW
@@ -901,8 +974,28 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  const checkApiHealth = useCallback(async () => {
+    if (apiHealth) return apiHealth;
+    try {
+      const response = await fetch("/api/llm/health");
+      if (!response.ok) throw new Error(`Health check returned ${response.status}`);
+      const health = await response.json() as { status: string; providers?: Partial<Record<"gemini" | "openai" | "anthropic" | "online_free", boolean>> };
+      const result = {
+        status: health.status,
+        hasApiKey: health.providers?.gemini ?? false,
+        providers: health.providers,
+      };
+      setApiHealth(result);
+      return result;
+    } catch {
+      const unavailable = { status: "unavailable", hasApiKey: false };
+      setApiHealth(unavailable);
+      return unavailable;
+    }
+  }, [apiHealth]);
+
   // Safe DSP Compile helper
-  const compileDsp = (codeString: string) => {
+  const compileDsp = (codeString: string): boolean => {
     try {
       const sanitized = sanitizeDspCode(codeString);
       // Create a fresh clean executable function: function(inputSample, params, state, inputR, inputKey) { ... }
@@ -914,19 +1007,16 @@ export default function App() {
       if (workletNodeRef.current) {
         workletNodeRef.current.port.postMessage({ type: "code", code: sanitized });
       }
+      return true;
     } catch (err: any) {
       console.error("DSP Compile failure:", err);
       setDspError(`Syntax Error: ${err.message}`);
+      return false;
     }
   };
 
-  // ---- 3. API Health & Hydration Check ----
+  // ---- 3. Hydration ----
   useEffect(() => {
-    fetch("/api/health")
-      .then((res) => res.json())
-      .then((data) => setApiHealth(data))
-      .catch((err) => console.error("API Health error:", err));
-
     // Deserialise cached state
     const cachedPlugin = localStorage.getItem(STORAGE_KEY_PLUGIN);
     if (cachedPlugin) {
@@ -943,8 +1033,9 @@ export default function App() {
           try {
             const testSanitized = sanitizeDspCode(parsed.dspFunction);
             new Function("inputSample", "params", "state", "inputR", "inputKey", testSanitized);
-            setPlugin(parsed);
-            setScratchCode(parsed.dspFunction);
+            const normalized = normalizePersistedPlugin(parsed);
+            setPlugin(normalized);
+            setScratchCode(normalized.dspFunction);
           } catch (compileErr) {
             // Fall back in MEMORY so a corrupt cache can't brick startup --
             // but never overwrite the user's stored plugin with the default.
@@ -1021,19 +1112,19 @@ export default function App() {
     setLocalLlmStatus({ provider, model, connected: result.ok, checking: false });
   };
 
-  useEffect(() => {
-    refreshLocalLlmStatus();
-  }, []);
-
   // Single handler behind the ModelPicker (Pro header + Simple Mode): flips
   // the forced-offline flag and keeps the local-model status labels fresh.
-  const handleEngineChange = ({ offlineForced: forced, engine }: { offlineForced: boolean; engine: EngineId }) => {
+  const handleEngineChange = async ({ offlineForced: forced, engine }: { offlineForced: boolean; engine: EngineId }) => {
     setOfflineForced(forced);
+    if (engine === "gemini" || engine === "openai" || engine === "anthropic" || engine === "online_free") await checkApiHealth();
     const engineLabel =
       engine === "offline" ? "Offline Compiler (instant, in-browser)"
       : engine === "gemini" ? "Gemini Cloud"
+      : engine === "openai" ? "OpenAI GPT"
+      : engine === "anthropic" ? "Anthropic Claude"
+      : engine === "online_free" ? "Online Free (rotating free cloud models)"
       : engine === "ollama" ? "Ollama (local)"
-      : "LM Studio (local)";
+      : engine === "fusion" ? "Fusion · Ollama + LM Studio" : "LM Studio (local)";
     triggerToast(`AI engine set to ${engineLabel}`);
     refreshLocalLlmStatus();
   };
@@ -1078,8 +1169,18 @@ export default function App() {
   // can react. Same "tell the truth about persistence" contract
   // saveCanvasWorkspace (canvasFactory.ts) already implements.
   const savePluginState = (newPlugin: AudioPlugin): boolean => {
-    setPlugin(newPlugin);
-    const persisted = savePersistedPlugin(newPlugin);
+    const routingIntent = newPlugin.routing?.auxiliaryInput.supported ? " external sidechain" : "";
+    const revalidatedPlugin = {
+      ...newPlugin,
+      routing: routingContractFor(
+        newPlugin.family ?? newPlugin.category,
+        `${newPlugin.name} ${newPlugin.description} ${routingIntent}`,
+        newPlugin.dspFunction
+      ),
+    };
+    setPlugin(revalidatedPlugin);
+    latestPluginRef.current = revalidatedPlugin;
+    const persisted = savePersistedPlugin(revalidatedPlugin);
     if (!persisted) {
       triggerToast(
         "⚠️ Storage is full — this plugin is loaded but won't survive a reload. Open Canvas and remove a few old cards to free space."
@@ -1167,10 +1268,10 @@ export default function App() {
   };
 
   // ---- 4. Playback Simulation Audio Context Engine ----
-  const togglePlaySimulation = async () => {
+  const togglePlaySimulation = async (): Promise<"started" | "stopped" | "failed"> => {
     if (isPlayingRef.current) {
       stopAudioEngine();
-      return;
+      return "stopped";
     }
 
     try {
@@ -1213,7 +1314,7 @@ export default function App() {
               ? "Microphone/line access was denied — check your browser's site permissions to use a real audio interface."
               : `Couldn't access an audio input device: ${mediaErr?.message || mediaErr}`
           );
-          return;
+          return "failed";
         }
       }
 
@@ -1319,6 +1420,8 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     this.isPrecisionOversampled = false;
     this.sourceType = "synth";
     this.keySourceType = "none";
+    this.sidechainCapable = false;
+    this.sidechainReportCountdown = 0;
     this.outputTrim = 1.0;
     this.dcBlockOn = false;
     // One-pole DC blocker state (y = x - x1 + 0.995 * y1), per channel
@@ -1343,6 +1446,8 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
         }
       } else if (data.type === "params") {
         this.params = data.params;
+      } else if (data.type === "routing") {
+        this.sidechainCapable = data.external === true;
       } else if (data.type === "bypass") {
         this.bypass = data.bypass;
       } else if (data.type === "oversampling") {
@@ -1435,6 +1540,8 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     // no key at all -- srcKey stays undefined and every plugin's own
     // inputKey-fallback idiom (inputKey !== undefined ? inputKey : inputSample) applies.
     const keyLiveIn = this.keySourceType === "live_input" && inputs[1] && inputs[1][0] && inputs[1][0].length > 0;
+    let keyPeak = 0;
+    let keyConsumed = false;
 
     for (let i = 0; i < len; i++) {
       let srcL, srcR;
@@ -1453,6 +1560,9 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
       } else {
         srcKey = this.keySourceAt(this.timeIndex);
       }
+      if (srcKey !== undefined) {
+        keyPeak = Math.max(keyPeak, Math.abs(srcKey));
+      }
       this.timeIndex++;
 
       if (this.bypass) {
@@ -1465,6 +1575,7 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
           // DC-block/anti-alias recursions below -- otherwise one NaN/
           // Infinity sample poisons those recursive filters permanently.
           let resL = sanitizeSample(this.dspFunc(srcL, this.params, this.dspState, srcR, srcKey)) * this.outputTrim;
+          if (srcKey !== undefined && this.sidechainCapable) keyConsumed = true;
           // Opt-in stereo contract: a stereo DSP writes its right channel to
           // state.outR each sample; mono DSP never touches it -> dual-mono.
           const rawR = this.dspState.outR;
@@ -1505,6 +1616,11 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
         outputChannel[i] = srcL;
         if (outputRight) outputRight[i] = srcR;
       }
+    }
+
+    if (++this.sidechainReportCountdown >= 12) {
+      this.sidechainReportCountdown = 0;
+      this.port.postMessage({ type: "sidechainStatus", connected: this.keySourceType !== "none", consumed: keyConsumed, level: keyPeak });
     }
 
     for (let channel = 2; channel < output.length; channel++) {
@@ -1573,7 +1689,8 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         workletNode.port.postMessage({ type: "bypass", bypass });
         workletNode.port.postMessage({ type: "oversampling", oversampling: isPrecisionOversampled });
         workletNode.port.postMessage({ type: "sourceType", sourceType: sourceTypeRef.current });
-        workletNode.port.postMessage({ type: "keySourceType", keySourceType: keySourceTypeRef.current });
+        workletNode.port.postMessage({ type: "keySourceType", keySourceType: hasExternalSidechain(plugin) ? keySourceTypeRef.current : "none" });
+        workletNode.port.postMessage({ type: "routing", external: hasExternalSidechain(plugin) });
         workletNode.port.postMessage({ type: "trim", trim: outputTrimRef.current });
         workletNode.port.postMessage({ type: "dcblock", dcblock: dcBlockRef.current });
 
@@ -1581,6 +1698,10 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         workletNode.port.onmessage = (event) => {
           if (event.data && event.data.type === "error") {
             setDspError(event.data.message);
+          } else if (event.data && event.data.type === "sidechainStatus") {
+            setSidechainLevel(Number.isFinite(event.data.level) ? event.data.level : 0);
+            setSidechainConnected(event.data.connected === true);
+            setSidechainConsumed(event.data.connected === true && event.data.consumed === true);
           }
         };
 
@@ -1735,9 +1856,11 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
 
       setIsPlaying(true);
       setDspError(null);
+      return "started";
     } catch (e: any) {
       console.error("Failed to start AudioContext:", e);
       setDspError(`System blocked: ${e.message}`);
+      return "failed";
     }
   };
 
@@ -1792,6 +1915,9 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     }
     isPlayingRef.current = false; // synchronous -- see changeSourceType's restart path
     setIsPlaying(false);
+    setSidechainConnected(false);
+    setSidechainConsumed(false);
+    setSidechainLevel(0);
   };
 
   // Single entry point for changing the test-signal source, used by BOTH
@@ -1821,11 +1947,16 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
   // stream involved), so only a swap into or out of live_input while
   // already playing needs the full stop+restart.
   const changeKeySourceType = (next: "none" | "synth" | "sine" | "noise" | "live_input") => {
+    if (!hasExternalSidechain(plugin)) return;
     const prev = keySourceTypeRef.current;
     if (prev === next) return;
     const needsRestart = isPlayingRef.current && (prev === "live_input" || next === "live_input");
     keySourceTypeRef.current = next;
     setKeySourceType(next);
+    workletNodeRef.current?.port.postMessage({ type: "keySourceType", keySourceType: next });
+    setSidechainConsumed(false);
+    setSidechainConnected(false);
+    setSidechainLevel(0);
     if (needsRestart) {
       stopAudioEngine();
       void togglePlaySimulation();
@@ -2132,11 +2263,31 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     }
 
     // A. OFFLINE FORCED CHECK / LOCAL STORAGE DEMO
-    const isOfflineForced = offlineForced || (apiHealth !== null && !apiHealth.hasApiKey && llmConfig.provider === "gemini");
+    const resolvedApiHealth =
+      !offlineForced && (llmConfig.provider === "gemini" || llmConfig.provider === "openai" || llmConfig.provider === "anthropic" || llmConfig.provider === "online_free") && apiHealth === null
+        ? await checkApiHealth()
+        : apiHealth;
+    const remoteConfigured =
+      llmConfig.provider === "gemini"
+        ? (resolvedApiHealth?.providers?.gemini ?? resolvedApiHealth?.hasApiKey)
+        : llmConfig.provider === "openai"
+          ? resolvedApiHealth?.providers?.openai
+          : llmConfig.provider === "anthropic"
+            ? resolvedApiHealth?.providers?.anthropic
+            : llmConfig.provider === "online_free"
+              ? resolvedApiHealth?.providers?.online_free
+            : true;
+    const isOfflineForced =
+      offlineForced ||
+      (resolvedApiHealth !== null && remoteConfigured === false);
 
     if (isOfflineForced) {
       if (chatTimeoutRef.current) clearTimeout(chatTimeoutRef.current);
-      chatTimeoutRef.current = setTimeout(async () => {
+      // Run the offline build in this awaited request instead of scheduling it
+      // after the request returns. The audio-project contract is compiled from
+      // latestPluginRef immediately afterward, so returning before this build
+      // finished could adapt the previously loaded plugin.
+      {
         const result = processOfflineMessage(promptToSend, plugin, spec);
         let messageText = result.text;
 
@@ -2210,7 +2361,7 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         localStorage.setItem(STORAGE_KEY_CHAT, JSON.stringify(finalHistory));
         setChatLoading(false);
         chatTimeoutRef.current = null;
-      }, 600);
+      }
       return;
     }
 
@@ -2484,29 +2635,27 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         const responseJsonText = lmsData.choices?.[0]?.message?.content || "{}";
         payload = parseModelJson(responseJsonText);
 
-      // D. STANDARD GEMINI CLOUD PROXY
+      // D. REMOTE PROVIDERS — credentials remain server-side. The neutral
+      // gateway receives the explicitly selected provider/model, rather than
+      // silently treating every cloud choice as Gemini.
       } else {
-        const response = await fetch("/api/plugins/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+        payload = await callLLM({
+          config: llmConfig,
+          systemPrompt: currentAgent.systemInstruction,
+          userText: `${modifiedUserPrompt}\n\n[CONTEXT Active code:\n${plugin.dspFunction}]\n\nParameters: ${JSON.stringify(plugin.parameters)}${discoveryContext ? `\n\n${discoveryContext}` : ""}`,
+          history: newHistory.slice(0, -1).map((m) => ({
+            role: m.role === "user" ? ("user" as const) : ("model" as const),
+            text: m.text,
+          })),
+          temperature: currentAgent.temperature,
           signal: controller.signal,
-          body: JSON.stringify({
-            prompt: modifiedUserPrompt,
-            history: newHistory.slice(0, -1),
-            systemInstruction: currentAgent.systemInstruction,
-            temperature: currentAgent.temperature,
-            activeCode: plugin.dspFunction,
-            activeParams: plugin.parameters,
-            discoveryContext,
-          }),
         });
-
-        if (!response.ok) {
-          const errPayload = await response.json().catch(() => ({}));
-          throw new Error(errPayload.error || "Failed to receive response from custom model endpoint.");
+        // The free gateway chooses its currently available free model server
+        // side. Persist only this display metadata; every future request still
+        // sends model:"auto", never a paid-provider substitution.
+        if (llmConfig.provider === "online_free" && typeof payload?.__llmMeta?.model === "string") {
+          saveLLMConfig({ ...llmConfig, onlineFreeActiveModel: payload.__llmMeta.model });
         }
-
-        payload = await response.json();
       }
 
       // 3. Process Result Payload
@@ -2601,10 +2750,14 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
         return;
       }
       setBuildStages([]);
+      const freeExhausted = llmConfig.provider === "online_free" &&
+        (err?.status === 503 || /ONLINE_FREE_EXHAUSTED/i.test(String(err?.code || "") + " " + String(err?.message || "")));
       console.warn("API Error, falling back to offline core compiler:", err);
       
       const result = processOfflineMessage(promptToSend, plugin, spec);
-      let fallbackText = `*(API request returned an error: "${err.message}". Falling back gracefully to zero-latency offline engine...)*\n\n${result.text}`;
+      let fallbackText = freeExhausted
+        ? `*(The rotating Online Free models are currently exhausted. No paid provider was selected; continuing with the deterministic offline compiler.)*\n\n${result.text}`
+        : `*(API request returned an error: "${err.message}". Falling back gracefully to zero-latency offline engine...)*\n\n${result.text}`;
 
       if (result.updatedPlugin) {
         const up = result.updatedPlugin;
@@ -2671,6 +2824,121 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     }
   };
 
+  const requestAudioProject = async (prompt: string, legacyPlugin?: LegacyPlugin) => {
+    setAudioProjectLoading(true);
+    setAudioProjectError(null);
+    try {
+      const response = await fetch("/api/audio-projects/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(legacyPlugin ? { prompt, legacyPlugin } : { prompt }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.validation?.valid || !payload.project) {
+        throw new Error(payload.error || "Audio project generation failed validation.");
+      }
+      setAudioProject(payload.project);
+      localStorage.setItem(STORAGE_KEY_AUDIO_PROJECT, JSON.stringify(payload.project));
+      if (payload.classification) {
+        setAudioClassification(payload.classification);
+        // Persist keyed to project id+kind so stale classifications are never
+        // loaded for a different project on the next session.
+        localStorage.setItem(STORAGE_KEY_AUDIO_CLASSIFICATION, JSON.stringify({
+          projectId: payload.project.id,
+          kind: payload.project.kind,
+          classification: payload.classification,
+        }));
+      }
+    } catch (cause) {
+      setAudioProjectError(cause instanceof Error ? cause.message : "Audio project generation failed.");
+    } finally {
+      setAudioProjectLoading(false);
+    }
+  };
+
+  /**
+   * Revises the classified category without discarding validated evidence.
+   * Runs client-side through the deterministic compiler so it works offline and
+   * never loses the measured/static evidence the previous build already proved.
+   */
+  const reviseAudioProjectKind = async (toKind: AudioProjectKind) => {
+    if (!audioProject || audioProject.kind === toKind) return;
+    setAudioProjectLoading(true);
+    setAudioProjectError(null);
+    try {
+      const { reviseAudioSoftwareProject } = await import("./audioProjects");
+      const legacy = !plugin.isPlaceholder
+        ? { id: plugin.id, name: plugin.name, parameters: plugin.parameters, dspFunction: plugin.dspFunction }
+        : undefined;
+      const { result, revision } = reviseAudioSoftwareProject(audioProject, toKind, legacy);
+      setAudioProject(result.project);
+      setAudioClassification(result.classification);
+      localStorage.setItem(STORAGE_KEY_AUDIO_PROJECT, JSON.stringify(result.project));
+      // Update the classification wrapper so the new kind/id is coherent.
+      localStorage.setItem(STORAGE_KEY_AUDIO_CLASSIFICATION, JSON.stringify({
+        projectId: result.project.id,
+        kind: result.project.kind,
+        classification: result.classification,
+      }));
+      triggerToast(`Revised to ${toKind}; prior evidence preserved as provenance history.`);
+    } catch (cause) {
+      setAudioProjectError(cause instanceof Error ? cause.message : "Category revision failed.");
+    } finally {
+      setAudioProjectLoading(false);
+    }
+  };
+
+  /**
+   * Updates a single brief decision's selected answer without discarding the
+   * project id or validated evidence. Runs synchronously client-side.
+   */
+  const updateAudioProjectDecision = (decisionId: string, selected: string) => {
+    if (!audioProject) return;
+    try {
+      const updated = updateBriefDecision(audioProject, decisionId, selected);
+      setAudioProject(updated);
+      localStorage.setItem(STORAGE_KEY_AUDIO_PROJECT, JSON.stringify(updated));
+    } catch (cause) {
+      setAudioProjectError(cause instanceof Error ? cause.message : "Brief decision update failed.");
+    }
+  };
+
+  /**
+   * Promotes the pending golden-fixture evidence to "measured" after the card
+   * reports a genuinely successful preview execution, then persists the updated
+   * project. Only promotes when the reported project id matches the live project
+   * (guards against a stale card firing against a replaced project). Uses the
+   * functional state updater so it always operates on the latest project. No-ops
+   * on mismatch or when there is no matching pending evidence.
+   */
+  const handleAudioProjectPreviewMeasured = (projectId: string, evidenceCheck: string, measuredDetail: string) => {
+    setAudioProject(current => {
+      if (!current || current.id !== projectId) return current;
+      const promoted = promoteMeasuredEvidence(current, evidenceCheck, measuredDetail);
+      // promoteMeasuredEvidence returns the same reference when nothing matched.
+      if (promoted === current) return current;
+      try {
+        localStorage.setItem(STORAGE_KEY_AUDIO_PROJECT, JSON.stringify(promoted));
+      } catch {
+        // Persistence is best-effort; the in-memory promotion still stands.
+      }
+      return promoted;
+    });
+  };
+
+  const scaffoldAudioProject = async (project: AudioSoftwareProject): Promise<string> => {
+    const llmConfig = getLLMConfig();
+    if (!isLocalProvider(llmConfig)) throw new Error("Select Ollama or LM Studio to create a native scaffold.");
+    const response = await fetch("/api/audio-projects/native/scaffold", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, llmConfig }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Native scaffold failed.");
+    return `${payload.projectName} native scaffold created and ready for the JUCE build stage.`;
+  };
+
   const handleSendPromptDirectly = async (promptText: string) => {
     const promptToSend = promptText.trim();
     if (!promptToSend || chatLoading) return;
@@ -2690,7 +2958,77 @@ registerProcessor('dynamic-dsp-processor', DynamicDSPProcessor);
     setChatHistory(newHistory);
     localStorage.setItem(STORAGE_KEY_CHAT, JSON.stringify(newHistory));
 
-    await processChatMessageRequest(promptToSend, newHistory);
+    // Classify deterministically (zero latency) before dispatching so that
+    // non-effect kinds never enter the legacy plugin-generation path.
+    // Only a clear effect request enters the legacy plugin pipeline. Ambiguous
+    // and vague prompts stay in the neutral project flow until the user confirms
+    // an effect, so ORANGEJUCE never invents a plugin for a workflow request.
+    const preClassification = classifyAudioSoftwarePrompt(promptToSend);
+    const isEffectPath =
+      preClassification.kind === "effect" &&
+      !preClassification.ambiguous &&
+      preClassification.confidence >= 0.45;
+
+    try {
+      if (isEffectPath) {
+        // Legacy plugin generation path (clear effect requests only).
+        //
+        // This MUST be sequential, not parallel: the audio-project card for an
+        // effect adapts the exact plugin that was just built, so its processor
+        // faceplate DSP is what the audition plays. Running the two in parallel
+        // compiled a generic native-model project (generic tanh audition) that
+        // never referenced the real plugin. So: (1) build & persist the real
+        // plugin first, (2) read the freshly-saved plugin from the synchronous
+        // mirror ref, (3) request an adapted-plugin effect project carrying that
+        // exact plugin contract.
+        await buildThenAdaptEffect(
+          () => processChatMessageRequest(promptToSend, newHistory),
+          () => latestPluginRef.current,
+          (built) => {
+            const legacyPayload: LegacyPlugin | undefined =
+              built && !built.isPlaceholder && built.dspFunction
+              ? { id: built.id, name: built.name, parameters: built.parameters, dspFunction: built.dspFunction }
+              : undefined;
+            return requestAudioProject(promptToSend, legacyPayload);
+          },
+        );
+      } else {
+        // Non-effect path: skip the plugin generator entirely.
+        // Build the project contract and append a concise assistant message.
+        const kindLabel: Record<AudioProjectKind, string> = {
+          effect: "effect", instrument: "instrument", sampler: "sampler",
+          sequencer: "sequencer", mixer: "mixer", mastering: "mastering tool",
+          utility: "audio utility", daw: "DAW workstation",
+        };
+        const label = kindLabel[preClassification.kind] ?? preClassification.kind;
+        // Run the audio-project request in parallel with crafting the message so
+        // the card and the message appear together.
+        await requestAudioProject(promptToSend);
+        const assistantText =
+          `**${label[0].toUpperCase()}${label.slice(1)} project brief ready.** ` +
+          `ORANGEJUCE compiled a ${label} starting point based on your goal. ` +
+          `The project card below shows what was understood, what was proved, ` +
+          `and what the browser preview offers. Use "Change category" or the ` +
+          `brief decisions to refine it without losing validated evidence.` +
+          (preClassification.ambiguous
+            ? `\n\nThe intent looked like it could be more than one category — ` +
+              `confirm the right one in the card above.`
+            : "");
+        const assistantMsg: ChatMessage = {
+          id: `chat-${Date.now()}-model`,
+          senderId: "orangejuce",
+          senderName: "ORANGEJUCE",
+          role: "model",
+          text: assistantText,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        };
+        const finalHistory = [...newHistory, assistantMsg];
+        setChatHistory(finalHistory);
+        localStorage.setItem(STORAGE_KEY_CHAT, JSON.stringify(finalHistory));
+      }
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   const ARCHITECT_SYSTEM_PROMPT = `You are an elite DSP audio engineer decomposing a natural-language plugin idea into a rigorous implementation spec.
@@ -3313,6 +3651,10 @@ return Math.tanh(finalOut * 0.95);`;
 
     setChatHistory([]);
     localStorage.removeItem(STORAGE_KEY_CHAT);
+    setAudioProject(null);
+    setAudioProjectError(null);
+    setAudioProjectLoading(false);
+    localStorage.removeItem(STORAGE_KEY_AUDIO_PROJECT);
 
     // 4. Actually release the loaded plugin. Without this, `plugin.dspFunction`
     //    stays truthy after "New chat", so classifyEditIntent's `hasPlugin`
@@ -3371,20 +3713,13 @@ Return ONLY a JSON object with this exact shape, no other text:
           suggestions: Array.isArray(payload.suggestions) ? payload.suggestions : [],
         };
       } else {
-        const response = await fetch("/api/plugins/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            code: codeToTest,
-            parameters: paramsToTest,
-          }),
+        const payload = await callLLM({
+          config: llmConfig,
+          systemPrompt: ANALYSIS_SYSTEM_PROMPT,
+          userText: `Parameters in scope: ${JSON.stringify(paramsToTest.map(p => p.id))}\n\nDSP code:\n\`\`\`javascript\n${codeToTest}\n\`\`\``,
+          temperature: 0.1,
         });
-
-        if (!response.ok) {
-          throw new Error("Purity analysis call failed.");
-        }
-
-        result = await response.json();
+        result = payload;
       }
 
       setAnalysis(result);
@@ -3455,20 +3790,20 @@ Return ONLY a JSON object with this exact shape, no other text:
         // Run Stability Analysis to check if more anomalies exist
         let nextAnalysis: DSPAnalysisResult | null = null;
         try {
-          const response = await fetch("/api/plugins/analyze", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              code: currentCode,
-              parameters: plugin.parameters,
-            }),
+          const cfg = getLLMConfig();
+          const payload = await callLLM({
+            config: cfg,
+            systemPrompt: ANALYSIS_SYSTEM_PROMPT,
+            userText: `Parameters in scope: ${JSON.stringify(plugin.parameters.map(p => p.id))}\n\nDSP code:\n\`\`\`javascript\n${currentCode}\n\`\`\``,
+            temperature: 0.1,
           });
-
-          if (response.ok) {
-            nextAnalysis = await response.json();
-          } else {
-            throw new Error("Purity analysis call failed.");
-          }
+          nextAnalysis = {
+            purityScore: payload.purityScore ?? 70,
+            stabilityAssessment: payload.stabilityAssessment || "Unknown",
+            performanceEstimate: payload.performanceEstimate || "Unknown",
+            mathCritique: payload.mathCritique || "",
+            suggestions: Array.isArray(payload.suggestions) ? payload.suggestions : [],
+          };
         } catch (apiErr) {
           console.warn("API Purity call failed during auto-fix, falling back to local audit:", apiErr);
           nextAnalysis = runOfflineDSPAnalysis(currentCode, plugin.parameters);
@@ -3518,8 +3853,7 @@ Return ONLY a JSON object with this exact shape, no other text:
 
   // ---- 7. Manual Live Code Scratchpad Handlers ----
   const handleApplyScratchCode = () => {
-    compileDsp(scratchCode);
-    if (!dspError) {
+    if (compileDsp(scratchCode)) {
       const updatedPlugin = { ...plugin, dspFunction: scratchCode };
       savePluginState(updatedPlugin);
       setIsEditingCode(false);
@@ -3579,6 +3913,10 @@ Return ONLY a JSON object with this exact shape, no other text:
   };
 
   // ---- Factory Canvas: the autonomous factory floor ----
+  if (uiMode === "daw") {
+    return <DAWStudio plugin={plugin} audioProject={audioProject} onExit={() => switchUiMode("simple")} />;
+  }
+
   if (uiMode === "canvas") {
     return (
       <>
@@ -3639,6 +3977,9 @@ Return ONLY a JSON object with this exact shape, no other text:
           onKeySourceTypeChange={changeKeySourceType}
           selectedKeyDeviceId={selectedKeyDeviceId}
           onSelectKeyDevice={setSelectedKeyDeviceId}
+          sidechainConnected={sidechainConnected}
+          sidechainConsumed={sidechainConsumed}
+          sidechainLevel={sidechainLevel}
           onSliderChange={handleSliderChange}
           onOpenPro={(tab) => {
             if (tab) setCompanionTab(tab as CompanionTabId);
@@ -3648,9 +3989,14 @@ Return ONLY a JSON object with this exact shape, no other text:
             stopAudioEngine();
             switchUiMode("canvas");
           }}
+          onOpenDAW={() => {
+            stopAudioEngine();
+            switchUiMode("daw");
+          }}
           modelPicker={
             <ModelPicker
               hasGeminiKey={apiHealth ? apiHealth.hasApiKey : null}
+              remoteProviderHealth={apiHealth?.providers}
               offlineForced={offlineForced}
               onEngineChange={handleEngineChange}
               onConfigChange={refreshLocalLlmStatus}
@@ -3672,6 +4018,23 @@ Return ONLY a JSON object with this exact shape, no other text:
           onAddNote={(paramId, paramName, note) => setAnnotations((prev) => [...prev, { paramId, paramName, note }])}
           onRemoveNote={(index) => setAnnotations((prev) => prev.filter((_, i) => i !== index))}
           onApplyNotes={() => handleSendPromptDirectly("Apply my element notes")}
+          audioProject={audioProject}
+          audioProjectLoading={audioProjectLoading}
+          audioProjectError={audioProjectError}
+          audioClassification={audioClassification}
+          onNativeProjectExport={scaffoldAudioProject}
+          onReviseProjectKind={reviseAudioProjectKind}
+          onUpdateProjectDecision={updateAudioProjectDecision}
+          onRunPluginAudition={togglePlaySimulation}
+          activePluginId={!plugin.isPlaceholder ? plugin.id : undefined}
+          pluginAuditionPlaying={isPlaying}
+          onPreviewMeasured={handleAudioProjectPreviewMeasured}
+          onOpenWorkstation={() => {
+            // A DAW project is a browser workstation, not a single plugin —
+            // route it into the multitrack Studio rather than the plugin dock.
+            stopAudioEngine();
+            switchUiMode("daw");
+          }}
         />
         {showBlindTest && refineCandidates.length >= 2 && (
           <BlindListeningTest
@@ -3723,6 +4086,7 @@ Return ONLY a JSON object with this exact shape, no other text:
 
           <ModelPicker
             hasGeminiKey={apiHealth ? apiHealth.hasApiKey : null}
+            remoteProviderHealth={apiHealth?.providers}
             offlineForced={offlineForced}
             onEngineChange={handleEngineChange}
             onConfigChange={refreshLocalLlmStatus}
@@ -3737,6 +4101,19 @@ Return ONLY a JSON object with this exact shape, no other text:
           >
             <Code2 className="w-3 h-3 text-emerald-400" />
             <span>Export Code</span>
+          </button>
+
+          <button
+            data-testid="button-open-daw-pro"
+            onClick={() => {
+              stopAudioEngine();
+              switchUiMode("daw");
+            }}
+            className="flex items-center gap-1 border border-orange-900/60 bg-orange-950/40 hover:bg-orange-950/70 text-orange-300 hover:text-orange-200 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer select-none"
+            title="Open the multitrack arrangement, mixer, recording, and bounce workspace"
+          >
+            <AudioLines className="w-3 h-3" />
+            <span>Studio / DAW</span>
           </button>
 
           <button
@@ -4528,7 +4905,7 @@ Return ONLY a JSON object with this exact shape, no other text:
                     {/* Sidechain key source -- only shown when the loaded plugin's
                         own DSP body actually reads inputKey. An ordinary plugin has
                         no key input, so this picker would be a fake control for it. */}
-                    {plugin.dspFunction.includes("inputKey") && (
+                    {hasExternalSidechain(plugin) && (
                       <div className="space-y-1.5 pt-1.5 border-t border-neutral-900">
                         <span className="text-[10px] font-mono font-bold text-neutral-500 uppercase tracking-widest">Sidechain Key Signal</span>
                         <div className="grid grid-cols-5 gap-1 bg-neutral-900/40 p-1 rounded-xl border border-neutral-850">
@@ -4569,6 +4946,9 @@ Return ONLY a JSON object with this exact shape, no other text:
                             ))}
                           </select>
                         )}
+                        <div className={`text-[9px] font-mono rounded-lg border px-2 py-1 ${sidechainConsumed ? "border-emerald-900 text-emerald-300" : sidechainConnected ? "border-amber-900 text-amber-300" : "border-neutral-850 text-neutral-500"}`}>
+                          {sidechainConsumed ? `EXTERNAL DETECTOR ACTIVE · ${Math.round(sidechainLevel * 100)}%` : sidechainConnected ? "EXTERNAL SOURCE CONNECTED · WAITING FOR SIGNAL" : keySourceType !== "none" ? "EXTERNAL SOURCE SELECTED · NOT CONNECTED" : "INTERNAL DETECTOR · NO AUXILIARY SIGNAL"}
+                        </div>
                       </div>
                     )}
 
@@ -5104,9 +5484,11 @@ return inputSample * dynamicVolumeMod;`
               <div className="space-y-4">
                 <ExportPanel
                   pluginName={plugin.pluginName || plugin.name}
+                  dspFunction={plugin.dspFunction}
                   faustCode={plugin.faustCode}
                   cppJuceCode={plugin.cppJuceCode}
                   parameters={plugin.parameters}
+                  routing={plugin.routing}
                 />
               </div>
             )}

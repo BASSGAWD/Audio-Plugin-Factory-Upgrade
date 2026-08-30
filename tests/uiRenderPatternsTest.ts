@@ -57,7 +57,7 @@ for (const style of knobStyles) {
 
 /* ---- panel recipe data validity ---- */
 const panelStyles = Object.keys(PANEL_TEXTURE_RECIPES) as PanelTextureStyle[];
-check(`inventory: ${panelStyles.length} panel textures`, panelStyles.length === 6, `${panelStyles.length}`);
+check(`inventory: ${panelStyles.length} panel textures`, panelStyles.length === 7, `${panelStyles.length}`);
 for (const style of panelStyles) {
   const r = PANEL_TEXTURE_RECIPES[style];
   check(`${style}: recipe.style matches its own key`, r.style === style);

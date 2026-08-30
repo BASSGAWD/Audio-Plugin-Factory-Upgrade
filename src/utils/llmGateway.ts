@@ -6,7 +6,8 @@
  * Defaults to a local provider so the app works offline out of the box.
  */
 
-export type LLMProvider = "gemini" | "ollama" | "lm_studio" | "fusion";
+export type LLMProvider = "gemini" | "openai" | "anthropic" | "online_free" | "ollama" | "lm_studio" | "fusion";
+export type RemoteLLMProvider = "gemini" | "openai" | "anthropic" | "online_free";
 
 /** The local backends a fusion can combine. */
 export type FusionMember = "ollama" | "lm_studio";
@@ -23,6 +24,11 @@ export interface LLMConfig {
   ollamaModel: string;
   lmStudioUrl: string;
   lmStudioModel: string;
+  /** Remote model ids are selected client-side but credentials stay server-side. */
+  openaiModel?: string;
+  anthropicModel?: string;
+  /** Last server-reported free model, informational only; requests always use auto. */
+  onlineFreeActiveModel?: string;
   lowVramMode?: boolean;
   maxContextMessages?: number;
   systemPromptStyle?: "standard" | "compact";
@@ -49,6 +55,8 @@ export const DEFAULT_LLM_CONFIG: LLMConfig = {
   ollamaModel: "orangey",
   lmStudioUrl: "http://127.0.0.1:1234",
   lmStudioModel: "qwen/qwen3-14b",
+  openaiModel: "gpt-5-nano",
+  anthropicModel: "claude-haiku-4-5",
   lowVramMode: false,
   maxContextMessages: 4,
   systemPromptStyle: "standard",
@@ -78,6 +86,22 @@ export function saveLLMConfig(cfg: LLMConfig): void {
 
 export function isLocalProvider(cfg: Pick<LLMConfig, "provider">): boolean {
   return cfg.provider === "ollama" || cfg.provider === "lm_studio" || cfg.provider === "fusion";
+}
+
+export function isRemoteProvider(cfg: Pick<LLMConfig, "provider">): cfg is Pick<LLMConfig, "provider"> & { provider: RemoteLLMProvider } {
+  return cfg.provider === "gemini" || cfg.provider === "openai" || cfg.provider === "anthropic" || cfg.provider === "online_free";
+}
+
+export function selectedModel(cfg: LLMConfig): string {
+  switch (cfg.provider) {
+    case "ollama": return cfg.ollamaModel;
+    case "lm_studio": return cfg.lmStudioModel;
+    case "openai": return cfg.openaiModel || DEFAULT_LLM_CONFIG.openaiModel!;
+    case "anthropic": return cfg.anthropicModel || DEFAULT_LLM_CONFIG.anthropicModel!;
+    case "online_free": return "auto";
+    case "gemini": return "gemini-3.5-flash";
+    default: return "";
+  }
 }
 
 /**
@@ -179,7 +203,10 @@ export async function testProviderConnection(
   const path = provider === "ollama" ? "/api/tags" : "/v1/models";
 
   try {
-    const res = await fetchLLMRoute(`${url}${path}`, { method: "GET" });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const res = await fetchLLMRoute(`${url}${path}`, { method: "GET", signal: controller.signal });
+    clearTimeout(timeout);
     if (!res.ok) throw new Error(`Server returned status ${res.status}`);
     const data = await res.json();
     const models: string[] =
@@ -193,7 +220,11 @@ export async function testProviderConnection(
       message: models.length > 0 ? `Connected. ${models.length} model(s) available.` : "Connected, but no models are loaded.",
     };
   } catch (err: any) {
-    return { ok: false, models: [], message: err.message || "Connection failed." };
+    return {
+      ok: false,
+      models: [],
+      message: err?.name === "AbortError" ? "Connection timed out after 2.5 seconds." : err.message || "Connection failed.",
+    };
   }
 }
 
@@ -236,13 +267,18 @@ export async function detectFusion(cfg: LLMConfig): Promise<FusionAvailability> 
  * Leaves the config untouched if neither is reachable.
  */
 export async function autoDetectProvider(cfg: LLMConfig): Promise<LLMConfig> {
-  const ollama = await testProviderConnection("ollama", cfg);
+  // Both optional services are probed together, and each probe has its own
+  // bounded timeout. Prefer Ollama only when both happen to be available to
+  // preserve the established local default.
+  const [ollama, lmStudio] = await Promise.all([
+    testProviderConnection("ollama", cfg),
+    testProviderConnection("lm_studio", cfg),
+  ]);
   if (ollama.ok) {
     const model = ollama.models.includes(cfg.ollamaModel) ? cfg.ollamaModel : ollama.models[0] || cfg.ollamaModel;
     return { ...cfg, provider: "ollama", ollamaModel: model };
   }
 
-  const lmStudio = await testProviderConnection("lm_studio", cfg);
   if (lmStudio.ok) {
     const model = lmStudio.models.includes(cfg.lmStudioModel) ? cfg.lmStudioModel : lmStudio.models[0] || cfg.lmStudioModel;
     return { ...cfg, provider: "lm_studio", lmStudioModel: model };
@@ -405,6 +441,55 @@ export interface LocalLLMCallParams {
   signal?: AbortSignal;
 }
 
+export type LLMCallParams = LocalLLMCallParams;
+
+function abortError(): Error {
+  const error = new Error("LLM request was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+/** Race local members without leaving paid/compute work running after a winner. */
+async function callFusionLLM(params: LocalLLMCallParams): Promise<any> {
+  if (params.signal?.aborted) throw abortError();
+  const controllers = FUSION_MEMBERS.map(() => new AbortController());
+  const onParentAbort = () => controllers.forEach((controller) => controller.abort());
+  params.signal?.addEventListener("abort", onParentAbort, { once: true });
+  const errors: Error[] = [];
+
+  try {
+    return await new Promise<any>((resolve, reject) => {
+      let remaining = FUSION_MEMBERS.length;
+      FUSION_MEMBERS.forEach((member, index) => {
+        callLocalLLM({
+          ...params,
+          config: memberConfig(params.config, member),
+          signal: controllers[index].signal,
+        }).then((value) => {
+          // A JSON result is the local-call validity contract. Abort every
+          // loser before resolving so neither local backend keeps generating.
+          controllers.forEach((controller, loser) => {
+            if (loser !== index) controller.abort();
+          });
+          resolve(value);
+        }).catch((error) => {
+          errors[index] = error instanceof Error ? error : new Error(String(error));
+          remaining--;
+          if (remaining === 0) {
+            if (params.signal?.aborted) {
+              reject(abortError());
+              return;
+            }
+            reject(new Error(`Fusion: no member responded (${errors.map((e, i) => `${FUSION_MEMBERS[i]}: ${e?.message || "failed"}`).join(" | ")})`));
+          }
+        });
+      });
+    });
+  } finally {
+    params.signal?.removeEventListener("abort", onParentAbort);
+  }
+}
+
 /**
  * Generic JSON-mode chat completion against whichever local provider is
  * configured. Throws if the provider isn't local or the request fails;
@@ -420,14 +505,7 @@ export async function callLocalLLM(params: LocalLLMCallParams): Promise<any> {
   // the orchestration layer where a verifier exists — see the refinement
   // loop's alternating fusion refiner.
   if (config.provider === "fusion") {
-    try {
-      return await Promise.any(
-        FUSION_MEMBERS.map((m) => callLocalLLM({ ...params, config: memberConfig(config, m) }))
-      );
-    } catch (err: any) {
-      const reasons = (err?.errors ?? []).map((e: any) => e?.message).filter(Boolean).join(" | ");
-      throw new Error(`Fusion: no member responded (${reasons || "all backends failed"})`);
-    }
+    return callFusionLLM(params);
   }
   const maxContext = config.maxContextMessages ?? 4;
 
@@ -492,4 +570,45 @@ export async function callLocalLLM(params: LocalLLMCallParams): Promise<any> {
   }
 
   throw new Error(`callLocalLLM: provider "${config.provider}" is not a local provider.`);
+}
+
+/**
+ * Provider-neutral chat entry point. Local providers retain their direct
+ * gateway behavior; remote providers always go through the authenticated app
+ * server and never receive credentials in the browser.
+ */
+export async function callLLM(params: LLMCallParams): Promise<any> {
+  if (isLocalProvider(params.config)) return callLocalLLM(params);
+  if (!isRemoteProvider(params.config)) throw new Error(`callLLM: unsupported provider "${params.config.provider}".`);
+
+  const response = await fetch("/api/llm/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: params.signal,
+    body: JSON.stringify({
+      provider: params.config.provider,
+      model: selectedModel(params.config),
+      messages: [
+        { role: "system", content: params.systemPrompt },
+        ...(params.history ?? []).map((message) => ({
+          role: message.role === "model" ? "assistant" : "user",
+          content: message.text,
+        })),
+        { role: "user", content: params.userText },
+      ],
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.code ? `${payload.code}: ${payload.error || "LLM gateway request failed."}` : payload.error || `LLM gateway returned status ${response.status}`);
+    (error as Error & { status?: number; code?: string }).status = response.status;
+    (error as Error & { status?: number; code?: string }).code = payload.code;
+    throw error;
+  }
+  const result = payload.result ?? payload;
+  // Keep response metadata available to UI callers without changing the
+  // structured response contract expected by existing generation code.
+  return result && typeof result === "object" && !Array.isArray(result)
+    ? { ...result, __llmMeta: { provider: payload.provider, model: payload.model } }
+    : result;
 }

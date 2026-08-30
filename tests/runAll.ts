@@ -10,7 +10,7 @@
  * before it ships.
  */
 
-import { spawnSync } from "child_process";
+import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import path from "path";
 
@@ -24,12 +24,21 @@ const TEST_FILES = [
   "newFamilyDetectTest.ts",
   "ampSamplerTest.ts",
   "hardeningTest.ts",
+  "serverSecurityTest.ts",
   "knobMathTest.ts",
   "offlineBuilderTest.ts",
   "composeReindentTest.ts",
   "plannerTest.ts",
+  "audioProjectHarnessTest.ts",
+  "audioProjectEndpointTest.ts",
+  "audioProjectRuntimeTest.ts",
+  "audioProjectDispatchTest.ts",
+  "audioProjectEffectSequenceTest.ts",
+  "audioProjectPreviewSecurityTest.ts",
   "nativeBuildTest.ts",
+  "nativeProjectTargetTest.ts",
   "nativeBuildEditorTest.ts",
+  "nativeUiSecurityTest.ts",
   "refinementLoopTest.ts",
   "uiRenderTest.tsx",
   "uiRenderPatternsTest.ts",
@@ -56,11 +65,15 @@ const TEST_FILES = [
   "researchWebTest.ts",
   "researchIndexTest.ts",
   "fusionTest.ts",
+  "providerGatewayTest.ts",
   "functionalFitnessTest.ts",
   "calibrationRepairTest.ts",
   "cpuCostTest.ts",
   "referenceDeviationTest.ts",
   "guiArchetypeTest.ts",
+  "resolvedUiContractTest.ts",
+  "visualIdentityTest.tsx",
+  "uiSemanticPipelineTest.ts",
   "eqCurveTest.ts",
   "featureDepthTest.ts",
   "antiAliasingTest.ts",
@@ -71,28 +84,60 @@ const TEST_FILES = [
   "liveBuildDiscoveryTest.ts",
   "sidechainEngineTest.ts",
   "ampVoicingTest.ts",
+  "dawCoreTest.ts",
+  "dawContractTest.ts",
+  "dawHydrationTest.ts",
+  "desktopGoldenTest.ts",
+  "desktopScaffoldContractTest.ts",
+  "desktopLatencyEvidenceTest.ts",
+  "desktopReleaseContractTest.ts",
+  "audioProjectTruthfulnessTest.ts",
+  "audioProjectLegacyPluginSanitizeTest.ts",
 ];
 
 let failed = 0;
-const results: string[] = [];
+const results: string[] = new Array(TEST_FILES.length);
+const failureOutput: string[] = new Array(TEST_FILES.length).fill("");
+let nextFile = 0;
 
-for (const file of TEST_FILES) {
+async function runFile(file: string, index: number) {
   const start = Date.now();
-  const run = spawnSync("npx", ["tsx", path.join(here, file)], {
+  // shell: true is required for `npx` to resolve at all on Windows (it's a
+  // .cmd wrapper there, and spawn() with shell:false can't exec it directly
+  // -- ENOENT). A shell is available on every platform this runs on, so
+  // there's no cross-platform reason to prefer shell:false here.
+  const run = spawn("npx", ["tsx", path.join(here, file)], {
     shell: true,
-    encoding: "utf8",
+  });
+  let stdout = "";
+  let stderr = "";
+  run.stdout?.setEncoding("utf8");
+  run.stderr?.setEncoding("utf8");
+  run.stdout?.on("data", chunk => { stdout += chunk; });
+  run.stderr?.on("data", chunk => { stderr += chunk; });
+  const status = await new Promise<number | null>((resolve, reject) => {
+    run.once("error", reject);
+    run.once("close", resolve);
   });
   const ms = Date.now() - start;
-  const ok = run.status === 0;
+  const ok = status === 0;
   if (!ok) failed++;
-  results.push(`${ok ? "PASS" : "FAIL"}  ${file.padEnd(26)} ${ms}ms`);
+  results[index] = `${ok ? "PASS" : "FAIL"}  ${file.padEnd(26)} ${ms}ms`;
   if (!ok) {
-    console.log(`\n----- ${file} output -----`);
-    console.log(run.stdout || "");
-    console.log(run.stderr || "");
+    failureOutput[index] = `\n----- ${file} output -----\n${stdout}\n${stderr}`;
   }
 }
 
+async function worker() {
+  while (nextFile < TEST_FILES.length) {
+    const index = nextFile++;
+    await runFile(TEST_FILES[index], index);
+  }
+}
+
+await Promise.all(Array.from({ length: Math.min(2, TEST_FILES.length) }, () => worker()));
+
+failureOutput.filter(Boolean).forEach(output => console.log(output));
 console.log("\n=== Regression suite ===");
 results.forEach((r) => console.log(r));
 console.log(failed === 0 ? `\nALL ${TEST_FILES.length} SUITES PASS` : `\n${failed} SUITE(S) FAILED`);

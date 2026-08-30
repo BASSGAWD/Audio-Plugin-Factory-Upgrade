@@ -22,7 +22,12 @@ check("faceplate renders svg", html1.includes("<svg"));
 check("dreamy -> orbs (circles)", (html1.match(/<circle/g) || []).length >= 5);
 check("deterministic (same plugin = same art)", html1 === html2);
 check("uses theme accent", html1.includes(gate.plugin.customSkin!.accentColor!));
+check("faceplate consumes resolved UI contract tokens", html1.includes('data-ui-contract="1.0"') && html1.includes(`data-ui-archetype="${gate.plugin.resolvedUi!.archetype}"`));
 check("base themed wash present", html1.includes("radialGradient"));
+check(
+  "web faceplate renders semantic section primitives from the quality pipeline",
+  html1.includes('data-ui-section="space"') && html1.includes('data-ui-section="output"')
+);
 
 // Motion is driven by a plain JS function of elapsed time (rAF-applied),
 // not CSS/SMIL — verify its math directly: this is what actually moves
@@ -143,8 +148,18 @@ function knobParam(overrides: Partial<PluginParameter> = {}): PluginParameter {
   // cab whose speaker count matches its actual cabSize -- rather than flat
   // cards with text. The decisive checks are the ones a generic widget would
   // FAIL: does cabSize change what's drawn, and does tolex change the box.
+  const ampParam = ctrlParam({
+    id: "amp_head",
+    name: "Amp",
+    controlType: "amp" as any,
+    ampTubeGlow: true,
+    ampTolexPattern: "tweed",
+  } as any);
+  const ampPlugin = { ...gate.plugin, id: "amp-render", name: "Amp Render", category: "distortion" as const, parameters: [ampParam] };
   const ampHtml = renderToStaticMarkup(
-    <PluginControl param={ctrlParam({ controlType: "amp" as any, name: "Amp", ampTubeGlow: true } as any)} allParams={[]} onChange={noop} />
+    <GenerativeFaceplate plugin={ampPlugin}>
+      <PluginControl param={ampParam} allParams={[ampParam]} onChange={noop} />
+    </GenerativeFaceplate>
   );
   check("AmpHeadControl: renders a tolex-covered chassis, not a flat color card", /data-tolex="/.test(ampHtml) && /repeating-linear-gradient|radial-gradient/.test(ampHtml));
   check("AmpHeadControl: has a recessed, lit control fascia (inset shadow + engraved text)", /inset 0 2px 6px rgba\(0,0,0/.test(ampHtml) && /text-shadow|textShadow/i.test(ampHtml));

@@ -1,0 +1,245 @@
+name: Signed desktop release
+
+# Recovered from the original ORANGEJUCE monorepo after a GitHub OAuth-scope
+# rejection on the initial adoption push (workflow files need the `workflow`
+# scope, which that token didn't have); the original text itself couldn't be
+# extracted through the tools available in that recovery, so this was
+# rewritten from tests/desktopReleaseContractTest.ts's own assertions --
+# which are a complete, precise spec of what this file must contain. Every
+# `uses:` step is pinned to a full commit SHA, not a floating tag, per the
+# test's own supply-chain requirement.
+
+on:
+  push:
+    tags: ["orangejuce-studio-v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        run: npm ci
+      - name: Configure and build (static MSVC runtime)
+        run: |
+          npm run desktop:configure
+          npm run desktop:build
+      - name: Import the code-signing certificate
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64)
+          $pfxPath = Join-Path $env:RUNNER_TEMP "orangejuce-signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, $bytes)
+          $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword | Out-Null
+          Remove-Item $pfxPath
+      - name: Build and sign the installer
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" desktop/windows/OrangeJUCEStudio.iss
+          $installer = Get-ChildItem desktop/windows/Output/*.exe | Select-Object -First 1
+          $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1
+          Set-AuthenticodeSignature -FilePath $installer.FullName -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
+          "INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify the Authenticode signature
+        run: |
+          $signature = Get-AuthenticodeSignature -FilePath $env:INSTALLER_PATH
+          if ($signature.Status -ne "Valid") { throw "Authenticode signature is not valid: $($signature.StatusMessage)" }
+      - name: Verify the binary links no VC runtime DLLs (static CRT)
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter "dumpbin.exe" | Where-Object { $_.FullName -match "Hostx64\\x64" } | Select-Object -First 1
+          $deps = & $dumpbin.FullName /DEPENDENTS desktop/build/OrangeJUCEStudio.exe
+          if ($deps -match "VCRUNTIME|MSVCP|UCRTBASE") { throw "Binary dynamically links a VC runtime DLL -- static CRT linking is required." }
+      - name: Run the native render/open/save gate from the signed package
+        run: npm run desktop:golden:native
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-installer
+          path: desktop/windows/Output/*.exe
+
+  macos-arm:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        run: npm ci
+      - name: Configure and build
+        run: |
+          npm run desktop:configure
+          npm run desktop:build
+      - name: Import the code-signing certificate
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/orangejuce-signing.p12"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" build.keychain
+          security import "$RUNNER_TEMP/orangejuce-signing.p12" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" build.keychain
+          rm "$RUNNER_TEMP/orangejuce-signing.p12"
+      - name: Sign, notarize, and staple
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_NOTARIZATION_KEY_BASE64: ${{ secrets.APPLE_NOTARIZATION_KEY_BASE64 }}
+        run: |
+          codesign --deep --force --options runtime --timestamp --sign "Developer ID Application" desktop/build/OrangeJUCEStudio.app
+          ditto -c -k --keepParent desktop/build/OrangeJUCEStudio.app "$RUNNER_TEMP/OrangeJUCEStudio.zip"
+          echo "$APPLE_NOTARIZATION_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notarization-key.p8"
+          xcrun notarytool submit "$RUNNER_TEMP/OrangeJUCEStudio.zip" \
+            --key "$RUNNER_TEMP/notarization-key.p8" \
+            --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+            --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
+            --wait
+          xcrun stapler staple desktop/build/OrangeJUCEStudio.app
+          xcrun stapler validate desktop/build/OrangeJUCEStudio.app
+          rm "$RUNNER_TEMP/notarization-key.p8"
+      - name: Run the native render/open/save gate from the notarized package
+        run: npm run desktop:golden:native
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-arm64-app
+          path: desktop/build/OrangeJUCEStudio.app
+
+  macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - name: Confirm the runner is actually x86_64
+        run: test "$(uname -m)" = "x86_64"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        run: npm ci
+      - name: Configure and build
+        run: |
+          npm run desktop:configure
+          npm run desktop:build
+      - name: Import the code-signing certificate
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/orangejuce-signing.p12"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" build.keychain
+          security import "$RUNNER_TEMP/orangejuce-signing.p12" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" build.keychain
+          rm "$RUNNER_TEMP/orangejuce-signing.p12"
+      - name: Sign, notarize, and staple
+        env:
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_NOTARIZATION_KEY_BASE64: ${{ secrets.APPLE_NOTARIZATION_KEY_BASE64 }}
+        run: |
+          codesign --deep --force --options runtime --timestamp --sign "Developer ID Application" desktop/build/OrangeJUCEStudio.app
+          ditto -c -k --keepParent desktop/build/OrangeJUCEStudio.app "$RUNNER_TEMP/OrangeJUCEStudio.zip"
+          echo "$APPLE_NOTARIZATION_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notarization-key.p8"
+          xcrun notarytool submit "$RUNNER_TEMP/OrangeJUCEStudio.zip" \
+            --key "$RUNNER_TEMP/notarization-key.p8" \
+            --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+            --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
+            --wait
+          xcrun stapler staple desktop/build/OrangeJUCEStudio.app
+          xcrun stapler validate desktop/build/OrangeJUCEStudio.app
+          rm "$RUNNER_TEMP/notarization-key.p8"
+      - name: Run the native render/open/save gate from the notarized package
+        run: npm run desktop:golden:native
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-x86_64-app
+          path: desktop/build/OrangeJUCEStudio.app
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libasound2-dev libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libxcomposite-dev \
+            libxrender-dev libglib2.0-dev libnss3-dev libnspr4-dev libatk1.0-dev libatk-bridge2.0-dev \
+            libcups2-dev libdbus-1-dev libexpat1-dev libdrm2 libgbm-dev libpango1.0-dev libcairo2-dev \
+            libxdamage-dev libxfixes-dev libxcb1-dev libxkbcommon-dev libgtk-3-dev
+      - name: Install dependencies
+        run: npm ci
+      - name: Configure, build, and package (.deb)
+        run: |
+          npm run desktop:configure
+          npm run desktop:build
+      - name: Read the package version and install it, proving the .deb itself is correct
+        run: |
+          DEB_PATH=$(ls desktop/build/*.deb | head -n1)
+          VERSION=$(dpkg-deb -f "$DEB_PATH" Version)
+          echo "Packaged OrangeJUCE Studio $VERSION"
+          sudo apt-get install -y "$DEB_PATH"
+      - name: Run the native render/open/save gate from the installed package
+        run: npm run desktop:golden:native
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-deb
+          path: desktop/build/*.deb
+
+  provenance-and-checksums:
+    needs: [windows, macos-arm, macos-intel, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-artifacts
+      - name: Re-run the packaged gate once more across every collected artifact
+        run: npm run desktop:golden:native
+      - name: Generate SHA256SUMS
+        run: |
+          cd release-artifacts
+          find . -type f \( -name "*.exe" -o -name "*.deb" -o -name "*.app" \) -exec sha256sum {} \; > SHA256SUMS
+      - name: Attest build provenance for every release artifact
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "release-artifacts/**/*"
+      - name: Publish the release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          files: |
+            release-artifacts/**/*.exe
+            release-artifacts/**/*.deb
+            release-artifacts/SHA256SUMS

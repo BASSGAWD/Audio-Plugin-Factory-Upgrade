@@ -10,3 +10,4 @@ coverage/
 tests/.e2e-screenshots/
 local-model/data/
 local-model/
+.daw-sync-data/

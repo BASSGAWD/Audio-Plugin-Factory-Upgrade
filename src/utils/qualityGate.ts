@@ -32,6 +32,8 @@ import { measureFeatureDepth } from "./featureManifest";
 import { DSP_RECIPES, DspRecipe } from "./dspRecipes";
 import { resolveGlowBoxShadow } from "./customSkin";
 import { resolveMaterial } from "./materialVisuals";
+import { isSidechainEligible, routingContractFor, validateRoutingContract } from "./sidechainContract";
+import { repairResolvedGeometry, resolveSemanticUiContract, validateResolvedUiContract } from "./semanticUi";
 
 export interface QualityScores {
   looks: number;
@@ -2662,7 +2664,21 @@ export function polishPluginVisuals(
     return { ...p, controlType: inferControlType(p) };
   });
 
-  const layout = applyArchetype(archetype ?? "grid", typed);
+  // A prior/default 4-column grid is not intentional art direction. When a
+  // semantically stronger archetype is now known, replace that generic
+  // lattice deterministically. Anything not matching this exact factory
+  // lattice (and every explicit custom archetype) is preserved.
+  const targetArchetype = archetype ?? "grid";
+  const isGenericFactoryGrid =
+    targetArchetype !== "grid" &&
+    plugin.uiArchetype !== "custom" &&
+    typed.length >= 3 &&
+    typed.every((p) =>
+      p.x !== undefined && p.y !== undefined &&
+      ((p.x - 40) % 140 === 0) && ((p.y - 70) % 125 === 0)
+    );
+  const layout = applyArchetype(targetArchetype, typed, isGenericFactoryGrid);
+  if (isGenericFactoryGrid) changes.push(`replaced a generic grid with the ${targetArchetype} hierarchy`);
   // Repairs positions that ALREADY collide -- e.g. a plugin edited multiple
   // times before this occupied-slot-aware layout shipped, where every
   // param already has x/y so the "only fill gaps" layout above leaves them
@@ -2753,6 +2769,53 @@ function countControlOverlaps(parameters: PluginParameter[]): number {
   return count;
 }
 
+/** Detect a large, identical near-black control grid with no meaningful
+ * semantic sectioning. Dark, intentionally grouped panels remain valid. */
+export function isGenericUndifferentiatedGrid(plugin: AudioPlugin): boolean {
+  const controls = plugin.parameters.filter((p) => !["label", "meter", "waveform", "eq", "amp", "cab", "mic", "pad"].includes(p.controlType ?? ""));
+  if (controls.length < 6) return false;
+  const bg = plugin.customSkin?.bgColor ? hexToRgb(plugin.customSkin.bgColor) : null;
+  if (!bg || relativeLuminance(bg) > 0.08) return false;
+  const groups = new Set(controls.map((p) => p.uiGroup).filter(Boolean));
+  const sizes = new Set(controls.map((p) => `${p.w ?? 120}x${p.h ?? 100}`));
+  const types = new Set(controls.map((p) => p.controlType ?? "knob"));
+  const genericLayout = !plugin.uiArchetype || plugin.uiArchetype === "grid";
+  return genericLayout && groups.size < 2 && sizes.size === 1 && types.size <= 2;
+}
+
+/** Semantic labels count only when their controls form coherent regions.
+ * Also verify the characteristic geometry promised by specialized archetypes. */
+export function hasCoherentFaceplateGeometry(plugin: AudioPlugin): boolean {
+  const positioned = plugin.parameters.filter((p) => p.x !== undefined && p.y !== undefined);
+  const groups = new Map<string, PluginParameter[]>();
+  positioned.forEach((p) => { if (p.uiGroup) groups.set(p.uiGroup, [...(groups.get(p.uiGroup) ?? []), p]); });
+  const boxes = [...groups.values()].map((members) => ({
+    left: Math.min(...members.map((p) => p.x!)),
+    top: Math.min(...members.map((p) => p.y!)),
+    right: Math.max(...members.map((p) => p.x! + (p.w ?? 120))),
+    bottom: Math.max(...members.map((p) => p.y! + (p.h ?? 100))),
+  }));
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+    const a = boxes[i], b = boxes[j];
+    if (a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top) return false;
+  }
+  const archetype = plugin.uiArchetype;
+  const hero = positioned.filter((p) => p.uiRole === "hero");
+  const regular = positioned.filter((p) => p.uiRole !== "hero");
+  if (archetype === "eq_focus" && hero.some((p) => p.controlType === "eq")) {
+    const eq = hero.find((p) => p.controlType === "eq")!;
+    if ((eq.w ?? 0) < 400 || regular.some((p) => p.y! < eq.y! + (eq.h ?? 0))) return false;
+  }
+  if (archetype === "pedal") {
+    const switches = positioned.filter((p) => p.controlType === "toggle");
+    const dials = positioned.filter((p) => p.controlType !== "toggle" && p.uiRole !== "visual");
+    if (switches.length && dials.length && Math.min(...switches.map((p) => p.y!)) < Math.max(...dials.map((p) => p.y!))) return false;
+  }
+  if (archetype === "showpiece" && hero.length && regular.length &&
+      Math.min(...hero.map((p) => p.y!)) > Math.min(...regular.map((p) => p.y!))) return false;
+  return true;
+}
+
 export function scoreLooks(plugin: AudioPlugin): number {
   let score = 100;
   for (const p of plugin.parameters) {
@@ -2766,6 +2829,19 @@ export function scoreLooks(plugin: AudioPlugin): number {
   // plugin with even one collision can never reach 100.
   const overlaps = countControlOverlaps(plugin.parameters);
   if (overlaps > 0) score -= 15 + overlaps * 10;
+  // New, gated builds carry the renderer-neutral contract. Legacy/persisted
+  // plugins remain score-compatible until they next pass through the gate.
+  if (plugin.resolvedUi) {
+    const contractIssues = validateResolvedUiContract(plugin.resolvedUi);
+    score -= Math.min(60, contractIssues.length * 12);
+    if (plugin.resolvedUi.controls.length !== plugin.parameters.length) score -= 20;
+    // Newly gated contracts must carry a renderer-capable identity; old
+    // persisted contracts remain loadable but cannot claim the new visual
+    // identity quality credit until the deterministic migration runs.
+    if (!plugin.resolvedUi.identityRecipe) score -= 8;
+  }
+  if (isGenericUndifferentiatedGrid(plugin)) score -= 20;
+  if (!hasCoherentFaceplateGeometry(plugin)) score -= 25;
   return Math.max(0, score);
 }
 
@@ -3091,7 +3167,7 @@ export function runQualityGate(
   // --- Semantic UI spec -> deterministic layout: rank primary controls
   //     first and compose the theme from prompt design attributes. The
   //     model never dictates order, coordinates, or colors. ---
-  const uiSpec = buildUiSpec(opts.prompt ?? "", enforced.plugin.parameters);
+  const uiSpec = buildUiSpec(opts.prompt ?? "", enforced.plugin.parameters, opts.family);
   const orderedPlugin: AudioPlugin = {
     ...enforced.plugin,
     parameters: orderParametersBySpec(enforced.plugin.parameters, uiSpec),
@@ -3108,7 +3184,21 @@ export function runQualityGate(
   // fallback -- see guiArchetypes.ts's pickArchetype for the full mapping.
   const archetype = pickArchetype(opts.uiMetaphor, opts.family ?? null);
   const { plugin: polishedRaw, changes } = polishPluginVisuals({ ...orderedPlugin, outputTrim, dcBlock }, theme, archetype);
-  const polished: AudioPlugin = { ...polishedRaw, uiArchetype: polishedRaw.uiArchetype ?? archetype };
+  const geometry = repairResolvedGeometry(polishedRaw.parameters);
+  if (geometry.fixes.length > 0) changes.push(`resolved ${geometry.fixes.length} control bound/size/spacing issue(s)`);
+  const withGeometry: AudioPlugin = {
+    ...polishedRaw,
+    parameters: geometry.parameters,
+    uiArchetype: polishedRaw.uiArchetype ?? archetype,
+  };
+  const polished: AudioPlugin = {
+    ...withGeometry,
+    resolvedUi: resolveSemanticUiContract(
+      { ...withGeometry, buildReport: { attributes: uiSpec.attributes } as BuildReport },
+      uiSpec.primaryControls,
+      opts.family
+    ),
+  };
   changes.forEach((c) => notes.push(`Visual polish: ${c}.`));
   if (archetype !== "grid") notes.push(`GUI archetype: ${archetype} (matched to how this plugin should look and behave).`);
 
@@ -3269,6 +3359,24 @@ export function runQualityGate(
     codeFindings: codeAudit ? codeAudit.findings.map((f) => `[${f.severity}] ${f.message}`) : undefined,
     functionalFitness: fitness ?? undefined,
     featureDepth: depth ? { score: depth.score, evidence: depth.evidence, missing: [...depth.missing.required, ...depth.missing.expected] } : undefined,
+    sidechain: (() => {
+      const family = opts.family ?? polished.family ?? "hybrid_other";
+      const prompt = opts.prompt ?? polished.description;
+      const routing = routingContractFor(family, prompt, polished.dspFunction);
+      const eligible = isSidechainEligible(family, prompt);
+      return {
+        eligible,
+        selected: routing.auxiliaryInput.supported,
+        detectorMode: routing.detectorMode,
+        disconnectedBehavior: routing.disconnectedBehavior,
+        rationale: routing.auxiliaryInput.supported
+          ? "The request explicitly calls for an external detector and the generated DSP was verified to consume inputKey."
+          : eligible
+            ? "This design can use a sidechain, but no verified external-key behavior was requested and generated."
+            : "This design does not benefit from an external detector, so no auxiliary bus is advertised.",
+        verifiedInputKeyRead: routing.inputKeyArgument,
+      };
+    })(),
     calibrationRepairs: calibrationRepairs.length > 0 ? calibrationRepairs.map((r) => ({ paramId: r.paramId, factor: r.factor, metric: r.metric, before: r.before, after: r.after })) : undefined,
     cpuCost: cpuCost ?? undefined,
     referenceDeviation: referenceDeviation ?? undefined,
@@ -3282,7 +3390,10 @@ export function runQualityGate(
   // resolve FEATURE_MANIFEST without re-inferring the family from scratch --
   // every build path funnels through this one function, so this populates
   // it everywhere at once.
-  const final: AudioPlugin = { ...polished, quality: scores, buildReport: report, family: opts.family ?? polished.family };
+  const routing = routingContractFor(opts.family ?? polished.family ?? "hybrid_other", opts.prompt ?? polished.description, polished.dspFunction);
+  const routingIssues = validateRoutingContract(routing, polished.dspFunction);
+  if (routingIssues.length) notes.push(`Routing contract: ${routingIssues.join("; ")}`);
+  const final: AudioPlugin = { ...polished, quality: scores, buildReport: report, family: opts.family ?? polished.family, routing };
   return { plugin: final, scores, notes, report };
 }
 
@@ -3304,6 +3415,9 @@ export function formatBuildReport(r: BuildReport): string {
     ? `compiled ✓ · ${r.audibleParams.length}/${tested} controls verified audible on musical material`
     : "DID NOT COMPILE — the DSP never produced sound";
   lines.push(`- Verified: ${verified}`);
+  if (r.sidechain) {
+    lines.push(`- Sidechain: ${r.sidechain.selected ? "external key supported; internal detection is used when disconnected" : "internal detection only"} — ${r.sidechain.rationale}`);
+  }
 
   if (r.deadParams.length > 0) {
     lines.push(`- ⚠️ No audible effect measured: ${r.deadParams.join(", ")}`);

@@ -1,11 +1,16 @@
-import React, { useContext, useEffect, useRef, useState } from "react";
-import { AudioPlugin, PluginParameter } from "../types";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import { AudioPlugin, PluginParameter, VisualIdentityRecipe } from "../types";
 import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb, computeWaveformPath, waveShapeLabel } from "../utils/controlVisuals";
 import { applyFineAdjust, wheelStepDelta, wheelDirection, clampToRange } from "../utils/controlInteraction";
 import { METER_BALLISTICS, MeterBallistics, ballisticsStep } from "../utils/uiRenderPatterns";
 import { useNonPassiveWheel } from "../hooks/useNonPassiveWheel";
 import { MaterialContext, materialFilterId, materialTextureDataUri } from "../utils/materialVisuals";
 import { ManualContext } from "../utils/featureManifest";
+import { effectiveKnobToken, evaluateEqIdentityMotion, identityKnobStyle } from "../utils/visualIdentity";
+import { KNOB_RECIPES } from "../utils/uiRenderPatterns";
+
+export const VisualIdentityContext = createContext<VisualIdentityRecipe | null>(null);
+export const ResolvedKnobContext = createContext<Record<string, VisualIdentityRecipe["knob"]>>({});
 
 /**
  * Playback-time control rendering shared by Simple Mode. Mirrors the visual
@@ -114,6 +119,12 @@ function KnobControl({ param, onChange }: ControlProps) {
   // the filter def itself is mounted once per plugin by GenerativeFaceplate,
   // this just references it by the SAME (materialId, seedString) pair.
   const { materialId, seedString } = useContext(MaterialContext);
+  const identity = useContext(VisualIdentityContext);
+  const resolvedKnobs = useContext(ResolvedKnobContext);
+  const effectiveKnob = effectiveKnobToken(resolvedKnobs[param.id], identity?.knob || "pointer");
+  const knobRecipe = KNOB_RECIPES[identityKnobStyle(effectiveKnob)];
+  const capStops = knobRecipe.bodyGradient.stops;
+  const indicatorColor = knobRecipe.indicator.colorFromAccent ? accent : knobRecipe.indicator.fixedColor || accent;
   const matFilterUrl = `url(#${materialFilterId(materialId, seedString)})`;
   const CX = 50;
   const CY = 50;
@@ -173,7 +184,7 @@ function KnobControl({ param, onChange }: ControlProps) {
   const handleReset = () => onChange(param.id, param.defaultValue);
 
   return (
-    <div className="flex flex-col items-center gap-1.5 select-none">
+    <div className="flex flex-col items-center gap-1.5 select-none" data-knob-recipe={effectiveKnob}>
       <div
         ref={dragRef}
         className="relative w-16 h-16 cursor-ns-resize"
@@ -185,9 +196,7 @@ function KnobControl({ param, onChange }: ControlProps) {
           <defs>
             {/* Domed brushed-metal cap: light from top-left. */}
             <radialGradient id={`cap-${uid}`} cx="38%" cy="30%" r="72%">
-              <stop offset="0%" stopColor="#4a4a54" />
-              <stop offset="45%" stopColor="#2b2b32" />
-              <stop offset="100%" stopColor="#111114" />
+              {capStops.map((stop) => <stop key={stop.pos} offset={`${stop.pos * 100}%`} stopColor={stop.color} />)}
             </radialGradient>
             {/* Beveled rim. */}
             <radialGradient id={`rim-${uid}`} cx="50%" cy="22%" r="80%">
@@ -244,8 +253,9 @@ function KnobControl({ param, onChange }: ControlProps) {
 
           {/* Indicator: dark groove + bright line + accent tip */}
           <line x1={grooveStart.x} y1={grooveStart.y} x2={grooveEnd.x} y2={grooveEnd.y} stroke="#0a0a0c" strokeWidth="4.5" strokeLinecap="round" />
-          <line x1={grooveStart.x} y1={grooveStart.y} x2={grooveEnd.x} y2={grooveEnd.y} stroke="#f2f2f6" strokeWidth="2" strokeLinecap="round" />
-          <circle cx={tipDot.x} cy={tipDot.y} r="2.4" fill={accent} style={{ filter: `drop-shadow(0 0 3px ${accent})` }} />
+          {knobRecipe.indicator.kind === "dashring" ? <path d={knobArcPath(CX, CY, 35, KNOB_START_ANGLE, valueAngle)} fill="none" stroke={indicatorColor} strokeWidth="3" strokeDasharray="3,2" /> :
+            <line x1={grooveStart.x} y1={grooveStart.y} x2={grooveEnd.x} y2={grooveEnd.y} stroke={indicatorColor} strokeWidth={Math.max(2, knobRecipe.indicator.widthFraction * 40)} strokeLinecap="round" />}
+          <circle cx={tipDot.x} cy={tipDot.y} r={knobRecipe.indicator.kind === "dot" ? 4 : 2.4} fill={indicatorColor} style={{ filter: `drop-shadow(0 0 3px ${indicatorColor})` }} />
         </svg>
       </div>
       <span className="text-[10px] font-semibold text-neutral-200 truncate max-w-[76px] text-center leading-tight tracking-tight">{param.name}</span>
@@ -332,6 +342,36 @@ function MeterControl({ param, analyserNode, isPlaying }: ControlProps) {
   const liveLevel = useSignalLevel(analyserNode, isPlaying);
   const isLive = liveLevel !== null;
   const pct = isLive ? liveLevel : staticPct;
+  const identity = useContext(VisualIdentityContext);
+  const style = identity?.meter || "segmented-peak";
+  const accent = param.accentColor || ACCENT_FALLBACK;
+
+  const meterVisual = style === "needle" ? (
+    <svg viewBox="0 0 100 62" className="w-24 h-16 rounded bg-[#d8c9a4] border border-neutral-700">
+      <path d="M12 53 A42 42 0 0 1 88 53" fill="none" stroke="#463f34" strokeWidth="2" />
+      <line x1="50" y1="54" x2={50 + Math.sin((pct - .5) * 1.8) * 38} y2={54 - Math.cos((pct - .5) * 1.8) * 38} stroke="#9b231b" strokeWidth="2" />
+      <circle cx="50" cy="54" r="4" fill="#29231d" />
+    </svg>
+  ) : style === "plasma-bar" ? (
+    <div className="w-8 h-16 rounded-lg bg-neutral-950 border border-neutral-800 relative overflow-hidden">
+      <div className="absolute inset-x-1 bottom-1 rounded-md" style={{ height: `${pct * 90}%`, background: `linear-gradient(0deg, ${accent}, #e879f9, #67e8f9)`, boxShadow: `0 0 10px ${accent}` }} />
+    </div>
+  ) : style === "scope-stereo" ? (
+    <svg viewBox="0 0 100 62" className="w-24 h-16 rounded bg-neutral-950 border border-neutral-800">
+      <path d={`M4 31 C 18 ${31-pct*25}, 30 ${31+pct*20}, 48 31 S 76 ${31-pct*24}, 96 31`} fill="none" stroke={accent} strokeWidth="2" />
+      <path d={`M4 34 C 25 ${34+pct*16}, 38 ${34-pct*19}, 52 34 S 78 ${34+pct*18}, 96 34`} fill="none" stroke="#67e8f9" strokeOpacity=".65" />
+    </svg>
+  ) : (
+    <div className="w-6 h-16 rounded-md bg-neutral-950 border border-neutral-800 relative overflow-hidden flex flex-col-reverse gap-[1.5px] p-1"
+      style={{ boxShadow: "inset 0 1.5px 3px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.03)" }}>
+      {Array.from({ length: METER_SEGMENTS }).map((_, i) => {
+        const lit = pct * METER_SEGMENTS > i;
+        const color = meterSegmentColor(i);
+        return <div key={i} className="flex-1 rounded-[1px] transition-[background-color,box-shadow] duration-75"
+          style={{ backgroundColor: lit ? color : `${color}22`, boxShadow: lit ? `0 0 4px ${color}bb` : "none" }} />;
+      })}
+    </div>
+  );
 
   // Discrete LED-style segments instead of one continuous gradient fill --
   // real hardware VU/peak meters read as individually lit cells. Same
@@ -339,25 +379,9 @@ function MeterControl({ param, analyserNode, isPlaying }: ControlProps) {
   // emerald/amber/rose zones as before -- this is a render-only change.
   return (
     <div className="flex flex-col items-center gap-1 select-none">
-      <div
-        className="w-6 h-16 rounded-md bg-neutral-950 border border-neutral-800 relative overflow-hidden flex flex-col-reverse gap-[1.5px] p-1"
-        style={{ boxShadow: "inset 0 1.5px 3px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.03)" }}
-      >
-        {Array.from({ length: METER_SEGMENTS }).map((_, i) => {
-          const lit = pct * METER_SEGMENTS > i;
-          const color = meterSegmentColor(i);
-          return (
-            <div
-              key={i}
-              className="flex-1 rounded-[1px] transition-[background-color,box-shadow] duration-75"
-              style={{
-                backgroundColor: lit ? color : `${color}22`,
-                boxShadow: lit ? `0 0 4px ${color}bb, inset 0 1px 1px rgba(255,255,255,0.3)` : "inset 0 1px 1px rgba(0,0,0,0.4)",
-              }}
-            />
-          );
-        })}
-        {isLive && <div className="absolute top-0.5 right-0.5 w-1 h-1 rounded-full bg-emerald-400 animate-pulse" title="Live signal" />}
+      <div className="relative" data-meter-recipe={style}>
+        {meterVisual}
+        {isLive && <div className={`absolute top-0.5 right-0.5 w-1 h-1 rounded-full bg-emerald-400 ${identity?.motionPolicy === "decorative" ? "animate-pulse" : ""}`} title="Live signal" />}
       </div>
       <span className="text-[10px] font-medium text-neutral-300 truncate max-w-[76px] text-center leading-tight">{param.name}</span>
       <span className="text-[9px] font-mono text-neutral-500">
@@ -657,6 +681,22 @@ function EqCurveControl({ param, allParams, onChange }: ControlProps) {
   const width = 260;
   const height = 90;
   const eqBands = findEqBands(allParams, param.id);
+  const identity = useContext(VisualIdentityContext);
+  const movingRef = useRef<SVGGElement | null>(null);
+  useEffect(() => {
+    if (!identity || !movingRef.current || typeof requestAnimationFrame === "undefined" || identity.motionPolicy === "static") return;
+    const reduced = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let frame = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      if (movingRef.current) movingRef.current.style.transform = `translateY(${evaluateEqIdentityMotion(identity, (now - start) / 1000, reduced).toFixed(2)}px)`;
+      if (!reduced) frame = requestAnimationFrame(tick);
+    };
+    tick(start);
+    return () => cancelAnimationFrame(frame);
+  }, [identity]);
+  const curveStyle = identity?.eqMotion || "static";
+  const dash = curveStyle === "scan" ? "7 3" : curveStyle === "ripple" ? "3 2" : undefined;
 
   if (eqBands.length >= 2) {
     const curve = computeEqCurve(allParams, param, width, height);
@@ -699,10 +739,12 @@ function EqCurveControl({ param, allParams, onChange }: ControlProps) {
     };
 
     return (
-      <div className="w-full rounded-xl border border-neutral-850 bg-neutral-950 p-1.5 select-none">
+      <div className="w-full rounded-xl border border-neutral-850 bg-neutral-950 p-1.5 select-none" data-eq-recipe={curveStyle}>
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto" style={{ aspectRatio: `${width}/${height}` }}>
+          <g ref={movingRef}>
           <path d={`${curve.pathD} L ${width},${height / 2} L 0,${height / 2} Z`} fill={param.accentColor || "#10b981"} fillOpacity="0.12" stroke="none" />
-          <path d={curve.pathD} fill="none" stroke={param.accentColor || "#10b981"} strokeWidth="2" />
+          <path d={curve.pathD} fill="none" stroke={param.accentColor || "#10b981"} strokeWidth="2" strokeDasharray={dash} />
+          </g>
           {curve.nodes.map((node) => (
             <circle
               key={node.gainParamId}
@@ -749,10 +791,12 @@ function EqCurveControl({ param, allParams, onChange }: ControlProps) {
   };
 
   return (
-    <div className="w-full rounded-xl border border-neutral-850 bg-neutral-950 p-1.5 select-none">
+    <div className="w-full rounded-xl border border-neutral-850 bg-neutral-950 p-1.5 select-none" data-eq-recipe={curveStyle}>
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto" style={{ aspectRatio: `${width}/${height}` }}>
+        <g ref={movingRef}>
         <path d={`${curve.pathD} L ${width},${height} L 0,${height} Z`} fill={param.accentColor || "#10b981"} fillOpacity="0.12" stroke="none" />
-        <path d={curve.pathD} fill="none" stroke={param.accentColor || "#10b981"} strokeWidth="2" />
+        <path d={curve.pathD} fill="none" stroke={param.accentColor || "#10b981"} strokeWidth="2" strokeDasharray={dash} />
+        </g>
         <line x1={curve.cutoffX} y1={0} x2={curve.cutoffX} y2={height} stroke={param.accentColor || "#10b981"} strokeOpacity="0.3" strokeDasharray="2,2" />
         <circle
           cx={curve.cutoffX}

@@ -2,8 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AudioPlugin } from "../types";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
 import { resolveMaterial, materialFilterDefs, MaterialContext } from "../utils/materialVisuals";
-import { resolvePanelStyle, panelTextureCss } from "../utils/uiRenderPatterns";
+import { panelTextureCss } from "../utils/uiRenderPatterns";
 import { buildPluginManual, hasSeenGuide, markGuideSeen, ManualContext } from "../utils/featureManifest";
+import { identityPanelStyle, resolveVisualIdentity } from "../utils/visualIdentity";
+import { validateResolvedUiContract } from "../utils/semanticUi";
+import { ResolvedKnobContext, VisualIdentityContext } from "./PluginControl";
 
 /**
  * Interactive generative faceplate: every plugin gets a UNIQUE, procedurally
@@ -86,7 +89,7 @@ export function evaluateMover(spec: MoverSpec, tSec: number): { transform?: stri
  *  material grain/lighting derive from ONE identity concept, not two
  *  independently-invented ones. */
 export function pluginSeedString(plugin: AudioPlugin): string {
-  return `${plugin.name}::${plugin.category}::${plugin.parameters.length}`;
+  return (plugin.resolvedUi?.identityRecipe ?? resolveVisualIdentity(plugin)).id;
 }
 
 interface Artwork {
@@ -100,11 +103,12 @@ interface Artwork {
 }
 
 function buildArtwork(plugin: AudioPlugin): Artwork {
-  const rand = mulberry32(hashString(`${plugin.name}::${plugin.category}::${plugin.parameters.length}`));
-  const accent = plugin.customSkin?.accentColor || "#f97316";
+  const identity = plugin.resolvedUi?.identityRecipe ?? resolveVisualIdentity(plugin);
+  const rand = mulberry32(identity.seed);
+  const accent = plugin.resolvedUi?.theme.accent || plugin.customSkin?.accentColor || "#f97316";
   const border = plugin.customSkin?.borderColor || "#555";
   const attr = plugin.buildReport?.attributes?.[0];
-  const pattern: PatternKind = (attr && ATTRIBUTE_PATTERN[attr]) || CATEGORY_PATTERN[plugin.category] || "contours";
+  const pattern: PatternKind = identity.artwork || (attr && ATTRIBUTE_PATTERN[attr]) || CATEGORY_PATTERN[plugin.category] || "contours";
 
   const W = 400, H = 200;
   const els: React.ReactNode[] = [];
@@ -284,7 +288,7 @@ const CHASSIS_CLIP = `polygon(${CHASSIS_CHAMFER}px 0, calc(100% - ${CHASSIS_CHAM
  *  by a scrolling ancestor the way an overflowing rack-ear decoration
  *  could be (FactoryCanvas.tsx's card body scrolls with overflow-hidden on
  *  the x-axis -- confirmed earlier this session). */
-function TopRail() {
+function TopRail({ motif }: { motif: string }) {
   return (
     <div
       aria-hidden="true"
@@ -297,7 +301,7 @@ function TopRail() {
       }}
     >
       <div className="absolute flex gap-1" style={{ top: 5, left: "50%", transform: "translateX(-50%)" }}>
-        {[0, 1, 2, 3, 4].map((i) => (
+        {Array.from({ length: motif === "rack" ? 5 : motif === "instrument" ? 3 : 7 }, (_, i) => (
           <div key={i} style={{ width: 2.5, height: 2.5, borderRadius: "50%", background: "rgba(0,0,0,0.5)" }} />
         ))}
       </div>
@@ -314,7 +318,7 @@ function TopRail() {
  * throughout, so it never intercepts clicks meant for the actual controls
  * rendered on top of it.
  */
-function ChassisDetails({ plugin, fontFamily, textColor }: { plugin: AudioPlugin; fontFamily: string; textColor: string }) {
+function ChassisDetails({ plugin, fontFamily, textColor, modelLabel, tokens }: { plugin: AudioPlugin; fontFamily: string; textColor: string; modelLabel: string; tokens: string[] }) {
   return (
     <>
       <ScrewHead corner="tl" angle={SCREW_ANGLES[0]} />
@@ -337,13 +341,67 @@ function ChassisDetails({ plugin, fontFamily, textColor }: { plugin: AudioPlugin
           textShadow: "0 1px 0 rgba(255,255,255,0.07), 0 -1px 0 rgba(0,0,0,0.55)",
         }}
       >
-        {plugin.name}
+        {plugin.name} · {modelLabel}
+      </div>
+      <div aria-hidden="true" className="absolute pointer-events-none select-none" style={{ top: 17, right: 25, fontSize: 7, letterSpacing: ".12em", color: textColor, opacity: .32, fontFamily }}>
+        {tokens.join(" / ").toUpperCase()}
       </div>
     </>
   );
 }
 
+/** Section rails are derived from the semantic metadata stamped by the
+ * quality gate. They sit behind controls, turning a collection of widgets
+ * into readable modules without introducing a second browser-only layout
+ * model. Native JUCE consumes the same uiGroup/uiGroupLabel fields. */
+function SemanticControlSections({ plugin }: { plugin: AudioPlugin }) {
+  const sections = useMemo(() => {
+    const groups = new Map<string, typeof plugin.parameters>();
+    for (const p of plugin.parameters) {
+      if (!p.uiGroup || p.x === undefined || p.y === undefined) continue;
+      groups.set(p.uiGroup, [...(groups.get(p.uiGroup) ?? []), p]);
+    }
+    return [...groups.entries()].map(([id, params]) => {
+      const left = Math.min(...params.map((p) => p.x!)) - 10;
+      const top = Math.min(...params.map((p) => p.y!)) - 22;
+      const right = Math.max(...params.map((p) => p.x! + (p.w ?? 120))) + 10;
+      const bottom = Math.max(...params.map((p) => p.y! + (p.h ?? 100))) + 10;
+      return { id, label: params[0].uiGroupLabel ?? id, left, top, width: right - left, height: bottom - top };
+    });
+  }, [plugin.parameters]);
+  if (sections.length < 2) return null;
+  return (
+    <div aria-hidden="true" className="absolute inset-0 pointer-events-none">
+      {sections.map((section) => (
+        <div
+          key={section.id}
+          data-ui-section={section.id}
+          className="absolute rounded-lg"
+          style={{
+            left: section.left, top: section.top, width: section.width, height: section.height,
+            border: "1px solid color-mix(in srgb, currentColor 14%, transparent)",
+            background: "linear-gradient(180deg, rgba(255,255,255,.035), rgba(0,0,0,.07))",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,.035)",
+          }}
+        >
+          <span style={{ position: "absolute", left: 8, top: 4, fontSize: 7, fontWeight: 700, letterSpacing: ".14em", textTransform: "uppercase", opacity: .48 }}>
+            {section.label}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, className = "", style, children }: GenerativeFaceplateProps) {
+  const validResolvedUi = plugin.resolvedUi && validateResolvedUiContract(plugin.resolvedUi).length === 0
+    ? plugin.resolvedUi
+    : undefined;
+  const identity = validResolvedUi?.identityRecipe ?? resolveVisualIdentity(plugin);
+  const resolvedKnobs = useMemo(() => Object.fromEntries(
+    (validResolvedUi?.controls || [])
+      .filter((c) => c.controlType === "knob" && c.style.knob)
+      .map((c) => [c.parameterId, c.style.knob!])
+  ), [validResolvedUi?.controls]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   // Every input buildArtwork() actually reads must be listed, or changing it
   // silently fails to regenerate the art that depends on it. Two were
@@ -360,9 +418,10 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
       plugin.buildReport?.attributes,
       plugin.customSkin?.accentColor,
       plugin.customSkin?.borderColor,
+      identity.id,
     ]
   );
-  const accent = plugin.customSkin?.accentColor || "#f97316";
+  const accent = plugin.resolvedUi?.theme.accent || plugin.customSkin?.accentColor || "#f97316";
   const { elementRefs } = artwork;
   // Same values buildArtwork() already computed for the mounted <defs> --
   // recomputed here (cheap, pure, deterministic given the same plugin) so
@@ -370,7 +429,7 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
   // actually generated with.
   const materialCtx = useMemo(
     () => ({ materialId: resolveMaterial(plugin), seedString: pluginSeedString(plugin) }),
-    [plugin.name, plugin.category, plugin.parameters.length, plugin.buildReport?.attributes]
+    [plugin.name, plugin.category, plugin.parameters.length, plugin.buildReport?.attributes, identity.id]
   );
 
   // The plugin's real hardware panel material (tweed / wood grain / leather /
@@ -380,8 +439,8 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
   // look at, fell back to a flat hex background. Same resolvePanelStyle the
   // native build uses, so preview and export agree on the material.
   const panelStyle = useMemo(
-    () => resolvePanelStyle(plugin.category, plugin.buildReport?.attributes),
-    [plugin.category, plugin.buildReport?.attributes]
+    () => identityPanelStyle(identity.panel),
+    [identity.panel]
   );
   const panelCss = useMemo(() => panelTextureCss(panelStyle), [panelStyle]);
 
@@ -427,12 +486,15 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
-    const reduceMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const reduceMotion = identity.motionPolicy === "static" || (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
     const data = analyserNode ? new Uint8Array(analyserNode.frequencyBinCount) : null;
     let raf = 0;
     let smoothed = 0;
     const start = performance.now();
 
+    // A static/reduced recipe without a live analyser has no useful work and
+    // must not schedule a decorative frame loop.
+    if (reduceMotion && !(isPlaying && analyserNode && data)) return;
     const tick = () => {
       const tSec = (performance.now() - start) / 1000;
 
@@ -461,11 +523,20 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [analyserNode, isPlaying, artwork]);
+  }, [analyserNode, isPlaying, artwork, identity.motionPolicy]);
 
   return (
     <div
       ref={rootRef}
+      role="group"
+      aria-label={`${plugin.name} controls`}
+      data-ui-contract={plugin.resolvedUi?.version}
+      data-ui-archetype={plugin.resolvedUi?.archetype}
+      data-ui-material={plugin.resolvedUi?.theme.material}
+      data-identity-recipe={identity.id}
+      data-identity-family={identity.family}
+      data-hardware-motif={identity.hardwareMotif}
+      data-panel-recipe={identity.panel}
       className={`relative overflow-hidden ${className}`}
       style={{ ["--gfp-live" as any]: 0, ...skinStyle, clipPath: CHASSIS_CLIP, ...style }}
     >
@@ -487,9 +558,12 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
           background: `radial-gradient(ellipse at 50% 115%, ${accent}55 0%, ${accent}18 40%, transparent 65%)`,
         }}
       />
-      <TopRail />
-      <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} />
+      <TopRail motif={identity.hardwareMotif} />
+      <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} modelLabel={identity.modelLabel} tokens={identity.styleTokens} />
+      <SemanticControlSections plugin={plugin} />
       <MaterialContext.Provider value={materialCtx}>
+        <VisualIdentityContext.Provider value={identity}>
+        <ResolvedKnobContext.Provider value={resolvedKnobs}>
         <ManualContext.Provider value={manualCtx}>
           <div className="relative">{children}</div>
           {anyGuideBadgeShowing && (
@@ -504,6 +578,8 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
             </button>
           )}
         </ManualContext.Provider>
+        </ResolvedKnobContext.Provider>
+        </VisualIdentityContext.Provider>
       </MaterialContext.Provider>
     </div>
   );

@@ -10,8 +10,21 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "tsx tests/runAll.ts",
-    "test:e2e": "tsx tests/e2eSmokeTest.ts",
-    "audit": "tsx scripts/knowledgeAuditReport.ts"
+    "validate:native-controls": "tsx scripts/validateNativeControls.ts",
+    "validate:native-instrument": "tsx scripts/validateNativeInstrument.ts",
+    "test:e2e": "tsx tests/e2eSmokeTest.ts && npm run test:e2e:daw",
+    "test:e2e:daw": "tsx tests/e2eDawTest.ts",
+    "test:e2e:daw-sync": "tsx tests/e2eDawSyncTest.ts",
+    "test:daw": "tsx tests/dawCoreTest.ts && tsx tests/dawContractTest.ts && tsx tests/dawSyncTest.ts",
+    "audit": "tsx scripts/knowledgeAuditReport.ts",
+    "desktop:configure": "cmake -S desktop -B desktop/build -DCMAKE_BUILD_TYPE=Release",
+    "desktop:build": "cmake --build desktop/build --config Release",
+    "desktop:golden": "tsx tests/desktopGoldenTest.ts && tsx tests/desktopScaffoldContractTest.ts",
+    "desktop:golden:native": "tsx scripts/desktopNativeGate.ts",
+    "desktop:devices": "tsx scripts/desktopListAudioDevices.ts",
+    "desktop:latency": "tsx scripts/desktopLatencyBenchmark.ts",
+    "desktop:latency:aggregate": "tsx scripts/aggregateDesktopLatencyEvidence.ts",
+    "desktop:release:metadata": "node scripts/desktopReleaseManifest.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

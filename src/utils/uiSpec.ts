@@ -6,6 +6,7 @@
  */
 
 import { PluginParameter } from "../types";
+import { PluginFamily } from "./pluginSpec";
 
 export type DesignAttribute =
   | "dreamy"
@@ -84,6 +85,96 @@ export interface UiSpecification {
   layout: "focus" | "grid";
   primaryControls: string[];
   secondaryControls: string[];
+  /** Ordered, family-aware sections used by every renderer. */
+  groups: UiControlGroup[];
+}
+
+export type UiControlRole = NonNullable<PluginParameter["uiRole"]>;
+export interface UiControlGroup {
+  id: string;
+  label: string;
+  role: UiControlRole;
+  parameterIds: string[];
+  emphasis: "hero" | "standard" | "compact";
+}
+
+const FAMILY_GROUP_ORDER: Partial<Record<PluginFamily, UiControlRole[]>> = {
+  dynamics: ["dynamics", "tone", "output", "utility", "visual"],
+  delay: ["space", "motion", "tone", "output", "utility", "visual"],
+  reverb: ["space", "tone", "motion", "output", "utility", "visual"],
+  modulation: ["motion", "tone", "space", "output", "utility", "visual"],
+  synthesizer: ["hero", "tone", "motion", "output", "utility", "visual"],
+  filter: ["tone", "motion", "output", "utility", "visual"],
+  eq: ["hero", "tone", "output", "utility", "visual"],
+  distortion: ["primary", "tone", "output", "utility", "visual"],
+  saturator: ["primary", "tone", "output", "utility", "visual"],
+  multiband_saturator: ["hero", "tone", "primary", "output", "utility", "visual"],
+  pitch: ["primary", "motion", "tone", "output", "utility", "visual"],
+  amp_sim: ["hero", "primary", "tone", "output", "utility", "visual"],
+  sampler: ["hero", "tone", "output", "utility", "visual"],
+};
+
+const ROLE_LABELS: Record<UiControlRole, string> = {
+  hero: "Instrument",
+  primary: "Character",
+  tone: "Tone",
+  dynamics: "Dynamics",
+  motion: "Movement",
+  space: "Space",
+  output: "Output",
+  utility: "Utility",
+  visual: "Monitor",
+};
+
+export function inferUiControlRole(p: PluginParameter, family?: PluginFamily | null): UiControlRole {
+  if (p.uiRole) return p.uiRole;
+  const key = `${p.id} ${p.name}`.toLowerCase();
+  const type = p.controlType;
+  if (type === "amp" || type === "cab" || type === "mic" || type === "pad" || type === "eq") return "hero";
+  if (type === "meter" || type === "waveform" || type === "label") return "visual";
+  if (/bypass|enable|power|oversampl|quality|mode|sync|sidechain/.test(key) || type === "toggle" || type === "button") return "utility";
+  if (/output|level|volume|make.?up|mix|blend|dry.?wet/.test(key)) return "output";
+  if (/attack|release|threshold|ratio|knee|compress|gate/.test(key)) return "dynamics";
+  if (/rate|depth|phase|lfo|human|flutter|wow|speed|mod/.test(key)) return "motion";
+  if (/time|decay|feedback|space|room|size|pre.?delay|diffusion|echo/.test(key)) return "space";
+  if (/tone|cutoff|freq|reson|bass|mid|treb|presence|color|damp|high|low|filter|eq/.test(key)) return "tone";
+  if (/drive|gain|amount|pitch|tune|retune|shape|input/.test(key)) return "primary";
+  if (family === "dynamics") return "dynamics";
+  if (family === "delay" || family === "reverb") return "space";
+  if (family === "modulation") return "motion";
+  if (family === "filter" || family === "eq") return "tone";
+  return "primary";
+}
+
+export function buildUiGroups(parameters: PluginParameter[], family?: PluginFamily | null): UiControlGroup[] {
+  const byRole = new Map<UiControlRole, string[]>();
+  for (const p of parameters) {
+    const role = inferUiControlRole(p, family);
+    byRole.set(role, [...(byRole.get(role) ?? []), p.id]);
+  }
+  const preferred = FAMILY_GROUP_ORDER[family as PluginFamily] ?? ["primary", "tone", "motion", "space", "dynamics", "output", "utility", "visual", "hero"];
+  const roles = [...preferred, ...([...byRole.keys()].filter((r) => !preferred.includes(r)))];
+  return roles
+    .filter((role) => (byRole.get(role)?.length ?? 0) > 0)
+    .map((role) => ({
+      id: role,
+      label: ROLE_LABELS[role],
+      role,
+      parameterIds: byRole.get(role)!,
+      emphasis: role === "hero" ? "hero" : role === "utility" || role === "visual" ? "compact" : "standard",
+    }));
+}
+
+export function annotateParametersWithUiSemantics(
+  parameters: PluginParameter[],
+  groups: UiControlGroup[]
+): PluginParameter[] {
+  const membership = new Map<string, UiControlGroup>();
+  groups.forEach((group) => group.parameterIds.forEach((id) => membership.set(id, group)));
+  return parameters.map((p) => {
+    const group = membership.get(p.id);
+    return group ? { ...p, uiRole: group.role, uiGroup: group.id, uiGroupLabel: group.label } : p;
+  });
 }
 
 function isRankable(p: PluginParameter): boolean {
@@ -96,7 +187,7 @@ function isRankable(p: PluginParameter): boolean {
  * Semantic spec: which controls are primary (top three by musician priority)
  * vs secondary, plus the design attributes. Deterministic and instant.
  */
-export function buildUiSpec(prompt: string, parameters: PluginParameter[]): UiSpecification {
+export function buildUiSpec(prompt: string, parameters: PluginParameter[], family?: PluginFamily | null): UiSpecification {
   const rankable = parameters.filter(isRankable);
   const ranked = [...rankable].sort((a, b) => {
     const ra = PRIMARY_PRIORITY.indexOf(a.id);
@@ -110,6 +201,7 @@ export function buildUiSpec(prompt: string, parameters: PluginParameter[]): UiSp
     layout: rankable.length <= 4 ? "focus" : "grid",
     primaryControls: primary,
     secondaryControls: secondary,
+    groups: buildUiGroups(parameters, family),
   };
 }
 
@@ -119,12 +211,15 @@ export function buildUiSpec(prompt: string, parameters: PluginParameter[]): UiSp
  * them separately). The AI never dictates order — this does.
  */
 export function orderParametersBySpec(parameters: PluginParameter[], spec: UiSpecification): PluginParameter[] {
+  const groupRank = new Map<string, number>();
+  spec.groups.forEach((group, index) => group.parameterIds.forEach((id) => groupRank.set(id, index)));
   const rank = (p: PluginParameter): number => {
-    if (!isRankable(p)) return 1000 + parameters.indexOf(p); // stable tail
+    const group = groupRank.get(p.id) ?? 50;
+    if (!isRankable(p)) return group * 1000 + 900 + parameters.indexOf(p);
     const pi = spec.primaryControls.indexOf(p.id);
-    if (pi !== -1) return pi;
+    if (pi !== -1) return group * 1000 + pi;
     const si = spec.secondaryControls.indexOf(p.id);
-    return si === -1 ? 900 : 100 + si;
+    return group * 1000 + (si === -1 ? 900 : 100 + si);
   };
-  return [...parameters].sort((a, b) => rank(a) - rank(b));
+  return annotateParametersWithUiSemantics(parameters, spec.groups).sort((a, b) => rank(a) - rank(b));
 }

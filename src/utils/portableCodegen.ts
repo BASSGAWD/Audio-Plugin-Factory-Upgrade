@@ -11,6 +11,7 @@
  */
 
 import { AudioPlugin, PluginParameter } from "../types";
+import { resolveSemanticUiContract } from "./semanticUi";
 
 function faustSliderName(p: PluginParameter): string {
   return p.id.replace(/[^a-zA-Z0-9_]/g, "_");
@@ -29,6 +30,17 @@ function findParam(params: PluginParameter[], ...patterns: RegExp[]): PluginPara
     if (hit) return hit;
   }
   return undefined;
+}
+
+export function hasDeterministicSidechainPort(plugin: Pick<AudioPlugin, "category" | "parameters" | "dspFunction" | "routing">): boolean {
+  if (!plugin.routing?.auxiliaryInput.supported) return true;
+  const ids = new Set(plugin.parameters.map((p) => p.id));
+  if (plugin.category === "filter") {
+    return ["cutoff", "sensitivity", "attack", "release", "mix"].every((id) => ids.has(id))
+      && /\bmovingCutoff\b/.test(plugin.dspFunction);
+  }
+  return ["threshold", "ratio", "attack", "release", "makeup", "mix"].every((id) => ids.has(id))
+    && /\blet comp = Math\.tanh\(inputSample \* g\)/.test(plugin.dspFunction);
 }
 
 /** Reference a declared slider by variable name, or fall back to a literal. */
@@ -57,7 +69,24 @@ export function buildFaustScaffold(plugin: AudioPlugin): string {
   const depth = findParam(params, /depth|amount|intensity/i);
 
   let chain: string;
-  switch (plugin.category) {
+  const sidechain = plugin.routing?.auxiliaryInput.supported === true && plugin.routing.inputKeyArgument === true;
+  if (sidechain && !hasDeterministicSidechainPort(plugin)) {
+    return `// FAUST PORT UNAVAILABLE
+// This custom sidechain DSP has no verified Faust translation.
+// Use the authoritative Web Audio export or a faithfully translated native build.
+// No generic keyed processor was substituted.`;
+  }
+  if (sidechain && plugin.category === "filter") {
+    chain = `// Inputs: main, optional external key. Connect main to key for internal detection.
+keyEnv(key) = key : abs : an.amp_follower_ar(0.012, 0.180);
+dynamicCutoff(key) = ${ref(cutoff, "1600.0")} * (1.0 + keyEnv(key) * 4.55);
+process(main, key) = main : fi.lowpass(1, dynamicCutoff(key));`;
+  } else if (sidechain) {
+    chain = `// Inputs: main, optional external key. Connect main to key for internal detection.
+keyEnv(key) = key : abs : an.amp_follower_ar(0.010, 0.120);
+duck(main, key) = main * (1.0 / (1.0 + keyEnv(key) * 3.0));
+process(main, key) = duck(main, key);`;
+  } else switch (plugin.category) {
     case "distortion":
       chain = `wet = _ : *(ba.db2linear(${ref(drive, "12.0")})) : ma.tanh : fi.lowpass(1, 9000) : *(0.7);
 process = _ <: (_, wet) : si.interpolate(${ref(mix, "0.8")});`;
@@ -90,6 +119,7 @@ process = _ <: (_, wet) : si.interpolate(${ref(mix, "0.35")});`;
   }
 
   return `// ${plugin.name} -- Faust reference scaffold (category: ${plugin.category})
+// routing-contract=1.0 auxiliary-sidechain=${sidechain ? "optional" : "unsupported"} disconnected=${plugin.routing?.disconnectedBehavior ?? "bypass-sidechain-processing"}
 // Auto-generated deterministic starting point. The authoritative algorithm is
 // the JavaScript below; regenerate a faithful translation from the Export tab
 // with a local model connected, or port by hand using this scaffold.
@@ -127,9 +157,22 @@ function cppFloat(n: number): string {
   return `${v}${Number.isInteger(v) ? ".0" : ""}f`;
 }
 
+function cppString(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ");
+}
+
+function cppColour(hex: string): string {
+  const rgb = /^#([0-9a-f]{6})$/i.exec(hex)?.[1] ?? "f97316";
+  return `juce::Colour (0xff${rgb.toLowerCase()})`;
+}
+
 export function buildJuceScaffold(plugin: AudioPlugin): string {
   const params = plugin.parameters.filter((p) => p.min !== p.max);
+  const cutoffParam = findParam(params, /cutoff|freq|tone/i);
   const className = (plugin.name || "Generated").replace(/[^a-zA-Z0-9]/g, "") + "Processor";
+  const editorName = `${className}EditorScaffold`;
+  const ui = plugin.resolvedUi ?? resolveSemanticUiContract(plugin);
+  const controlFor = (p: PluginParameter) => ui.controls.find((c) => c.parameterId === p.id);
 
   const paramDecls = params
     .map((p) => `    float ${cppIdent(p)} = ${cppFloat(p.defaultValue)}; // "${p.name}" [${p.min} .. ${p.max}] ${p.unit || ""}`)
@@ -141,14 +184,83 @@ export function buildJuceScaffold(plugin: AudioPlugin): string {
     .map((p) => `        ${cppIdent(p)}Smooth.reset(sampleRate, 0.02);\n        ${cppIdent(p)}Smooth.setCurrentAndTargetValue(${cppIdent(p)});`)
     .join("\n");
 
+  const componentDecls = params.map((p) => {
+    const c = controlFor(p);
+    const type = c?.controlType ?? p.controlType ?? "knob";
+    const component = type === "toggle" || type === "button" || type === "pad" ? "juce::ToggleButton" : type === "select" ? "juce::ComboBox" : "juce::Slider";
+    const attachment = type === "toggle" || type === "button" || type === "pad" ? "ButtonAttachment" : type === "select" ? "ComboBoxAttachment" : "SliderAttachment";
+    return `    ${component} ui_${cppIdent(p)};\n    std::unique_ptr<juce::AudioProcessorValueTreeState::${attachment}> attach_${cppIdent(p)};`;
+  }).join("\n");
+
+  const componentInit = params.map((p) => {
+    const c = controlFor(p);
+    const type = c?.controlType ?? p.controlType ?? "knob";
+    const id = cppIdent(p);
+    const lines = [
+      `        addAndMakeVisible (ui_${id});`,
+      `        ui_${id}.setName ("${cppString(c?.accessibility.label ?? p.name)}");`,
+      `        ui_${id}.setTitle ("${cppString(c?.accessibility.label ?? p.name)}");`,
+      `        ui_${id}.setDescription ("${cppString(c?.accessibility.valueText ?? `${p.defaultValue} ${p.unit}`.trim())}");`,
+    ];
+    if (type === "toggle" || type === "button" || type === "pad") {
+      lines.push(`        ui_${id}.setButtonText ("${cppString(p.name)}");`);
+      lines.push(`        attach_${id} = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (state, "${cppString(p.id)}", ui_${id});`);
+    } else if (type === "select") {
+      (p.choices ?? []).forEach((choice, i) => lines.push(`        ui_${id}.addItem ("${cppString(choice)}", ${i + 1});`));
+      lines.push(`        attach_${id} = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (state, "${cppString(p.id)}", ui_${id});`);
+    } else {
+      lines.push(`        ui_${id}.setSliderStyle (juce::Slider::${type === "knob" ? "RotaryHorizontalVerticalDrag" : "LinearHorizontal"});`);
+      lines.push(`        ui_${id}.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 72, 20);`);
+      lines.push(`        ui_${id}.setColour (juce::Slider::thumbColourId, ${cppColour(c?.style.accent ?? ui.theme.accent)});`);
+      lines.push(`        attach_${id} = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (state, "${cppString(p.id)}", ui_${id});`);
+    }
+    return lines.join("\n");
+  }).join("\n");
+
+  const componentBounds = params.map((p) => {
+    const b = controlFor(p)?.bounds ?? { x: p.x ?? 28, y: p.y ?? 64, width: p.w ?? 100, height: p.h ?? 88 };
+    return `        ui_${cppIdent(p)}.setBounds (${Math.round(b.x)}, ${Math.round(b.y)}, ${Math.round(b.width)}, ${Math.round(b.height)});`;
+  }).join("\n");
+
+  const sidechain = plugin.routing?.auxiliaryInput.supported === true && plugin.routing.inputKeyArgument === true;
+  if (sidechain && !hasDeterministicSidechainPort(plugin)) {
+    return `// JUCE PORT UNAVAILABLE
+// This plugin has a verified external sidechain, but its custom DSP does not
+// match a deterministic native port. Use the faithful Web Audio export, or
+// run Native Build with a local translation model. No substitute DSP was emitted.`;
+  }
+  const sidechainBody = plugin.category === "filter"
+    ? `        const float detector = std::abs (inputKey);
+        const float attackCoeff = 1.0f - std::exp (-1.0f / (juce::jmax (1.0f, attackNow) * 0.001f * static_cast<float> (sampleRate)));
+        const float releaseCoeff = 1.0f - std::exp (-1.0f / (juce::jmax (20.0f, releaseNow) * 0.001f * static_cast<float> (sampleRate)));
+        envelope += (detector > envelope ? attackCoeff : releaseCoeff) * (detector - envelope);
+        const float dynamicCutoff = juce::jlimit (40.0f, 18000.0f, ${cutoffParam ? `${cppIdent(cutoffParam)}Now` : "1600.0f"} * (1.0f + envelope * sensitivityNow * 7.0f));
+        const float coefficient = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi * dynamicCutoff / static_cast<float> (sampleRate));
+        z1 += coefficient * (inputSample - z1);
+        return z1 * mixNow + inputSample * (1.0f - mixNow);`
+    : `        const float detector = std::abs (inputKey);
+        const float attackCoeff = 1.0f - std::exp (-1.0f / (juce::jmax (0.05f, attackNow) * 44.1f));
+        const float releaseCoeff = 1.0f - std::exp (-1.0f / (juce::jmax (1.0f, releaseNow) * 0.001f * static_cast<float> (sampleRate)));
+        envelope += (detector > envelope ? attackCoeff : releaseCoeff) * (detector - envelope);
+        const float envDb = 20.0f * std::log10 (juce::jmax (1.0e-6f, envelope));
+        const float overDb = envDb - thresholdNow;
+        const float gainDb = overDb > 0.0f ? -overDb * (1.0f - 1.0f / juce::jmax (1.0f, ratioNow)) : 0.0f;
+        const float gain = std::pow (10.0f, (gainDb + makeupNow) / 20.0f);
+        const float compressed = std::tanh (inputSample * gain);
+        return compressed * mixNow + inputSample * (1.0f - mixNow);`;
   return `// ${plugin.name} -- JUCE C++ reference scaffold (category: ${plugin.category})
+// routing-contract=1.0 auxiliary-sidechain=${sidechain ? "optional mono-or-stereo" : "unsupported"} disconnected=${plugin.routing?.disconnectedBehavior ?? "bypass-sidechain-processing"}
+// visual-identity=${ui.identityRecipe?.id ?? "legacy-derived"} family=${ui.identityRecipe?.family ?? plugin.family ?? plugin.category} meter=${ui.identityRecipe?.meter ?? "segmented-peak"} eq=${ui.identityRecipe?.eqMotion ?? "static"}
 // Auto-generated deterministic starting point: real-time-safe shell with
 // parameter smoothing and the authoritative JS algorithm embedded below.
 // Regenerate a faithful translation from the Export tab with a local model
 // connected, or port the per-sample math into processSample() by hand.
 #pragma once
 #include <juce_dsp/juce_dsp.h>
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 #include <cmath>
+#include <memory>
 
 class ${className}
 {
@@ -168,19 +280,19 @@ ${smoothInit}
         z2 = 0.0f;
     }
 
-    // Per-sample processing, mirrors: function(inputSample, params, state)
-    float processSample (float inputSample) noexcept
+    // Per-sample processing, mirrors: function(inputSample, params, state, inputR, inputKey)
+    float processSample (float inputSample${sidechain ? ", float inputKey" : ""}) noexcept
     {
 ${params.map((p) => `        const float ${cppIdent(p)}Now = ${cppIdent(p)}Smooth.getNextValue(); juce::ignoreUnused(${cppIdent(p)}Now);`).join("\n")}
 
-        // TODO(port): implement the reference algorithm below using the
+${sidechain ? sidechainBody : `        // TODO(port): implement the reference algorithm below using the
         // smoothed parameter values. Passthrough with a safety limiter until
         // the port is complete keeps the plugin loadable at every step.
         float y = inputSample;
-        return std::tanh (y);
+        return std::tanh (y);`}
     }
 
-    void processBlock (juce::AudioBuffer<float>& buffer) noexcept
+    void processBlock (juce::AudioBuffer<float>& buffer${sidechain ? ", const juce::AudioBuffer<float>* sidechain" : ""}) noexcept
     {
         juce::ScopedNoDenormals noDenormals;
 ${params.map((p) => `        ${cppIdent(p)}Smooth.setTargetValue(${cppIdent(p)});`).join("\n")}
@@ -188,7 +300,12 @@ ${params.map((p) => `        ${cppIdent(p)}Smooth.setTargetValue(${cppIdent(p)})
         {
             auto* data = buffer.getWritePointer (ch);
             for (int i = 0; i < buffer.getNumSamples(); ++i)
-                data[i] = sanitizeSample (processSample (data[i]));
+            {
+${sidechain ? `                const float inputKey = sidechain != nullptr && sidechain->getNumChannels() > 0
+                    ? sidechain->getReadPointer (juce::jmin (ch, sidechain->getNumChannels() - 1))[i]
+                    : data[i];
+                data[i] = sanitizeSample (processSample (data[i], inputKey));` : `                data[i] = sanitizeSample (processSample (data[i]));`}
+            }
         }
     }
 
@@ -213,8 +330,38 @@ private:
     }
 
     double sampleRate = 44100.0;
-    float z1 = 0.0f, z2 = 0.0f;
+    float z1 = 0.0f, z2 = 0.0f, envelope = 0.0f;
 ${smoothDecls}
+};
+
+// Native editor parity: generated from resolvedUi contract v${ui.version}.
+// Tokens: archetype=${cppString(ui.archetype)} material=${ui.theme.material}
+// background=${ui.theme.background} border=${ui.theme.border}
+// accent=${ui.theme.accent} text=${ui.theme.text} font=${ui.theme.font}
+class ${editorName} : public juce::Component
+{
+public:
+    explicit ${editorName} (juce::AudioProcessorValueTreeState& state)
+    {
+        setSize (${Math.round(ui.artboard.width)}, ${Math.round(ui.artboard.height)});
+${componentInit}
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (${cppColour(ui.theme.background)});
+        g.setColour (${cppColour(ui.theme.border)});
+        g.drawRect (getLocalBounds(), 1);
+        g.setColour (${cppColour(ui.theme.text)});
+    }
+
+    void resized() override
+    {
+${componentBounds}
+    }
+
+private:
+${componentDecls}
 };
 
 /* REFERENCE ALGORITHM (JavaScript, per-sample, 44100 Hz):

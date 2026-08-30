@@ -15,6 +15,7 @@
 
 import { AudioPlugin } from "../types";
 import { LLMConfig, callLocalLLM, isLocalProvider } from "./llmGateway";
+import { isSidechainEligible } from "./sidechainContract";
 
 export type PluginFamily =
   | "eq"
@@ -47,6 +48,20 @@ export interface AudioPluginSpec {
   interpretedGoal: string;
   /** How this spec was produced. */
   source: "llm" | "heuristic";
+  routing: import("../types").PluginRoutingContract;
+}
+
+function specRouting(family: PluginFamily, prompt: string) {
+  const eligible = isSidechainEligible(family, prompt);
+  const requested = eligible && /\b(side[ -]?chain|external (?:key|detector)|keyed|duck(?:ing)? .* (?:kick|voice|vocal|drum|track))\b/i.test(prompt);
+  return {
+    version: "1.0" as const,
+    mainInput: { channels: "mono-or-stereo" as const, required: true as const },
+    auxiliaryInput: { role: "sidechain" as const, supported: requested, required: false, channels: "mono-or-stereo" as const },
+    detectorMode: requested ? "external-optional" as const : "internal" as const,
+    disconnectedBehavior: requested ? "use-internal-detector" as const : "bypass-sidechain-processing" as const,
+    inputKeyArgument: requested,
+  };
 }
 
 /** Map a spec family onto the app's 7-value category enum. */
@@ -150,6 +165,7 @@ export function classifyPluginIntent(userPrompt: string): AudioPluginSpec {
   const hits = FAMILY_SIGNALS.filter((s) => s.behavior.test(userPrompt));
 
   if (hits.length === 0) {
+    const family: PluginFamily = "hybrid_other";
     return {
       name: "Custom Processor",
       family: "hybrid_other",
@@ -159,6 +175,7 @@ export function classifyPluginIntent(userPrompt: string): AudioPluginSpec {
       extraCapabilities: [],
       interpretedGoal: userPrompt.slice(0, 160),
       source: "heuristic",
+      routing: specRouting(family, userPrompt),
     };
   }
 
@@ -173,6 +190,7 @@ export function classifyPluginIntent(userPrompt: string): AudioPluginSpec {
       extraCapabilities: [],
       interpretedGoal: userPrompt.slice(0, 160),
       source: "heuristic",
+      routing: specRouting(only.family, userPrompt),
     };
   }
 
@@ -205,9 +223,10 @@ export function classifyPluginIntent(userPrompt: string): AudioPluginSpec {
     (uiFamily.family === "eq" || uiFamily.family === "filter") &&
     (behavior.family === "saturator" || behavior.family === "distortion");
 
+  const family = isEqSaturator ? "multiband_saturator" : behavior.family;
   return {
     name: "",
-    family: isEqSaturator ? "multiband_saturator" : behavior.family,
+    family,
     uiMetaphor: uiFamily ? (uiFamily.family === "eq" ? "parametric_eq" : uiFamily.uiMetaphor) : behavior.uiMetaphor,
     dspIdentity: isEqSaturator
       ? "frequency-selective saturation: isolate each band, saturate it, blend back with the dry signal (NOT plain filter gain changes)"
@@ -216,6 +235,7 @@ export function classifyPluginIntent(userPrompt: string): AudioPluginSpec {
     extraCapabilities: [],
     interpretedGoal: userPrompt.slice(0, 160),
     source: "heuristic",
+    routing: specRouting(family, userPrompt),
   };
 }
 
@@ -269,15 +289,17 @@ export async function generatePluginSpec(userPrompt: string, config: LLMConfig):
       typeof payload.dspIdentity === "string" && payload.dspIdentity.trim() &&
       typeof payload.family === "string" && validFamilies.includes(payload.family as PluginFamily)
     ) {
+      const family = payload.family as PluginFamily;
       return {
         name: typeof payload.name === "string" ? payload.name : heuristic.name,
-        family: payload.family as PluginFamily,
+        family,
         uiMetaphor: typeof payload.uiMetaphor === "string" && payload.uiMetaphor ? payload.uiMetaphor : heuristic.uiMetaphor,
         dspIdentity: payload.dspIdentity,
         hybrid: !!payload.hybrid,
         extraCapabilities: Array.isArray(payload.extraCapabilities) ? payload.extraCapabilities.filter((c: any) => typeof c === "string") : [],
         interpretedGoal: typeof payload.interpretedGoal === "string" && payload.interpretedGoal ? payload.interpretedGoal : heuristic.interpretedGoal,
         source: "llm",
+        routing: heuristic.routing.auxiliaryInput.supported ? heuristic.routing : specRouting(family, userPrompt),
       };
     }
   } catch {
@@ -294,6 +316,7 @@ export function formatSpecContext(spec: AudioPluginSpec): string {
     `ui metaphor (what it looks like): ${spec.uiMetaphor}`,
     `dsp identity (what it must DO to the audio): ${spec.dspIdentity}`,
     `goal: ${spec.interpretedGoal}`,
+    `routing contract v${spec.routing.version}: detector=${spec.routing.detectorMode}; auxiliary sidechain=${spec.routing.auxiliaryInput.supported ? "supported" : "not supported"}; disconnected=${spec.routing.disconnectedBehavior}`,
   ];
   if (spec.extraCapabilities.length > 0) {
     lines.push(`extra capabilities: ${spec.extraCapabilities.join(", ")}`);

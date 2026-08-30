@@ -148,8 +148,12 @@ const CanvasPluginCard: React.FC<CardProps> = ({
   // mic stands, pads) live in the Studio where there's room for them.
   const knobParams = useMemo(() => {
     if (!grouped) return [] as PluginParameter[];
-    return grouped.regular.filter((p) => p.controlType !== "meter" && p.controlType !== "label").slice(0, 8);
-  }, [grouped]);
+    const regular = grouped.regular.filter((p) => p.controlType !== "meter" && p.controlType !== "label");
+    const order = plugin?.resolvedUi?.controls.map((c) => c.parameterId);
+    return order
+      ? [...regular].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)).slice(0, 8)
+      : regular.slice(0, 8);
+  }, [grouped, plugin?.resolvedUi]);
   const hasShowpiece = (grouped?.showpiece.length ?? 0) > 0 || (grouped?.pads.length ?? 0) > 0;
 
   const building = card.status === "building" || card.status === "queued";
@@ -327,6 +331,7 @@ const CanvasPluginCard: React.FC<CardProps> = ({
           {knobParams.length > 0 && (
             <div
               className={`grid gap-x-3 gap-y-2 ${knobParams.length <= 4 ? "grid-cols-4" : "grid-cols-4"}`}
+              data-resolved-ui-layout={plugin.resolvedUi?.version}
               onPointerDown={(e) => e.stopPropagation()}
             >
               {knobParams.map((p) => (

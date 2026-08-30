@@ -7,8 +7,8 @@
  * polishPluginVisuals() output (the invariant that matters most --
  * generations that never opt into an archetype must not change at all).
  */
-import { ArchetypeId, BUILTIN_ARCHETYPES, applyArchetype, pickArchetype, resolveControlOverlaps } from "../src/utils/guiArchetypes";
-import { polishPluginVisuals, runQualityGate, scoreLooks, measureVisualIntegrity, measureSkeuomorphicFidelity } from "../src/utils/qualityGate";
+import { ArchetypeId, BUILTIN_ARCHETYPES, applyArchetype, pickArchetype, rectsOverlap, resolveControlOverlaps } from "../src/utils/guiArchetypes";
+import { hasCoherentFaceplateGeometry, polishPluginVisuals, runQualityGate, scoreLooks, measureVisualIntegrity, measureSkeuomorphicFidelity } from "../src/utils/qualityGate";
 import { classifyPluginIntent } from "../src/utils/pluginSpec";
 import { buildOfflinePlugin } from "../src/utils/offlineBuilder";
 import { AudioPlugin, PluginParameter } from "../src/types";
@@ -67,17 +67,54 @@ const P = (id: string, controlType?: PluginParameter["controlType"]): PluginPara
     const allPositioned = layout.parameters.every((p) => p.x !== undefined && p.y !== undefined && p.w !== undefined && p.h !== undefined);
     check(`${a}: every param gets x/y/w/h`, allPositioned);
     check(`${a}: preserves param count`, layout.parameters.length === params.length, `${layout.parameters.length} vs ${params.length}`);
-    // No two boxes exactly coincide (a real collision check is unnecessary
-    // here -- this just catches "everything landed at the same spot").
-    const seen = new Set<string>();
-    let dup = 0;
-    for (const p of layout.parameters) {
-      const k = `${p.x},${p.y}`;
-      if (seen.has(k)) dup++;
-      seen.add(k);
-    }
-    check(`${a}: no duplicate positions`, dup === 0, `${dup} dup(s)`);
+    const collisions = layout.parameters.flatMap((p, i) =>
+      layout.parameters.slice(i + 1).filter((q) => rectsOverlap(
+        { x: p.x!, y: p.y!, w: p.w!, h: p.h! },
+        { x: q.x!, y: q.y!, w: q.w!, h: q.h! }
+      ))
+    ).length;
+    check(`${a}: no overlapping control rectangles`, collisions === 0, `${collisions} collision(s)`);
     check(`${a}: content bounds are positive`, layout.contentW > 0 && layout.contentH > 0);
+  }
+}
+
+/* ---- 2a. Returned artboard bounds contain real explicit control sizes. ---- */
+{
+  const oversized = [
+    { ...P("wide", "knob"), w: 920, h: 310 },
+    P("tone", "knob"),
+    P("mix", "slider"),
+  ];
+  for (const a of BUILTIN_ARCHETYPES) {
+    const layout = applyArchetype(a, oversized, true);
+    const contained = layout.parameters.every((p) =>
+      (p.x ?? 0) + (p.w ?? 120) <= layout.contentW &&
+      (p.y ?? 0) + (p.h ?? 100) <= layout.contentH
+    );
+    check(`${a}: oversized controls remain inside artboard bounds`, contained);
+  }
+}
+
+/* ---- 2b. Section metadata drives every layout, not merely grid/strip.
+   This fixture exercises the EQ hero, pedal footswitch, rack, dense panel,
+   and showpiece hierarchy against the same group-hull quality check used by
+   the shipping gate. ---- */
+{
+  const semantic = [
+    { ...P("eq_curve", "eq"), uiRole: "hero" as const, uiGroup: "hero", uiGroupLabel: "Instrument" },
+    { ...P("low", "knob"), uiRole: "tone" as const, uiGroup: "tone", uiGroupLabel: "Tone" },
+    { ...P("high", "knob"), uiRole: "tone" as const, uiGroup: "tone", uiGroupLabel: "Tone" },
+    { ...P("mix", "slider"), uiRole: "output" as const, uiGroup: "output", uiGroupLabel: "Output" },
+    { ...P("bypass", "toggle"), uiRole: "utility" as const, uiGroup: "utility", uiGroupLabel: "Utility" },
+  ];
+  for (const a of BUILTIN_ARCHETYPES) {
+    const layout = applyArchetype(a, semantic, true);
+    const plugin: AudioPlugin = {
+      id: `semantic-${a}`, name: a, category: "filter", description: "", dspFunction: "return inputSample;",
+      faustCode: "", cppJuceCode: "", createdAt: "", uiArchetype: a,
+      parameters: layout.parameters,
+    };
+    check(`${a}: semantic sections occupy coherent regions`, hasCoherentFaceplateGeometry(plugin));
   }
 }
 

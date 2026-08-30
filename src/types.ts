@@ -41,6 +41,82 @@ export interface PluginParameter {
   // IR (Impulse Response) properties for cabinet modeling
   irFiles?: { id: string; name: string; size: string; data: string }[];
   activeIrId?: string;
+
+  /** Deterministic semantic presentation metadata. The generation pipeline
+   * derives these from parameter meaning and plugin family; both the browser
+   * faceplate and native JUCE exporter consume the same values. */
+  uiRole?: "hero" | "primary" | "tone" | "dynamics" | "motion" | "space" | "output" | "utility" | "visual";
+  uiGroup?: string;
+  uiGroupLabel?: string;
+}
+
+/** Versioned, renderer-neutral description of the faceplate that actually
+ * ships. Web and native exporters consume this resolved (pixel) contract
+ * rather than independently guessing a layout from parameter names. */
+export interface ResolvedUiContract {
+  version: "1.0";
+  /** Capability handshake: score credit is only granted where both shipping
+   * renderers declare they consume this contract version. */
+  renderers: { web: "1.0"; native: "1.0" };
+  artboard: { width: number; height: number; padding: number };
+  theme: {
+    background: string;
+    border: string;
+    accent: string;
+    text: string;
+    font: NonNullable<AudioPlugin["customSkin"]>["fontStyle"];
+    glow: NonNullable<AudioPlugin["customSkin"]>["glowStyle"];
+    material: "brushed-metal" | "anodized-aluminum" | "wood-panel" | "matte-plastic" | "vintage-cream";
+  };
+  archetype: string;
+  /** Stable renderer-neutral identity. Optional only so contracts persisted
+   * before identity recipe 1.0 remain loadable; all newly resolved contracts
+   * contain it and renderers deterministically derive it when absent. */
+  identityRecipe?: VisualIdentityRecipe;
+  hierarchy: Array<{
+    id: string;
+    label: string;
+    role: "primary" | "secondary" | "visual";
+    parameterIds: string[];
+  }>;
+  controls: Array<{
+    parameterId: string;
+    controlType: NonNullable<PluginParameter["controlType"]>;
+    role: "primary" | "secondary" | "visual";
+    bounds: { x: number; y: number; width: number; height: number };
+    style: {
+      accent: string;
+      font: NonNullable<PluginParameter["fontStyle"]>;
+      /** Effective shared knob token after legacy per-control overrides. */
+      knob?: VisualIdentityRecipe["knob"];
+    };
+    accessibility: {
+      label: string;
+      role: "slider" | "switch" | "button" | "img";
+      valueText: string;
+      min?: number;
+      max?: number;
+    };
+  }>;
+}
+
+export interface VisualIdentityRecipe {
+  version: "1.0";
+  /** Opaque stable id derived from plugin id + family/category/attributes. */
+  id: string;
+  seed: number;
+  family: string;
+  modelLabel: string;
+  styleTokens: string[];
+  hardwareMotif: "rack" | "pedal" | "console" | "instrument" | "tape" | "space-unit";
+  artwork: "orbs" | "stripes" | "grain" | "grid" | "dots" | "arcs" | "contours";
+  panel: "machined" | "tolex" | "wood" | "polymer" | "glass";
+  knob: "pointer" | "silvercap" | "chickenhead" | "neonring" | "vintage";
+  eqMotion: "static" | "breathing" | "ripple" | "scan";
+  meter: "needle" | "segmented-peak" | "plasma-bar" | "scope-stereo";
+  /** Renderer capability policy: static recipes never schedule decoration. */
+  motionPolicy: "decorative" | "static";
+  animation: { phase: number; tempo: number; amplitude: number };
 }
 
 export interface AudioPlugin {
@@ -87,6 +163,10 @@ export interface AudioPlugin {
    *  by the user via the archetype picker in the Pro UI Designer. */
   uiArchetype?: string;
 
+  /** Final semantic UI contract. Optional for persisted/third-party plugins;
+   * runQualityGate deterministically resolves it before shipping. */
+  resolvedUi?: ResolvedUiContract;
+
   /** The PluginFamily (pluginSpec.ts) this plugin was classified/built as,
    *  stamped by runQualityGate at build time. Plain string (not the
    *  PluginFamily literal union) so types.ts doesn't import pluginSpec.ts.
@@ -94,6 +174,11 @@ export interface AudioPlugin {
    *  auto-generated manual, in-plugin tooltips, guide-mode badges -- resolve
    *  FEATURE_MANIFEST entries without re-inferring the family from scratch. */
   family?: string;
+
+  /** Versioned audio-bus contract shared by preview, persistence and exports.
+   * Runtime connection/activity is deliberately not stored here: a persisted
+   * selection is not proof that an auxiliary signal is currently connected. */
+  routing?: PluginRoutingContract;
 
   /**
    * True only for the stock plugin the app holds so `plugin` is never null
@@ -117,6 +202,21 @@ export interface AudioPlugin {
     borderWidth?: number;
     bgOpacity?: number; // overlay alpha
   };
+}
+
+export interface PluginRoutingContract {
+  version: "1.0";
+  mainInput: { channels: "mono-or-stereo"; required: true };
+  auxiliaryInput: {
+    role: "sidechain";
+    supported: boolean;
+    required: boolean;
+    channels: "mono-or-stereo";
+  };
+  detectorMode: "internal" | "external-optional" | "external-required";
+  disconnectedBehavior: "use-internal-detector" | "bypass-sidechain-processing";
+  /** Declares that the generated DSP consumes the optional inputKey argument. */
+  inputKeyArgument: boolean;
 }
 
 /**
@@ -177,6 +277,16 @@ export interface BuildReport {
    *  minimal one. Informational — ranks candidates, never gates shipping.
    *  `missing` names the required/expected controls this build lacks. */
   featureDepth?: { score: number; evidence: string; missing: string[] };
+  /** Capability decision, not live connection state. Live external activity
+   * is only shown after the preview confirms a real key was consumed. */
+  sidechain?: {
+    eligible: boolean;
+    selected: boolean;
+    detectorMode: PluginRoutingContract["detectorMode"];
+    disconnectedBehavior: PluginRoutingContract["disconnectedBehavior"];
+    rationale: string;
+    verifiedInputKeyRead: boolean;
+  };
   /**
    * Calibration repairs the gate applied: a knob whose functional-fitness
    * measurement (echo timing, filter corner, LFO rate, oscillator pitch)
@@ -376,4 +486,3 @@ export interface DiagnosticsReport {
   };
   recommedSummary: string;
 }
-

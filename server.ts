@@ -3,11 +3,17 @@ import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
-import { scaffoldNativeProject, startNativeBuild, getBuildJob } from "./server/nativeBuild";
+import { scaffoldNativeProject, startNativeBuildForScaffold, getBuildJob, getCompletedBuildArtifact } from "./server/nativeBuild";
+import { ChatMessage, isAllowedModel, isManagedProvider, managedHealth, structuredProviderChat } from "./server/llmProviders";
+import { audioProjectProviderMessages, finalizeAudioProjectGeneration, validateAudioProjectGenerationBody } from "./server/audioProjectGeneration";
+import { audioProjectToNativePlugin } from "./server/audioProjectNative";
+import { assertProductionSameOrigin, assertPublicProxyTarget, LlmRequestGate, pinnedProxyRequest, readResponseLimited, validateProxyRequest } from "./server/security";
 import { DSP_CODING_RULES, PARAMETER_DESIGN_RULES, AMP_CAB_SCHEMA_GUIDANCE, SAMPLER_SCHEMA_GUIDANCE, SOUND_QUALITY_RULES, RESPONSE_STYLE_RULES } from "./src/utils/dspPromptKit";
+import { compileAudioSoftwareProject } from "./src/audioProjects";
 
 // Load environment variables
 dotenv.config();
+import dawSyncRouter from "./server/dawSync";
 
 const app = express();
 // Honor an assigned PORT (preview harness / hosting) and fall back to 3000.
@@ -17,6 +23,50 @@ const PORT = Number(process.env.PORT) || 3000;
 
 // Set up JSON body parser with high limits for code content
 app.use(express.json({ limit: "20mb" }));
+// dawSyncRouter's own requireUser middleware reads the X-Sync-Code header
+// (src/daw/pairing.ts's device-pairing code) -- no app-level auth middleware
+// needed; this replaced Clerk's clerkMiddleware(), which used to run here.
+app.use("/api/daw-sync", express.raw({ type: ["audio/*", "application/octet-stream"], limit: "1gb" }), dawSyncRouter);
+
+const LLM_MAX_MESSAGES = 24;
+const LLM_MAX_MESSAGE_CHARS = 16_000;
+const LLM_MAX_TOTAL_CHARS = 80_000;
+const LLM_DEADLINE_MS = 45_000;
+const llmRequestGate = new LlmRequestGate();
+
+function validateLlmChatBody(body: any): { provider: "openai" | "anthropic" | "gemini" | "online_free"; model: string; messages: ChatMessage[] } {
+  if (!body || !isManagedProvider(body.provider) || !isAllowedModel(body.provider, body.model)) throw new Error("Unsupported managed provider or model.");
+  if (!Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > LLM_MAX_MESSAGES) throw new Error(`messages must contain 1-${LLM_MAX_MESSAGES} entries.`);
+  let total = 0;
+  const messages = body.messages.map((message: any) => {
+    if (!message || !["system", "user", "assistant"].includes(message.role) || typeof message.content !== "string" || !message.content.trim() || message.content.length > LLM_MAX_MESSAGE_CHARS) {
+      throw new Error("Each message needs a supported role and non-empty content within the size limit.");
+    }
+    total += message.content.length;
+    return { role: message.role, content: message.content } as ChatMessage;
+  });
+  if (total > LLM_MAX_TOTAL_CHARS) throw new Error("Combined message content exceeds the size limit.");
+  return { provider: body.provider, model: body.model, messages };
+}
+
+function requestAbortSignal(req: express.Request, res: express.Response) {
+  const controller = new AbortController();
+  const abortError = (message: string) => Object.assign(new Error(message), { name: "AbortError" });
+  const timer = setTimeout(() => controller.abort(abortError("LLM request deadline exceeded.")), LLM_DEADLINE_MS);
+  const abort = () => controller.abort(abortError("Client disconnected."));
+  req.once("aborted", abort);
+  res.once("close", abort);
+  return { signal: controller.signal, cleanup: () => { clearTimeout(timer); req.off("aborted", abort); res.off("close", abort); } };
+}
+
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(Object.assign(new Error("LLM request aborted."), { name: "AbortError" }));
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(Object.assign(new Error("LLM request deadline exceeded or client disconnected."), { name: "AbortError" }));
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
 
 // Optional visual-styling fields shared by both Gemini parameter schemas.
 // Without these in the responseSchema, Gemini's structured output silently
@@ -86,6 +136,83 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+/** Server-managed providers deliberately use integration credentials only. */
+app.get("/api/llm/health", (_req, res) => {
+  res.json({ status: "ok", providers: managedHealth() });
+});
+
+app.post("/api/llm/chat", async (req, res) => {
+  let cleanup: (() => void) | undefined;
+  let release: (() => void) | undefined;
+  try {
+    const { provider, model, messages } = validateLlmChatBody(req.body);
+    assertProductionSameOrigin(req.headers);
+    release = llmRequestGate.acquire(req.socket.remoteAddress || "unknown", messages.reduce((sum, message) => sum + message.content.length, 0)).release;
+    const abort = requestAbortSignal(req, res);
+    cleanup = abort.cleanup;
+    const generated = await structuredProviderChat(provider, model, messages, abort.signal);
+    if (!res.headersSent && !abort.signal.aborted) {
+      res.json({
+        provider,
+        model: generated.model,
+        ...(generated.attemptedModels ? { attemptedModels: generated.attemptedModels } : {}),
+        result: generated.result,
+      });
+    }
+  } catch (error: any) {
+    if (!res.headersSent) {
+      if (error?.status === 429 && error?.retryAfter) res.setHeader("Retry-After", String(error.retryAfter));
+      res.status(error?.code === "ONLINE_FREE_EXHAUSTED" ? 503 : error?.name === "AbortError" ? 504 : error?.status || 400).json({ ...(error?.code ? { code: error.code } : {}), error: error?.message || "Managed LLM request failed." });
+    }
+  } finally { cleanup?.(); release?.(); }
+});
+
+/** General audio-software compiler. The plugin route below remains compatible,
+ * while new callers receive one versioned project contract for every supported
+ * audio-software category. */
+app.post("/api/audio-projects/generate", async (req, res) => {
+  let cleanup: (() => void) | undefined;
+  let release: (() => void) | undefined;
+  try {
+    const request = validateAudioProjectGenerationBody(req.body);
+    const compilation = compileAudioSoftwareProject(request.prompt, request.legacyPlugin);
+    if (!request.provider || !request.model) return res.json(finalizeAudioProjectGeneration(compilation));
+
+    assertProductionSameOrigin(req.headers);
+    release = llmRequestGate.acquire(req.socket.remoteAddress || "unknown", request.prompt.length).release;
+    const abort = requestAbortSignal(req, res);
+    cleanup = abort.cleanup;
+    try {
+      const generated = await structuredProviderChat(request.provider, request.model, audioProjectProviderMessages(request.prompt, compilation), abort.signal);
+      if (!res.headersSent && !abort.signal.aborted) {
+        res.json({
+          provider: request.provider,
+          model: generated.model,
+          ...(generated.attemptedModels ? { attemptedModels: generated.attemptedModels } : {}),
+          ...finalizeAudioProjectGeneration(compilation, generated.result),
+        });
+      }
+    } catch (error: any) {
+      if (error?.name === "AbortError" || abort.signal.aborted) throw error;
+      if (!res.headersSent) {
+        res.json({
+          provider: request.provider,
+          model: request.model,
+          ...finalizeAudioProjectGeneration(compilation, undefined, error?.message || "Provider refinement failed."),
+        });
+      }
+    }
+  } catch (error: any) {
+    if (!res.headersSent) {
+      if (error?.status === 429 && error?.retryAfter) res.setHeader("Retry-After", String(error.retryAfter));
+      res.status(error?.name === "AbortError" ? 504 : error?.status || 400).json({ error: error?.message || "Audio software project generation failed." });
+    }
+  } finally {
+    cleanup?.();
+    release?.();
+  }
+});
+
 // 2. Main Plugin Generator: Creates structured JS DSP prototype + Faust + C++ JUCE + Sliders metadata
 app.post("/api/plugins/generate", async (req, res) => {
   try {
@@ -113,9 +240,9 @@ Also, provide highly structured "faustCode" and "cppJuceCode" so developers can 
           type: Type.OBJECT,
           properties: {
             pluginName: { type: Type.STRING, description: "Compact, creative name for the audio plugin" },
-            category: { 
-              type: Type.STRING, 
-              description: "Must be exactly one of: distortion, delay, filter, synthesizer, dynamics, modulation, reverb" 
+            category: {
+              type: Type.STRING,
+              description: "Must be exactly one of: distortion, delay, filter, synthesizer, dynamics, modulation, reverb"
             },
             description: { type: Type.STRING, description: "Creative 2-sentence marketing pitch explaining what the plugin does" },
             parameters: {
@@ -135,9 +262,9 @@ Also, provide highly structured "faustCode" and "cppJuceCode" so developers can 
                 required: ["id", "name", "min", "max", "defaultValue", "unit"]
               }
             },
-            dspFunction: { 
-              type: Type.STRING, 
-              description: "Perfect javascript function body mapping inputSample to outputSample using state and params. E.g. 'if(!state.v) state.v = 0; state.v = state.v*0.9 + inputSample*0.1; return state.v;'" 
+            dspFunction: {
+              type: Type.STRING,
+              description: "Perfect javascript function body mapping inputSample to outputSample using state and params. E.g. 'if(!state.v) state.v = 0; state.v = state.v*0.9 + inputSample*0.1; return state.v;'"
             },
             faustCode: { type: Type.STRING, description: "A beautifully structured Faust DSP implementation of this effect" },
             cppJuceCode: { type: Type.STRING, description: "A highly robust, production-ready C++ core class or processBlock snippet for the JUCE library" }
@@ -256,9 +383,9 @@ Specific Agent Profile and instructions: ${systemInstruction || ""}`;
               description: "Populate with the fully assembled AudioPlugin object ONLY if updating code, sliders, description, name, or fixing bugs. Let it be null if you are only answering questions without changing any plugin state.",
               properties: {
                 pluginName: { type: Type.STRING, description: "A compact, highly creative title for the audio plugin" },
-                category: { 
-                  type: Type.STRING, 
-                  description: "Must be exactly one of: distortion, delay, filter, synthesizer, dynamics, modulation, reverb" 
+                category: {
+                  type: Type.STRING,
+                  description: "Must be exactly one of: distortion, delay, filter, synthesizer, dynamics, modulation, reverb"
                 },
                 description: { type: Type.STRING, description: "A creative, premium 2-sentence summary of what this plugin sounds like" },
                 parameters: {
@@ -278,9 +405,9 @@ Specific Agent Profile and instructions: ${systemInstruction || ""}`;
                     required: ["id", "name", "min", "max", "defaultValue", "unit"]
                   }
                 },
-                dspFunction: { 
-                  type: Type.STRING, 
-                  description: "The complete javascript DSP processing function body itself. Receives (inputSample, params, state). E.g. 'if(!state.x) state.x=0; return inputSample;'" 
+                dspFunction: {
+                  type: Type.STRING,
+                  description: "The complete javascript DSP processing function body itself. Receives (inputSample, params, state). E.g. 'if(!state.x) state.x=0; return inputSample;'"
                 },
                 faustCode: { type: Type.STRING, description: "The beautiful corresponding Faust implementation script file." },
                 cppJuceCode: { type: Type.STRING, description: "The corresponding premium real-time-safe C++ JUCE processBlock container." }
@@ -357,7 +484,6 @@ app.post("/api/plugins/analyze", async (req, res) => {
 });
 
 
-
 // Helper to identify local/private IP addresses or hostnames
 const isLocalOrPrivateAddress = (urlStr: string): boolean => {
   try {
@@ -399,29 +525,47 @@ const isLocalOrPrivateAddress = (urlStr: string): boolean => {
 app.post("/api/native/scaffold", async (req, res) => {
   try {
     const { plugin, llmConfig } = req.body;
-    if (!plugin || !plugin.name || !Array.isArray(plugin.parameters) || !plugin.dspFunction) {
-      return res.status(400).json({ error: "A plugin object with name, parameters, and dspFunction is required." });
+    if (!plugin || !plugin.name || !Array.isArray(plugin.parameters) || !plugin.dspFunction || !plugin.resolvedUi) {
+      return res.status(400).json({ error: "A gated plugin object with name, parameters, dspFunction, and resolvedUi is required." });
     }
     if (!llmConfig || (llmConfig.provider !== "ollama" && llmConfig.provider !== "lm_studio")) {
       return res.status(400).json({ error: "Native build requires a local LLM provider (ollama or lm_studio) to translate the DSP core to C++." });
     }
 
     const result = await scaffoldNativeProject(plugin, llmConfig);
-    res.json(result);
+    // The on-disk directory is server-private. The browser gets only the
+    // opaque handle it must present to start this exact scaffold.
+    const { projectDir: _privateProjectDir, ...publicResult } = result;
+    res.json(publicResult);
   } catch (error: any) {
     handleApiError(error, res, "Failed to scaffold native JUCE project.");
   }
 });
 
+app.post("/api/audio-projects/native/scaffold", async (req, res) => {
+  try {
+    const { project, llmConfig } = req.body || {};
+    if (!llmConfig || (llmConfig.provider !== "ollama" && llmConfig.provider !== "lm_studio")) {
+      return res.status(400).json({ error: "Native build requires a local LLM provider (ollama or lm_studio) to translate the DSP core to C++." });
+    }
+    const plugin = audioProjectToNativePlugin(project);
+    const result = await scaffoldNativeProject(plugin, llmConfig);
+    const { projectDir: _privateProjectDir, ...publicResult } = result;
+    res.json({ ...publicResult, projectId: project.id, projectKind: project.kind });
+  } catch (error: any) {
+    handleApiError(error, res, "Failed to scaffold native audio project.");
+  }
+});
+
 app.post("/api/native/build", (req, res) => {
   try {
-    const { projectDir, llmConfig } = req.body;
-    if (!projectDir) {
-      return res.status(400).json({ error: "projectDir is required." });
+    const { scaffoldId, llmConfig } = req.body;
+    if (!scaffoldId || typeof scaffoldId !== "string") {
+      return res.status(400).json({ error: "A server-issued scaffoldId is required." });
     }
     // llmConfig is optional: with it, compile failures get real
     // error-driven repair passes before the passthrough fallback.
-    const buildId = startNativeBuild(projectDir, llmConfig);
+    const buildId = startNativeBuildForScaffold(scaffoldId, llmConfig);
     res.json({ buildId });
   } catch (error: any) {
     handleApiError(error, res, "Failed to start native build.");
@@ -436,7 +580,7 @@ app.get("/api/native/build/:buildId", (req, res) => {
   res.json({
     status: job.status,
     log: job.log.join(""),
-    vst3Path: job.vst3Path,
+    artifactName: job.status === "success" && job.vst3Path ? path.basename(job.vst3Path) : undefined,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     attempts: job.attempts,
@@ -448,10 +592,11 @@ app.get("/api/native/build/:buildId", (req, res) => {
 // Open the built .vst3's containing folder in Explorer, for the user to inspect it themselves.
 app.post("/api/native/reveal", async (req, res) => {
   try {
-    const { vst3Path } = req.body;
-    if (!vst3Path) return res.status(400).json({ error: "vst3Path is required." });
+    const { buildId } = req.body || {};
+    const artifact = getCompletedBuildArtifact(buildId);
+    if (!artifact) return res.status(400).json({ error: "A completed server-owned buildId is required." });
     const { spawn } = await import("node:child_process");
-    spawn("explorer.exe", [`/select,${vst3Path}`], { shell: false });
+    spawn("explorer.exe", [`/select,${artifact}`], { shell: false });
     res.json({ ok: true });
   } catch (error: any) {
     handleApiError(error, res, "Failed to open Explorer.");
@@ -462,12 +607,13 @@ app.post("/api/native/reveal", async (req, res) => {
 // Only ever runs when the user explicitly clicks the corresponding button client-side.
 app.post("/api/native/install", async (req, res) => {
   try {
-    const { vst3Path } = req.body;
-    if (!vst3Path) return res.status(400).json({ error: "vst3Path is required." });
+    const { buildId } = req.body || {};
+    const artifact = getCompletedBuildArtifact(buildId);
+    if (!artifact) return res.status(400).json({ error: "A completed server-owned buildId is required." });
 
     const fs = await import("node:fs");
     const path = await import("node:path");
-    if (!fs.existsSync(vst3Path)) {
+    if (!fs.existsSync(artifact)) {
       return res.status(400).json({ error: "That .vst3 path no longer exists." });
     }
 
@@ -476,10 +622,10 @@ app.post("/api/native/install", async (req, res) => {
       : "C:\\Program Files\\Common Files\\VST3";
     fs.mkdirSync(systemVst3Dir, { recursive: true });
 
-    const dest = path.join(systemVst3Dir, path.basename(vst3Path));
-    fs.cpSync(vst3Path, dest, { recursive: true, force: true });
+    const dest = path.join(systemVst3Dir, path.basename(artifact));
+    fs.cpSync(artifact, dest, { recursive: true, force: true });
 
-    res.json({ ok: true, installedTo: dest });
+    res.json({ ok: true, artifactName: path.basename(dest) });
   } catch (error: any) {
     handleApiError(error, res, "Failed to install the plugin to the system VST3 folder.");
   }
@@ -487,25 +633,14 @@ app.post("/api/native/install", async (req, res) => {
 
 // 6. Secure LLM & Local Tunnel Proxy to bypass all browser Mixed Content or CORS limits
 app.post("/api/proxy", async (req, res) => {
+  let cleanup: (() => void) | undefined;
   try {
     const { targetUrl, method, headers, body } = req.body;
-
-    if (!targetUrl) {
-      return res.status(400).json({ error: "targetUrl parameter is required." });
-    }
-
-    // When this server is deployed to a remote container (e.g. Cloud Run), it has
-    // no route to the *user's* private network, so local/private targets are refused
-    // there. When running locally (npm run dev / npm start on the user's own
-    // machine, which is how this app is meant to run for local-model support),
-    // the server IS on the same machine as Ollama/LM Studio, so proxying to
-    // localhost is exactly the point -- it's how the browser's CORS restrictions
-    // get bypassed for a same-machine call to a different port.
-    if (process.env.NODE_ENV === "production" && isLocalOrPrivateAddress(targetUrl)) {
-      return res.status(400).json({
-        error: `Address "${targetUrl}" is a local private network or loopback address. Because this application backend runs inside a remote container in the cloud, it has no direct route to your physical computer's private home network. To proxy to your local LM Studio or other private endpoint, you MUST start a public secure tunnel (e.g., 'npx localtunnel --port 1234' or ngrok) and use the resulting public HTTPS URL here instead.`
-      });
-    }
+    const checked = validateProxyRequest(targetUrl, method, headers);
+    const addresses = process.env.NODE_ENV === "production" ? await assertPublicProxyTarget(checked.url) : undefined;
+    if (body !== undefined && JSON.stringify(body).length > 1_000_000) return res.status(413).json({ error: "Proxy request body exceeds the size limit." });
+    const abort = requestAbortSignal(req, res);
+    cleanup = abort.cleanup;
 
     // Append bypass headers to skip browser splash warning screens on ngrok or localtunnel
     const enrichedHeaders: Record<string, string> = {
@@ -513,11 +648,11 @@ app.post("/api/proxy", async (req, res) => {
       "bypass-tunnel-reminder": "true",
       "ngrok-skip-browser-warning": "true",
       "User-Agent": "local-llm-proxy-agent",
-      ...headers
+      ...checked.headers
     };
 
     const fetchOptions: RequestInit = {
-      method: method || "POST",
+      method: checked.method,
       headers: enrichedHeaders,
     };
 
@@ -525,10 +660,11 @@ app.post("/api/proxy", async (req, res) => {
       fetchOptions.body = typeof body === "string" ? body : JSON.stringify(body);
     }
 
-    console.log(`[Proxy Link] forwarding ${method || "POST"} request to ${targetUrl}`);
-    const response = await fetch(targetUrl, fetchOptions);
-
-    const responseText = await response.text();
+    console.log(`[Proxy Link] forwarding ${checked.method} request to ${checked.url}`);
+    const serializedBody = fetchOptions.body as string | undefined;
+    const pinned = addresses ? await pinnedProxyRequest(checked.url, checked.method, enrichedHeaders, serializedBody, addresses[0], abort.signal) : undefined;
+    const upstream = pinned ? undefined : await fetch(checked.url, { ...fetchOptions, signal: abort.signal, redirect: "error" });
+    const responseText = pinned ? pinned.text : await readResponseLimited(upstream!);
     let jsonPayload: any = null;
 
     try {
@@ -543,17 +679,18 @@ app.post("/api/proxy", async (req, res) => {
     // being missing -- the client reported "Server proxy failed with code
     // 404" instead of the actual, actionable model error.
     res.json({
-      status: response.status,
-      ok: response.ok,
+      status: pinned?.status ?? upstream!.status,
+      ok: pinned?.ok ?? upstream!.ok,
       responseText,
       jsonPayload
     });
   } catch (error: any) {
     console.error(`[Proxy Failure] could not reach target URL:`, error);
-    res.status(502).json({ 
+    const status = error?.name === "AbortError" ? 504 : /must be|Only HTTP|credentials|Only GET|Private|size limit/i.test(error.message || "") ? 400 : 502;
+    res.status(status).json({
       error: `The local server/tunnel is offline, unreachable, or refused the connection. Error: ${error.message}. Please verify your tunnel is active and running correctly.` 
     });
-  }
+  } finally { cleanup?.(); }
 });
 
 // Configure Vite middleware in Dev, static file serving in Production

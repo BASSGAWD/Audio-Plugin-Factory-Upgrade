@@ -246,6 +246,53 @@ function layoutGridBlock(
   };
 }
 
+/**
+ * Lay semantic sections out as separate grid bands. A flat modulo grid can
+ * put the first control from section B into the unfinished last row of
+ * section A, which makes the section hulls overlap even though the array is
+ * correctly group-sorted. Starting each group on a fresh row turns semantic
+ * metadata into visible hierarchy rather than labels over an interleaved
+ * control grid.
+ */
+function layoutSemanticGridBands(
+  params: PluginParameter[],
+  opts: { cols: number; cellW: number; cellH: number; originX?: number; originY: number; force?: boolean; sectionGap?: number }
+): { params: PluginParameter[]; bottomY: number; rightX: number; laidOut: number } {
+  const blocks: PluginParameter[][] = [];
+  const blockByGroup = new Map<string, PluginParameter[]>();
+  for (const p of params) {
+    // Ungrouped controls remain stable and adjacent, but never get merged
+    // into a named section whose visual bounds would then be misleading.
+    const key = p.uiGroup ?? "__ungrouped";
+    let block = blockByGroup.get(key);
+    if (!block) {
+      block = [];
+      blockByGroup.set(key, block);
+      blocks.push(block);
+    }
+    block.push(p);
+  }
+  if (blocks.length <= 1) return layoutGridBlock(params, opts);
+
+  let cursorY = opts.originY;
+  let rightX = opts.originX ?? ORIGIN_X;
+  let laidOut = 0;
+  const positioned: PluginParameter[] = [];
+  for (const block of blocks) {
+    const result = layoutGridBlock(block, { ...opts, originY: cursorY });
+    positioned.push(...result.params);
+    rightX = Math.max(rightX, result.rightX);
+    laidOut += result.laidOut;
+    cursorY = result.bottomY + (opts.sectionGap ?? 18);
+  }
+  return {
+    params: positioned,
+    bottomY: positioned.length > 0 ? cursorY - (opts.sectionGap ?? 18) : opts.originY,
+    rightX,
+    laidOut,
+  };
+}
+
 // Showpiece (amp/cab/mic) and pad widgets carry their OWN meaningful size --
 // a cabinet is 240x240 because that's what looks like a cabinet, not
 // because it's this archetype's cell size. force (used when the user
@@ -314,11 +361,9 @@ function layoutGrid(parameters: PluginParameter[], force?: boolean): ArchetypeLa
   const COLS = 4;
   const CELL_W = 140;
   const CELL_H = 125;
-  const reg = layoutGridBlock(regular, { cols: COLS, cellW: CELL_W, cellH: CELL_H, originY: ORIGIN_Y, force });
-  const regularRows = Math.ceil(regular.length / COLS);
-  const sp = layoutShowpieceRow(showpiece, ORIGIN_Y + regularRows * CELL_H + 20, force);
-  const showpieceRows = showpiece.length > 0 ? 1 : 0;
-  const padOriginY = ORIGIN_Y + regularRows * CELL_H + (showpieceRows > 0 ? 280 : 0);
+  const reg = layoutSemanticGridBands(regular, { cols: COLS, cellW: CELL_W, cellH: CELL_H, originY: ORIGIN_Y, force });
+  const sp = layoutShowpieceRow(showpiece, reg.bottomY + (showpiece.length > 0 ? 20 : 0), force);
+  const padOriginY = sp.bottomY + (pads.length > 0 ? 20 : 0);
   const pd = layoutPadGrid(pads, padOriginY, force);
   return {
     parameters: [...reg.params, ...sp.params, ...pd.params],
@@ -346,7 +391,10 @@ function layoutEqFocus(parameters: PluginParameter[], force?: boolean): Archetyp
     rest = regular.filter((_, i) => i !== eqIdx);
   }
   const knobsY = ORIGIN_Y + (hero.length > 0 ? (hero[0].h ?? 180) + 20 : 0);
-  const reg = layoutGridBlock(rest, { cols: 4, cellW: 140, cellH: 125, originY: knobsY, force });
+  // Bands keep Tone/Output/Utility controls as visible modules beneath the
+  // curve instead of letting the tail of one section share a row with the
+  // start of the next one.
+  const reg = layoutSemanticGridBands(rest, { cols: 4, cellW: 140, cellH: 125, originY: knobsY, force });
   laidOut += reg.laidOut;
   const sp = layoutShowpieceRow(showpiece, reg.bottomY + (showpiece.length > 0 ? 20 : 0), force);
   const pd = layoutPadGrid(pads, sp.bottomY + (pads.length > 0 ? 20 : 0), force);
@@ -364,7 +412,7 @@ function layoutEqFocus(parameters: PluginParameter[], force?: boolean): Archetyp
 function layoutStrip(parameters: PluginParameter[], force?: boolean): ArchetypeLayout {
   const { regular, showpiece, pads } = splitByRole(parameters);
   const cols = regular.length > 6 ? 2 : 1;
-  const reg = layoutGridBlock(regular, { cols, cellW: 220, cellH: 95, originY: ORIGIN_Y, force });
+  const reg = layoutSemanticGridBands(regular, { cols, cellW: 220, cellH: 95, originY: ORIGIN_Y, force });
   const sp = layoutShowpieceRow(showpiece, reg.bottomY + (showpiece.length > 0 ? 20 : 0), force);
   const pd = layoutPadGrid(pads, sp.bottomY + (pads.length > 0 ? 20 : 0), force);
   return {
@@ -384,10 +432,10 @@ function layoutPedal(parameters: PluginParameter[], force?: boolean): ArchetypeL
   const toggles = regular.filter((p) => (p.controlType || inferControlType(p)) === "toggle");
   const knobs = regular.filter((p) => (p.controlType || inferControlType(p)) !== "toggle");
   const cols = Math.max(1, Math.min(5, knobs.length));
-  const reg = layoutGridBlock(knobs, { cols, cellW: 150, cellH: 150, originY: ORIGIN_Y, force });
+  const reg = layoutSemanticGridBands(knobs, { cols, cellW: 150, cellH: 150, originY: ORIGIN_Y, force });
   const toggleCols = Math.max(1, Math.min(4, toggles.length));
   const toggleOriginX = ORIGIN_X + Math.max(0, (reg.rightX - ORIGIN_X - toggleCols * 130) / 2);
-  const tg = layoutGridBlock(toggles, { cols: toggleCols, cellW: 130, cellH: 80, originX: toggleOriginX, originY: reg.bottomY + (toggles.length > 0 ? 20 : 0), force });
+  const tg = layoutSemanticGridBands(toggles, { cols: toggleCols, cellW: 130, cellH: 100, originX: toggleOriginX, originY: reg.bottomY + (toggles.length > 0 ? 20 : 0), force });
   const sp = layoutShowpieceRow(showpiece, tg.bottomY + (showpiece.length > 0 ? 20 : 0), force);
   const pd = layoutPadGrid(pads, sp.bottomY + (pads.length > 0 ? 20 : 0), force);
   return {
@@ -403,12 +451,14 @@ function layoutPedal(parameters: PluginParameter[], force?: boolean): ArchetypeL
 function layoutRack(parameters: PluginParameter[], force?: boolean): ArchetypeLayout {
   const { regular, showpiece, pads } = splitByRole(parameters);
   const cols = Math.max(1, Math.min(8, regular.length));
-  const reg = layoutGridBlock(regular, { cols, cellW: 110, cellH: 100, originY: ORIGIN_Y, force });
+  // A standard generated control is 120x100.  Rack/panel cells must be
+  // larger than that default; the former 110px pitch overlapped every pair.
+  const reg = layoutSemanticGridBands(regular, { cols, cellW: 140, cellH: 125, originY: ORIGIN_Y, force });
   const sp = layoutShowpieceRow(showpiece, reg.bottomY + (showpiece.length > 0 ? 20 : 0), force);
   const pd = layoutPadGrid(pads, sp.bottomY + (pads.length > 0 ? 20 : 0), force);
   return {
     parameters: [...reg.params, ...sp.params, ...pd.params],
-    contentW: ORIGIN_X + cols * 110 + 40,
+    contentW: ORIGIN_X + cols * 140 + 40,
     contentH: pd.bottomY + 40,
     laidOutCount: reg.laidOut + sp.laidOut + pd.laidOut,
   };
@@ -418,12 +468,12 @@ function layoutRack(parameters: PluginParameter[], force?: boolean): ArchetypeLa
  *  default grid, reading as an authentically busy synth/vintage face. */
 function layoutPanel(parameters: PluginParameter[], force?: boolean): ArchetypeLayout {
   const { regular, showpiece, pads } = splitByRole(parameters);
-  const reg = layoutGridBlock(regular, { cols: 6, cellW: 110, cellH: 100, originY: ORIGIN_Y, force });
+  const reg = layoutSemanticGridBands(regular, { cols: 6, cellW: 140, cellH: 125, originY: ORIGIN_Y, force });
   const sp = layoutShowpieceRow(showpiece, reg.bottomY + (showpiece.length > 0 ? 20 : 0), force);
   const pd = layoutPadGrid(pads, sp.bottomY + (pads.length > 0 ? 20 : 0), force);
   return {
     parameters: [...reg.params, ...sp.params, ...pd.params],
-    contentW: ORIGIN_X + 6 * 110 + 40,
+    contentW: ORIGIN_X + 6 * 140 + 40,
     contentH: pd.bottomY + 40,
     laidOutCount: reg.laidOut + sp.laidOut + pd.laidOut,
   };
@@ -438,7 +488,7 @@ function layoutShowpiece(parameters: PluginParameter[], force?: boolean): Archet
   const padsY = sp.bottomY + (pads.length > 0 ? 20 : 0);
   const pd = layoutPadGrid(pads, padsY, force);
   const regY = pd.bottomY + (regular.length > 0 && (showpiece.length > 0 || pads.length > 0) ? 20 : 0);
-  const reg = layoutGridBlock(regular, { cols: 5, cellW: 130, cellH: 100, originY: regY, force });
+  const reg = layoutSemanticGridBands(regular, { cols: 5, cellW: 130, cellH: 110, originY: regY, force });
   return {
     parameters: [...sp.params, ...pd.params, ...reg.params],
     contentW: Math.max(ORIGIN_X + showpiece.length * 340, ORIGIN_X + 5 * 130, ORIGIN_X + 4 * 112) + 40,
@@ -462,24 +512,43 @@ function layoutShowpiece(parameters: PluginParameter[], force?: boolean): Archet
  * sanely instead of leaving params unpositioned.
  */
 export function applyArchetype(archetypeId: ArchetypeId, parameters: PluginParameter[], force = false): ArchetypeLayout {
+  let layout: ArchetypeLayout;
   switch (archetypeId) {
     case "eq_focus":
-      return layoutEqFocus(parameters, force);
+      layout = layoutEqFocus(parameters, force);
+      break;
     case "strip":
-      return layoutStrip(parameters, force);
+      layout = layoutStrip(parameters, force);
+      break;
     case "pedal":
-      return layoutPedal(parameters, force);
+      layout = layoutPedal(parameters, force);
+      break;
     case "rack":
-      return layoutRack(parameters, force);
+      layout = layoutRack(parameters, force);
+      break;
     case "panel":
-      return layoutPanel(parameters, force);
+      layout = layoutPanel(parameters, force);
+      break;
     case "showpiece":
-      return layoutShowpiece(parameters, force);
+      layout = layoutShowpiece(parameters, force);
+      break;
     case "grid":
     case "custom":
     default:
-      return layoutGrid(parameters, force);
+      layout = layoutGrid(parameters, force);
+      break;
   }
+  // Explicit control dimensions are intentionally preserved by every
+  // archetype. Derive the final artboard bounds from those actual rectangles
+  // as a last, shared contract so an unusually wide/tall custom control can
+  // never be clipped by an archetype's nominal column math.
+  const maxRight = Math.max(0, ...layout.parameters.map((p) => (p.x ?? 0) + (p.w ?? 120)));
+  const maxBottom = Math.max(0, ...layout.parameters.map((p) => (p.y ?? 0) + (p.h ?? 100)));
+  return {
+    ...layout,
+    contentW: Math.max(layout.contentW, maxRight + 40),
+    contentH: Math.max(layout.contentH, maxBottom + 40),
+  };
 }
 
 /**

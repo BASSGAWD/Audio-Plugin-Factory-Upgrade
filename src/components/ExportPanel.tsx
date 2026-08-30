@@ -1,17 +1,24 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { Copy, Check, Download, ExternalLink, Code2, Cpu, HelpCircle, Layers, Settings, FileText, ChevronRight, Info, Terminal, Play, RotateCcw, Package, Apple, Monitor } from "lucide-react";
-import { PluginParameter } from "../types";
+import { PluginParameter, PluginRoutingContract } from "../types";
+import { hasDeterministicSidechainPort } from "../utils/portableCodegen";
 
 interface ExportPanelProps {
   pluginName: string;
+  dspFunction: string;
   faustCode: string;
   cppJuceCode: string;
   parameters?: PluginParameter[];
+  routing?: PluginRoutingContract;
 }
 
 type PluginFormat = "vst3" | "au" | "aax" | "clap" | "standalone";
 
-export default function ExportPanel({ pluginName, faustCode, cppJuceCode, parameters = [] }: ExportPanelProps) {
+export function cppFloatLiteral(value: number): string {
+  return `${Number.isInteger(value) ? value.toFixed(1) : value}f`;
+}
+
+export default function ExportPanel({ pluginName, dspFunction, faustCode, cppJuceCode, parameters = [], routing }: ExportPanelProps) {
   // Main view selection: Single DSP scripts vs Full Usable CMake/JUCE Project Tree vs WebAssembly Suite vs Visual UI Code vs Production Installers
   const [exportType, setExportType] = useState<"dsp" | "project" | "wasm" | "visual" | "installers">("project");
   
@@ -34,8 +41,22 @@ export default function ExportPanel({ pluginName, faustCode, cppJuceCode, parame
   const [selectedFormat, setSelectedFormat] = useState<PluginFormat>("vst3");
   const [copied, setCopied] = useState<string | null>(null);
 
-  // Sidechain state
-  const [sidechainEnabled, setSidechainEnabled] = useState<boolean>(false);
+  // Export must reflect the verified plugin contract; it is not a feature
+  // toggle that can fabricate a different processor after generation.
+  const sidechainEnabled = routing?.version === "1.0"
+    && routing.auxiliaryInput.supported
+    && routing.inputKeyArgument;
+  const deterministicJuceAvailable = hasDeterministicSidechainPort({
+    category: parameters.some((p) => p.id === "cutoff") ? "filter" : "dynamics",
+    parameters,
+    dspFunction,
+    routing,
+  });
+  useEffect(() => {
+    if (sidechainEnabled && !deterministicJuceAvailable && exportType === "project") {
+      setExportType("dsp");
+    }
+  }, [sidechainEnabled, deterministicJuceAvailable, exportType]);
 
   // File tree browser state for complete project mode
   const [activeProjectFile, setActiveProjectFile] = useState<string>("PluginProcessor.cpp");
@@ -56,21 +77,13 @@ export default function ExportPanel({ pluginName, faustCode, cppJuceCode, parame
 
   // Determine if sidechain makes sense for current plugin features
   const sidechainAnalysis = useMemo(() => {
-    const textToSearch = (cppJuceCode + faustCode).toLowerCase();
-    const isDynamic = textToSearch.includes("compress") || 
-                      textToSearch.includes("gate") || 
-                      textToSearch.includes("threshold") || 
-                      textToSearch.includes("limit") || 
-                      textToSearch.includes("amplitude") ||
-                      textToSearch.includes("env");
-                      
     return {
-      recommended: isDynamic,
-      reason: isDynamic 
-        ? `Because "${pluginName}" contains envelope-tracking or threshold-based processing, an external sidechain is HIGHLY RECOMMENDED. It allows ducking or gating key elements (e.g., ducking synth pads based on a kick drum).`
-        : `While "${pluginName}" is primarily an audio filter/effect, adding sidechain routing is a creative way to control filter sweeping, parameters modulation, or pump rhythms using external audio signals.`
+      recommended: sidechainEnabled,
+      reason: sidechainEnabled
+        ? `"${pluginName}" was generated and verified with an optional external detector. Sidechain-capable Web Audio and JUCE exports use the same auxiliary contract and internal fallback.`
+        : `"${pluginName}" does not advertise an external detector. Regenerate it with an explicit sidechain request to add a verified auxiliary input.`
     };
-  }, [pluginName, cppJuceCode, faustCode]);
+  }, [pluginName, sidechainEnabled]);
 
   const handleCopy = (text: string, label: string) => {
     navigator.clipboard.writeText(text);
@@ -80,32 +93,9 @@ export default function ExportPanel({ pluginName, faustCode, cppJuceCode, parame
     }, 1500);
   };
 
-  // Faust sidechain modified code
-  const sidechainFaustCode = useMemo(() => {
-    if (!sidechainEnabled) return faustCode;
-    return `// Faust stereo DSP with multi-channel sidechain input (Ctrl)
-// Inputs: 1-2: Main Audio left/right, 3-4: External Sidechain control left/right
-import("stdfaust.lib");
-
-// Adaptive sidechain envelope utility
-sidechainEnvelope(scInL, scInR) = (scInL + scInR) * 0.5 : an.amp_follower_ar(0.01, 0.1);
-
-// original parameters & sliders
-// (Auto-injected from your active design)
-${faustCode.split("\n").filter(l => l.includes("hslider") || l.includes("vslider")).join("\n")}
-
-// Dynamic Sidechain Router
-process(inL, inR, scL, scR) = outL, outR
-with {
-    // Read envelope level of sidechain control (0.0 to 1.0)
-    scEnv = sidechainEnvelope(scL, scR);
-    
-    // Core dsp output modulated by sidechain
-    // Fallback original process (applied onto main input)
-    outL = inL * (1.0 - scEnv);
-    outR = inR * (1.0 - scEnv);
-};`;
-  }, [faustCode, sidechainEnabled]);
+  // Portable text is generated from the same routed plugin. Never replace it
+  // with an unrelated "creative ducking" demo in this presentation layer.
+  const sidechainFaustCode = faustCode;
 
   // JUCE sidechain modified code snippet
   const sidechainJuceCode = useMemo(() => {
@@ -114,7 +104,7 @@ with {
     const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
     const dspPrivateMembers = parameters.map(p => {
-      return `    float m_${p.id} = ${p.defaultValue}f;`;
+      return `    float m_${p.id} = ${cppFloatLiteral(p.defaultValue)};`;
     }).join("\n");
 
     const dspSetters = parameters.map(p => {
@@ -251,7 +241,52 @@ with {
       return "";
     }).filter((line, index, self) => line !== "" && self.indexOf(line) === index).join("\n\n");
 
-    return `/* 
+    const sidechainFilter = parameters.some((p) => p.id === "cutoff");
+    const sidechainProcess = sidechainFilter
+      ? `                const float detector = std::abs(key[i]);
+                const float a = 1.0f - std::exp(-1.0f / (std::max(1.0f, m_attack) * 0.001f * static_cast<float>(mSampleRate)));
+                const float r = 1.0f - std::exp(-1.0f / (std::max(20.0f, m_release) * 0.001f * static_cast<float>(mSampleRate)));
+                mEnv[ch] += (detector > mEnv[ch] ? a : r) * (detector - mEnv[ch]);
+                const float hz = std::clamp(m_cutoff * (1.0f + mEnv[ch] * m_sensitivity * 7.0f), 40.0f, 18000.0f);
+                const float coeff = 1.0f - std::exp(-6.28318530718f * hz / static_cast<float>(mSampleRate));
+                mState[ch] += coeff * (main[i] - mState[ch]);
+                main[i] = mState[ch] * m_mix + main[i] * (1.0f - m_mix);`
+      : `                const float detector = std::abs(key[i]);
+                const float a = 1.0f - std::exp(-1.0f / (std::max(0.05f, m_attack) * 44.1f));
+                const float r = 1.0f - std::exp(-1.0f / (std::max(1.0f, m_release) * 0.001f * static_cast<float>(mSampleRate)));
+                mEnv[ch] += (detector > mEnv[ch] ? a : r) * (detector - mEnv[ch]);
+                const float envDb = 20.0f * std::log10(std::max(1.0e-6f, mEnv[ch]));
+                const float overDb = envDb - m_threshold;
+                const float gainDb = overDb > 0.0f ? -overDb * (1.0f - 1.0f / std::max(1.0f, m_ratio)) : 0.0f;
+                const float gain = std::pow(10.0f, (gainDb + m_makeup) / 20.0f);
+                const float wet = std::tanh(main[i] * gain);
+                main[i] = wet * m_mix + main[i] * (1.0f - m_mix);`;
+    const fullProjectSidechainCore = `#pragma once
+#include <JuceHeader.h>
+#include <algorithm>
+#include <cmath>
+class ${cleanName}DSP {
+public:
+    void prepareToPlay(double sampleRate, int) noexcept { mSampleRate = sampleRate; mEnv[0] = mEnv[1] = mState[0] = mState[1] = 0.0f; }
+    void processBlock(juce::AudioBuffer<float>& mainBus, const juce::AudioBuffer<float>& auxBus) noexcept {
+        const bool hasAux = auxBus.getNumChannels() > 0 && auxBus.getNumSamples() >= mainBus.getNumSamples();
+        for (int ch = 0; ch < mainBus.getNumChannels(); ++ch) {
+            auto* main = mainBus.getWritePointer(ch);
+            const auto* key = hasAux ? auxBus.getReadPointer(std::min(ch, auxBus.getNumChannels() - 1)) : main;
+            for (int i = 0; i < mainBus.getNumSamples(); ++i) {
+${sidechainProcess}
+            }
+        }
+    }
+${dspSetters}
+private:
+    double mSampleRate = 44100.0;
+    float mEnv[2] { 0.0f, 0.0f };
+    float mState[2] { 0.0f, 0.0f };
+${dspPrivateMembers}
+};`;
+
+    return cppJuceCode || `/*
   ==============================================================================
     ${cleanName}DSP.h - JUCE Sidechain-Ready Realtime Audio Engine
   ==============================================================================
@@ -360,7 +395,7 @@ ${dspStateVars}
         }
     } scFollower;
 };`;
-  }, [cleanName, sidechainEnabled, parameters]);
+  }, [cleanName, sidechainEnabled, parameters, cppJuceCode]);
 
   // Web Audio API custom Worklet compiler
   const webAudioCode = useMemo(() => {
@@ -459,15 +494,28 @@ ${paramDecls || "      // No active parameters"}
     this.chorusLine = new Float32Array(44100);
     this.chorusPtr = 0;
     this.chorusPhase = 0.0;
+    this.sidechainEnv = 0.0;
+    this.dspStates = Array.from({ length: 8 }, () => ({}));
+    this.paramValues = {};
+  }
+
+  runDsp(inputSample, params, state, inputR, inputKey) {
+${dspFunction.split("\n").map((line) => `    ${line}`).join("\n")}
+  }
+
+  sanitizeSample(value) {
+    return Number.isFinite(value) ? Math.max(-4, Math.min(4, value)) : 0;
   }
 
   process(inputs, outputs, parameters) {
     const input = inputs[0];
+    const sidechain = inputs[1];
     const output = outputs[0];
     if (!input || !output || input.length === 0) return true;
 
     const channels = input.length;
     const numSamples = input[0].length;
+${parameters.map(p => `    this.paramValues.${p.id} = parameters.${p.id}.length > 1 ? parameters.${p.id}[0] : parameters.${p.id}[0];`).join("\n")}
 
     for (let sample = 0; sample < numSamples; ++sample) {
       // Fetch parameter values at current block sample index
@@ -475,8 +523,19 @@ ${parameters.map(p => `      const m_${p.id} = parameters.${p.id}.length > 1 ? p
 
       for (let channel = 0; channel < channels; ++channel) {
         let currentSample = input[channel][sample];
+        const inputKey = ${sidechainEnabled ? "(sidechain && sidechain.length > 0 ? sidechain[Math.min(channel, sidechain.length - 1)][sample] : currentSample)" : "currentSample"};
+        const inputR = input.length > 1 ? input[1][sample] : currentSample;
 
-${dspProcessingLines || "        // Direct passthrough (no active DSP nodes)\n        currentSample = currentSample;"}
+        // Execute the authoritative, quality-gated DSP body directly. The
+        // auxiliary sample is only supplied when the contract supports it;
+        // disconnected optional buses self-detect from currentSample.
+        currentSample = this.sanitizeSample(this.runDsp(
+          currentSample,
+          this.paramValues,
+          this.dspStates[channel],
+          inputR,
+          inputKey
+        ));
 
         output[channel][sample] = currentSample;
       }
@@ -487,7 +546,7 @@ ${dspProcessingLines || "        // Direct passthrough (no active DSP nodes)\n  
 }
 
 registerProcessor("${lowercaseSnakeName}-processor", ${cleanName}Processor);`;
-  }, [cleanName, lowercaseSnakeName, parameters]);
+  }, [cleanName, lowercaseSnakeName, parameters, sidechainEnabled, dspFunction]);
 
   // Rust NIH-Plug code generator
   const rustNihPlugCode = useMemo(() => {
@@ -1601,7 +1660,7 @@ include(CPack)
     const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
     const dspPrivateMembers = parameters.map(p => {
-      return `    float m_${p.id} = ${p.defaultValue}f;`;
+      return `    float m_${p.id} = ${cppFloatLiteral(p.defaultValue)};`;
     }).join("\n");
 
     const dspSetters = parameters.map(p => {
@@ -1738,6 +1797,51 @@ include(CPack)
       return "";
     }).filter((line, index, self) => line !== "" && self.indexOf(line) === index).join("\n\n");
 
+    const projectSidechainFilter = parameters.some((p) => p.id === "cutoff");
+    const projectSidechainProcess = projectSidechainFilter
+      ? `                const float detector = std::abs(key[i]);
+                const float a = 1.0f - std::exp(-1.0f / (std::max(1.0f, m_attack) * 0.001f * static_cast<float>(mSampleRate)));
+                const float r = 1.0f - std::exp(-1.0f / (std::max(20.0f, m_release) * 0.001f * static_cast<float>(mSampleRate)));
+                mEnv[ch] += (detector > mEnv[ch] ? a : r) * (detector - mEnv[ch]);
+                const float hz = std::clamp(m_cutoff * (1.0f + mEnv[ch] * m_sensitivity * 7.0f), 40.0f, 18000.0f);
+                const float coeff = 1.0f - std::exp(-6.28318530718f * hz / static_cast<float>(mSampleRate));
+                mState[ch] += coeff * (main[i] - mState[ch]);
+                main[i] = mState[ch] * m_mix + main[i] * (1.0f - m_mix);`
+      : `                const float detector = std::abs(key[i]);
+                const float a = 1.0f - std::exp(-1.0f / (std::max(0.05f, m_attack) * 44.1f));
+                const float r = 1.0f - std::exp(-1.0f / (std::max(1.0f, m_release) * 0.001f * static_cast<float>(mSampleRate)));
+                mEnv[ch] += (detector > mEnv[ch] ? a : r) * (detector - mEnv[ch]);
+                const float envDb = 20.0f * std::log10(std::max(1.0e-6f, mEnv[ch]));
+                const float overDb = envDb - m_threshold;
+                const float gainDb = overDb > 0.0f ? -overDb * (1.0f - 1.0f / std::max(1.0f, m_ratio)) : 0.0f;
+                const float gain = std::pow(10.0f, (gainDb + m_makeup) / 20.0f);
+                const float wet = std::tanh(main[i] * gain);
+                main[i] = wet * m_mix + main[i] * (1.0f - m_mix);`;
+    const fullProjectSidechainCore = `#pragma once
+#include <JuceHeader.h>
+#include <algorithm>
+#include <cmath>
+class ${cleanName}DSP {
+public:
+    void prepareToPlay(double sampleRate, int) noexcept { mSampleRate = sampleRate; mEnv[0] = mEnv[1] = mState[0] = mState[1] = 0.0f; }
+    void processBlock(juce::AudioBuffer<float>& mainBus, const juce::AudioBuffer<float>& auxBus) noexcept {
+        const bool hasAux = auxBus.getNumChannels() > 0 && auxBus.getNumSamples() >= mainBus.getNumSamples();
+        for (int ch = 0; ch < mainBus.getNumChannels(); ++ch) {
+            auto* main = mainBus.getWritePointer(ch);
+            const auto* key = hasAux ? auxBus.getReadPointer(std::min(ch, auxBus.getNumChannels() - 1)) : main;
+            for (int i = 0; i < mainBus.getNumSamples(); ++i) {
+${projectSidechainProcess}
+            }
+        }
+    }
+${dspSetters}
+private:
+    double mSampleRate = 44100.0;
+    float mEnv[2] { 0.0f, 0.0f };
+    float mState[2] { 0.0f, 0.0f };
+${dspPrivateMembers}
+};`;
+
     const cmakeLists = `# ==============================================================================
 #  CMakeLists.txt - Auto-Generated build script for ${pluginName}
 #  Designed for standard modern JUCE CMake structure (JUCE 6 / 7 / 8)
@@ -1781,7 +1885,10 @@ target_link_libraries(${cleanName} PRIVATE
 
 juce_generate_juce_header(${cleanName})`;
 
-    const dspCoreH = sidechainEnabled ? sidechainJuceCode : `#pragma once
+    const dspCoreH = sidechainEnabled
+      ? (deterministicJuceAvailable ? fullProjectSidechainCore : `#error "Full JUCE project unavailable: this custom sidechain DSP requires a faithful native translation."
+`)
+      : `#pragma once
 #include <cmath>
 #include <vector>
 
@@ -1892,7 +1999,7 @@ ${cleanName}AudioProcessor::${cleanName}AudioProcessor()
      : AudioProcessor (BusesProperties()
                      .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                      .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     ${isAuxSetup ? `.withInput  ("Sidechain", juce::AudioChannelSet::stereo(), true)` : ""}
+                     ${isAuxSetup ? `.withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)` : ""}
                        ),
 #endif
        apvts(*this, nullptr, "Parameters", createParameterLayout())
@@ -1984,8 +2091,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout ${cleanName}AudioProcessor::
 ${parameters.map(p => `    params.push_back (std::make_unique<juce::AudioParameterFloat> (
         "${p.id}", 
         "${p.name}", 
-        juce::NormalisableRange<float>(${p.min}f, ${p.max}f, 0.01f), 
-        ${p.defaultValue}f,
+        juce::NormalisableRange<float>(${cppFloatLiteral(p.min)}, ${cppFloatLiteral(p.max)}, 0.01f),
+        ${cppFloatLiteral(p.defaultValue)},
         "${p.unit || ""}"
     ));`).join("\n")}
 
@@ -2133,7 +2240,7 @@ ${resizedLayout}
       "Source/PluginEditor.h": editorH,
       "Source/PluginEditor.cpp": editorCpp
     };
-  }, [cleanName, pluginName, sidechainEnabled, sidechainJuceCode, parameters]);
+  }, [cleanName, pluginName, sidechainEnabled, deterministicJuceAvailable, parameters]);
 
   const activeProjectFileContent = useMemo(() => {
     const key = activeProjectFile as keyof typeof projectFiles;
@@ -2629,8 +2736,10 @@ registerProcessor("compiled-faust-wasm-processor", CompiledFaustWasmProcessor);`
         <div className="bg-neutral-950 p-1 rounded-lg border border-neutral-800 flex gap-1">
           <button
             onClick={() => setExportType("project")}
+            disabled={sidechainEnabled && !deterministicJuceAvailable}
+            title={sidechainEnabled && !deterministicJuceAvailable ? "A faithful native translation is required for this custom sidechain DSP." : undefined}
             className={`px-3 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
-              exportType === "project" ? "bg-orange-600 text-white shadow" : "text-neutral-450 hover:text-neutral-200"
+              sidechainEnabled && !deterministicJuceAvailable ? "text-neutral-700 cursor-not-allowed" : exportType === "project" ? "bg-orange-600 text-white shadow" : "text-neutral-450 hover:text-neutral-200"
             }`}
           >
             Full C++ Project Tree
@@ -2699,14 +2808,21 @@ registerProcessor("compiled-faust-wasm-processor", CompiledFaustWasmProcessor);`
           <div className="space-y-0.5">
             <label className="text-[10.5px] font-bold text-neutral-200 flex items-center gap-1">
               Auxiliary Sidechain Bus Support
-              <HelpCircle className="w-3 h-3 text-neutral-500 cursor-help" title="Configures JUCE dynamic processBlock input buses to accept an external key audio stream." />
+              <span
+                className="inline-flex cursor-help"
+                title="Configures JUCE dynamic processBlock input buses to accept an external key audio stream."
+                aria-label="Configures JUCE dynamic processBlock input buses to accept an external key audio stream."
+              >
+                <HelpCircle className="w-3 h-3 text-neutral-500" aria-hidden="true" />
+              </span>
             </label>
             <p className="text-[9px] text-neutral-500">Inject code layouts with dynamic secondary envelope controls & gain attenuation triggers.</p>
           </div>
 
           <button
-            onClick={() => setSidechainEnabled(!sidechainEnabled)}
-            className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+            disabled
+            aria-label={sidechainEnabled ? "Sidechain enabled by plugin contract" : "Sidechain unavailable for this plugin"}
+            className={`relative inline-flex h-5 w-10 shrink-0 cursor-not-allowed rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
               sidechainEnabled ? "bg-emerald-500" : "bg-neutral-800"
             }`}
           >
@@ -2858,7 +2974,7 @@ registerProcessor("compiled-faust-wasm-processor", CompiledFaustWasmProcessor);`
               { id: "rust", label: "Rust (NIH-Plug)", color: "border-amber-500 text-amber-500" },
               { id: "maxmsp", label: "Max/MSP (gen~)", color: "border-cyan-500 text-cyan-400" },
               { id: "teensy", label: "Teensy Arduino C++", color: "border-rose-500 text-rose-400" }
-            ].map((tab) => {
+            ].filter((tab) => !sidechainEnabled || tab.id === "webaudio" || (tab.id === "juce" && deterministicJuceAvailable)).map((tab) => {
               const isActive = scriptTab === tab.id;
               return (
                 <button

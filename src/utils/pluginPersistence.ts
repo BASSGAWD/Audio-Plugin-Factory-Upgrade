@@ -22,12 +22,24 @@
  *     next reload.
  */
 import { AudioPlugin } from "../types";
+import { routingContractFor, validateRoutingContract } from "./sidechainContract";
 
 export const PLUGIN_STORAGE_KEY = "audio_factory_plugin_state";
 
 /** Where a plugin goes when it fails boot verification -- preserved for
  *  recovery instead of being overwritten by the default. */
 export const PLUGIN_REJECTED_KEY = "audio_factory_plugin_rejected_v1";
+
+/** Migrates pre-contract plugins without inventing a capability: an auxiliary
+ * bus is restored only when both the persisted description requests it and
+ * the DSP really reads inputKey. */
+export function normalizePersistedPlugin(plugin: AudioPlugin): AudioPlugin {
+  if (plugin.routing?.version === "1.0" && validateRoutingContract(plugin.routing, plugin.dspFunction).length === 0) return plugin;
+  return {
+    ...plugin,
+    routing: routingContractFor(plugin.family ?? plugin.category, `${plugin.name} ${plugin.description}`, plugin.dspFunction),
+  };
+}
 
 function storage(): Storage | null {
   try {

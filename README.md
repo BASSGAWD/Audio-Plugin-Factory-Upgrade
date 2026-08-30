@@ -100,3 +100,29 @@ Faust and C++/JUCE code are generated lazily when the Export tab opens, with
 deterministic scaffolds from `src/utils/portableCodegen.ts` as an instant
 fallback. The Native Build panel (`server/nativeBuild.ts`) drives local
 plugin builds when a toolchain is available.
+
+## JUCE desktop studio scaffold
+
+`desktop/` is a minimal JUCE 7/CMake standalone studio source package. It is
+not a signed or notarized installer. It opens and saves `.ojdaw` directory
+bundles containing the unchanged canonical DawProject v3 `project.json` and
+ID-addressed files below `assets/`. The browser-side dependency-free bundle
+contract is in `src/daw/portableBundle.ts`.
+
+```bash
+npm run desktop:golden
+npm run desktop:configure
+npm run desktop:build
+ORANGEJUCE_STUDIO_BIN=/absolute/path/to/OrangeJUCEStudio npm run desktop:golden:native
+ORANGEJUCE_STUDIO_BIN=/absolute/path/to/OrangeJUCEStudio npm run desktop:latency -- --project /absolute/session.ojdaw --seconds 30
+```
+
+The native device report uses the active driver's real sample rate, block
+size, input/output latency and xrun counter (when exposed), plus measured
+callback deadline misses. See `desktop/results.md` for tolerances and required
+evidence. The latency callback runs the loaded canonical project graph; a
+project argument is mandatory, and no-device runs fail closed. Universal
+generated-DSP parity is intentionally not claimed: native playback accepts only
+the versioned `generated.gain/v1` and `generated.ducker/v1` adapters. Browser
+export and native loading reject sessions with any other enabled processor,
+rather than bypassing it or substituting invented DSP.

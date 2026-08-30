@@ -1,0 +1,8 @@
+ORANGEJUCE Studio release package
+
+Copyright (c) 2026 ORANGEJUCE contributors.
+
+This package contains the ORANGEJUCE Studio application and third-party
+components under their respective licenses. JUCE licensing requirements apply
+to distributed builds. Release owners are responsible for confirming that the
+distribution license selected for JUCE and all bundled components is valid.

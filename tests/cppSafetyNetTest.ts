@@ -228,6 +228,10 @@ const nativePlugin: NativePlugin = {
     check("nativeBuild: guard hard-ceiling clips (juce::jlimit)", /juce::jlimit\s*\(\s*-4\.0f\s*,\s*4\.0f/.test(processorCpp));
     check("nativeBuild: processBlock declares ScopedNoDenormals", /juce::ScopedNoDenormals\s+noDenormals\s*;/.test(processorCpp));
     check("nativeBuild: PluginProcessor.h includes <cmath> for std::isfinite/std::abs", /#include\s*<cmath>/.test(fs.readFileSync(`${built.projectDir}/Source/PluginProcessor.h`, "utf8")));
+    const processorHeader = fs.readFileSync(`${built.projectDir}/Source/PluginProcessor.h`, "utf8");
+    check("nativeBuild: processor owns bounded lock-free meter atomics", /std::atomic<float> meterLevelLeft/.test(processorHeader) && /std::atomic<float> meterLevelRight/.test(processorHeader) && /std::atomic<float>::is_always_lock_free/.test(processorHeader));
+    check("nativeBuild: meter reader uses relaxed atomic loads", /meterLevelLeft\.load \(std::memory_order_relaxed\)/.test(processorHeader) && /meterLevelRight\.load \(std::memory_order_relaxed\)/.test(processorHeader));
+    check("nativeBuild: audio thread publishes one bounded peak per output channel", /juce::jmin \(1\.0f, std::abs \(data\[i\]\)\)/.test(processorCpp) && /meterLevelLeft\.store \(blockPeakLeft, std::memory_order_relaxed\)/.test(processorCpp));
 
     // Structural placement: guard applied AT the buffer write, wrapping the
     // translated core's return value, for the generic multi-channel loop

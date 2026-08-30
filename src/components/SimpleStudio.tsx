@@ -15,6 +15,11 @@ import {
   Crosshair,
   X,
   BookOpen,
+  AudioLines,
+  Waves,
+  Mic2,
+  Piano,
+  Grid3x3,
 } from "lucide-react";
 import { AudioPlugin, ChatMessage, PluginParameter } from "../types";
 import type { ElementNote } from "../utils/editPass";
@@ -24,6 +29,10 @@ import GenerativeFaceplate from "./GenerativeFaceplate";
 import BuildProgressBar, { BuildStage, BuildVersion } from "./BuildProgressBar";
 import { PluginManual } from "./PluginManual";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
+import { validateResolvedUiContract } from "../utils/semanticUi";
+import { hasExternalSidechain } from "../utils/sidechainContract";
+import type { AudioSoftwareProject, ClassificationEvidence, AudioProjectKind } from "../audioProjects";
+import AudioProjectCard, { type PluginAuditionOutcome } from "./AudioProjectCard";
 
 interface SimpleStudioProps {
   plugin: AudioPlugin;
@@ -55,10 +64,15 @@ interface SimpleStudioProps {
   onKeySourceTypeChange?: (source: "none" | "synth" | "sine" | "noise" | "live_input") => void;
   selectedKeyDeviceId?: string | null;
   onSelectKeyDevice?: (deviceId: string | null) => void;
+  sidechainConnected?: boolean;
+  sidechainConsumed?: boolean;
+  sidechainLevel?: number;
   onSliderChange: (paramId: string, value: number) => void;
   onOpenPro: (tab?: string) => void;
   /** Opens the Factory Canvas: the spatial multi-plugin workspace. */
   onOpenCanvas?: () => void;
+  /** Opens the multitrack browser Studio. */
+  onOpenDAW?: () => void;
   /** Rendered ModelPicker from App — keeps engine/config state in one owner. */
   modelPicker?: React.ReactNode;
   /** Rendered RefineControl (perfecting loop toggle + count) from App. */
@@ -79,28 +93,86 @@ interface SimpleStudioProps {
   onRemoveNote?: (index: number) => void;
   /** Runs one edit pass that applies every pinned note. */
   onApplyNotes?: () => void;
+  audioProject?: AudioSoftwareProject | null;
+  audioProjectLoading?: boolean;
+  audioProjectError?: string | null;
+  audioClassification?: ClassificationEvidence | null;
+  onNativeProjectExport?: (project: AudioSoftwareProject) => Promise<string>;
+  onReviseProjectKind?: (kind: AudioProjectKind) => void;
+  onOpenWorkstation?: () => void;
+  /** Update a brief decision's selected answer without losing project id or evidence. */
+  onUpdateProjectDecision?: (decisionId: string, selected: string) => void;
+  /**
+   * For adapted-effect projects: delegate the audition to the loaded-plugin play path
+   * so the faceplate DSP is heard rather than the generic browser model.
+   * Toggles play/stop on the real Web Audio graph.
+   */
+  onRunPluginAudition?: () => Promise<PluginAuditionOutcome>;
+  /** ID of the plugin currently loaded in the faceplate/audio engine. */
+  activePluginId?: string;
+  /** True when the loaded-plugin audition is currently playing. */
+  pluginAuditionPlaying?: boolean;
+  /**
+   * Fired when a preview execution genuinely succeeds so App can promote the
+   * pending golden-fixture evidence to "measured". See AudioProjectCard's
+   * onPreviewMeasured for the exact conditions under which it fires.
+   */
+  onPreviewMeasured?: (projectId: string, evidenceCheck: string, measuredDetail: string) => void;
 }
 
-const SUGGESTIONS: Array<{ emoji: string; label: string; prompt: string }> = [
+/**
+ * Each starting point maps to a recognisable project kind. Plain-language goals
+ * (the last two entries) are first-class — the classifier resolves them to the
+ * closest kind automatically.
+ */
+const STARTING_POINTS: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; kind: string; prompt: string }> = [
   {
-    emoji: "🎛️",
-    label: "Warm tape delay",
-    prompt: "Make a warm tape echo delay with a bit of wobble and a dry/wet mix knob.",
+    icon: Waves,
+    label: "Audio plugin or effect",
+    kind: "effect",
+    prompt: "Build a warm tape echo delay with a bit of wobble and a dry/wet mix control.",
   },
   {
-    emoji: "🎤",
-    label: "Vocal autotune",
-    prompt: "Build a vocal pitch corrector like Auto-Tune with a retune speed knob.",
+    icon: Piano,
+    label: "Instrument",
+    kind: "instrument",
+    prompt: "Build a polyphonic MIDI instrument synth I can play from a keyboard, with an amp envelope.",
   },
   {
-    emoji: "🎸",
-    label: "Crunchy guitar amp",
-    prompt: "Create a crunchy vintage guitar amp with drive, tone, and level controls.",
+    icon: AudioLines,
+    label: "Multitrack DAW",
+    kind: "daw",
+    prompt: "Build a multitrack DAW workstation with audio tracks, a return bus, and a master bus.",
   },
   {
-    emoji: "🌊",
-    label: "Dreamy reverb",
-    prompt: "Make a big dreamy shimmer reverb with size, tone, and mix controls.",
+    icon: SlidersHorizontal,
+    label: "Mixer console",
+    kind: "mixer",
+    prompt: "Build a four-channel mixer console with gain faders and a master bus.",
+  },
+  {
+    icon: Grid3x3,
+    label: "Step sequencer",
+    kind: "sequencer",
+    prompt: "Build a sixteen-step sequencer to program a beat at an adjustable tempo.",
+  },
+  {
+    icon: Grid3x3,
+    label: "Drum sampler",
+    kind: "sampler",
+    prompt: "Build a drum pad sampler with eight pads mapped to kick, snare, hat, and clap samples.",
+  },
+  {
+    icon: Mic2,
+    label: "Mastering tool",
+    kind: "mastering",
+    prompt: "Build a mastering chain with EQ, compression, and a limiter targeting streaming loudness.",
+  },
+  {
+    icon: Volume2,
+    label: "Audio utility",
+    kind: "utility",
+    prompt: "Build a peak and RMS audio meter with configurable ballistics.",
   },
 ];
 
@@ -213,9 +285,13 @@ export default function SimpleStudio({
   onKeySourceTypeChange,
   selectedKeyDeviceId = null,
   onSelectKeyDevice,
+  sidechainConnected = false,
+  sidechainConsumed = false,
+  sidechainLevel = 0,
   onSliderChange,
   onOpenPro,
   onOpenCanvas,
+  onOpenDAW,
   modelPicker,
   refineControl,
   buildStages = [],
@@ -228,6 +304,18 @@ export default function SimpleStudio({
   onAddNote,
   onRemoveNote,
   onApplyNotes,
+  audioProject = null,
+  audioProjectLoading = false,
+  audioProjectError = null,
+  audioClassification = null,
+  onNativeProjectExport,
+  onReviseProjectKind,
+  onOpenWorkstation,
+  onUpdateProjectDecision,
+  onRunPluginAudition,
+  activePluginId,
+  pluginAuditionPlaying = false,
+  onPreviewMeasured,
 }: SimpleStudioProps) {
   const [input, setInput] = useState("");
   const [dockOpen, setDockOpen] = useState(false);
@@ -366,8 +454,8 @@ export default function SimpleStudio({
             autoGrow(e.target);
           }}
           onKeyDown={handleKeyDown}
-          placeholder="Describe the sound you want…"
-          aria-label="Describe the sound you want"
+          placeholder="Describe your goal in plain language, or pick a starting point above…"
+          aria-label="Describe the audio software you want to build"
           className="flex-1 resize-none bg-transparent outline-none text-sm text-neutral-100 placeholder-neutral-500 leading-relaxed max-h-40 scrollbar-thin"
           disabled={chatLoading}
         />
@@ -395,7 +483,7 @@ export default function SimpleStudio({
         )}
       </div>
       <p className="text-center text-[10px] text-neutral-600 mt-2 select-none">
-        Builds run instantly in your browser — press play to hear them. Enter to send, Shift+Enter for a new line.
+        Projects compile in your browser. Enter to send, Shift+Enter for a new line.
       </p>
     </div>
   );
@@ -408,8 +496,8 @@ export default function SimpleStudio({
           <div className="w-7 h-7 rounded-lg bg-orange-600 flex items-center justify-center shadow-md shadow-orange-950/50">
             <Volume2 className="w-4 h-4 text-white" />
           </div>
-          <span className="font-semibold text-sm text-neutral-100 tracking-tight">OrangeJuce</span>
-          <span className="text-[10px] text-neutral-500 hidden sm:inline">— describe a sound, get a plugin</span>
+          <span className="font-semibold text-sm text-neutral-100 tracking-tight">ORANGEJUCE</span>
+          <span className="text-[10px] text-neutral-500 hidden sm:inline">— build any audio software in your browser</span>
         </div>
         <div className="flex items-center gap-2">
           {hasMessages && (
@@ -434,6 +522,17 @@ export default function SimpleStudio({
               Canvas
             </button>
           )}
+          {onOpenDAW && (
+            <button
+              data-testid="button-open-daw"
+              onClick={onOpenDAW}
+              className="flex items-center gap-1.5 text-xs text-orange-300 hover:text-orange-200 px-3 py-1.5 rounded-lg border border-orange-900/70 hover:border-orange-700 hover:bg-orange-950/30 transition-colors cursor-pointer"
+              title="Open the multitrack DAW creation template"
+            >
+              <AudioLines className="w-3.5 h-3.5" />
+              DAW template
+            </button>
+          )}
           <button
             onClick={() => onOpenPro()}
             className="flex items-center gap-1.5 text-xs text-neutral-400 hover:text-neutral-100 px-3 py-1.5 rounded-lg border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900 transition-colors cursor-pointer"
@@ -455,26 +554,28 @@ export default function SimpleStudio({
                   <Sparkles className="w-6 h-6 text-white" />
                 </div>
                 <h1 className="text-2xl font-semibold text-neutral-100 tracking-tight">
-                  What do you want to hear?
+                  What do you want to build?
                 </h1>
-                <p className="text-sm text-neutral-500 max-w-md mx-auto leading-relaxed">
-                  Describe an audio effect in plain words. It gets built, loaded, and ready to
-                  play in seconds — no settings needed.
+                <p className="text-sm text-neutral-500 max-w-sm mx-auto leading-relaxed">
+                  Describe your goal in plain language, or pick a starting point below.
+                  ORANGEJUCE compiles it into a runnable browser project — no installation needed.
                 </p>
               </div>
 
               {composer}
 
-              <div className="flex flex-wrap justify-center gap-2">
-                {SUGGESTIONS.map((s) => (
+              {/* All eight starting points shown explicitly */}
+              <div data-testid="panel-starting-points" className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {STARTING_POINTS.map((s) => (
                   <button
-                    key={s.label}
+                    key={s.kind}
+                    data-testid={`starting-point-${s.kind}`}
                     onClick={() => onSend(s.prompt)}
                     disabled={chatLoading}
-                    className="flex items-center gap-2 text-xs text-neutral-300 hover:text-white bg-neutral-900/70 hover:bg-neutral-900 border border-neutral-800 hover:border-neutral-700 px-3.5 py-2 rounded-full transition-all cursor-pointer disabled:opacity-50"
+                    className="flex flex-col items-center gap-1.5 text-xs text-neutral-300 hover:text-white bg-neutral-900/70 hover:bg-neutral-900 border border-neutral-800 hover:border-orange-800 px-3 py-3 rounded-xl transition-all cursor-pointer disabled:opacity-50 text-center"
                   >
-                    <span>{s.emoji}</span>
-                    <span>{s.label}</span>
+                    <s.icon className="w-4 h-4 text-orange-400" />
+                    <span className="leading-snug">{s.label}</span>
                   </button>
                 ))}
               </div>
@@ -508,7 +609,7 @@ export default function SimpleStudio({
                 </div>
                 <div className="flex-1 min-w-0 space-y-3">
                   <div className="flex items-center gap-2 text-sm text-neutral-400">
-                    <span>Designing your plugin</span>
+                    <span>Building your project</span>
                     <span className="flex gap-1">
                       <span className="w-1 h-1 rounded-full bg-neutral-400 animate-bounce [animation-delay:0ms]" />
                       <span className="w-1 h-1 rounded-full bg-neutral-400 animate-bounce [animation-delay:150ms]" />
@@ -533,6 +634,20 @@ export default function SimpleStudio({
       {/* Current plugin dock + composer (hidden composer duplication on empty state) */}
       {hasMessages && (
         <div className="shrink-0 px-4 pb-4 pt-2 space-y-3 bg-gradient-to-t from-neutral-950 via-neutral-950 to-transparent">
+          <AudioProjectCard
+            project={audioProject}
+            classification={audioClassification}
+            loading={audioProjectLoading}
+            error={audioProjectError}
+            onNativeExport={onNativeProjectExport}
+            onReviseKind={onReviseProjectKind}
+            onOpenWorkstation={onOpenWorkstation}
+            onUpdateDecision={onUpdateProjectDecision}
+            onRunPluginAudition={onRunPluginAudition}
+            activePluginId={activePluginId}
+            pluginAuditionPlaying={pluginAuditionPlaying}
+            onPreviewMeasured={onPreviewMeasured}
+          />
           {/* Plugin card -- only for a REAL plugin. The stock placeholder is
               scaffolding so `plugin` is never null; showing it here made a
               fresh spin-up look like a plugin the user never asked for was
@@ -641,6 +756,42 @@ export default function SimpleStudio({
                 )}
 
                 {(() => {
+                  const resolved = plugin.resolvedUi && validateResolvedUiContract(plugin.resolvedUi).length === 0
+                    ? plugin.resolvedUi
+                    : undefined;
+                  // The resolved contract is the production layout source.
+                  // Percent bounds preserve the authored artboard geometry as
+                  // this compact studio surface responsively changes width.
+                  if (resolved) {
+                    return (
+                      <div
+                        className="relative w-full"
+                        data-resolved-ui-layout={resolved.version}
+                        style={{ aspectRatio: `${resolved.artboard.width} / ${resolved.artboard.height}` }}
+                      >
+                        {resolved.hierarchy.map((group) => (
+                          <div key={group.id} role="group" aria-label={group.label}>
+                            {group.parameterIds.map((id) => {
+                              const control = resolved.controls.find((c) => c.parameterId === id);
+                              const p = plugin.parameters.find((candidate) => candidate.id === id);
+                              if (!control || !p) return null;
+                              const b = control.bounds;
+                              return (
+                                <div key={id} className="absolute flex items-center justify-center overflow-hidden" style={{
+                                  left: `${(b.x / resolved.artboard.width) * 100}%`,
+                                  top: `${(b.y / resolved.artboard.height) * 100}%`,
+                                  width: `${(b.width / resolved.artboard.width) * 100}%`,
+                                  height: `${(b.height / resolved.artboard.height) * 100}%`,
+                                }}>
+                                  {wrapAnnotatable(p, <PluginControl param={p} allParams={plugin.parameters} onChange={onSliderChange} analyserNode={analyserNode} isPlaying={isPlaying} />)}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
                   const { showpiece, visualizers, pads, regular } = groupParamsForPlayback(plugin);
                   return (
                     <>
@@ -798,7 +949,7 @@ export default function SimpleStudio({
                       ))}
                     </select>
                   )}
-                  {plugin.dspFunction.includes("inputKey") && (
+                  {hasExternalSidechain(plugin) && (
                     <>
                       <span className="text-[10px] text-neutral-500 font-medium ml-1">Sidechain key:</span>
                       {(["none", "synth", "sine", "noise"] as const).map((s) => (
@@ -841,6 +992,9 @@ export default function SimpleStudio({
                           ))}
                         </select>
                       )}
+                      <span className={`text-[10px] px-2 py-1 rounded-full border ${sidechainConsumed ? "border-emerald-800 text-emerald-300" : sidechainConnected ? "border-amber-800 text-amber-300" : "border-neutral-800 text-neutral-500"}`}>
+                        {sidechainConsumed ? `EXTERNAL DETECTOR ACTIVE · ${Math.round(sidechainLevel * 100)}%` : sidechainConnected ? "EXTERNAL SOURCE CONNECTED · WAITING FOR SIGNAL" : keySourceType !== "none" ? "EXTERNAL SOURCE SELECTED · NOT CONNECTED" : "INTERNAL DETECTOR · NO AUXILIARY SIGNAL"}
+                      </span>
                     </>
                   )}
                   <button

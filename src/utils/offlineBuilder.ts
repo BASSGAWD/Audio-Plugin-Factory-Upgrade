@@ -29,6 +29,7 @@ import { inferRequirements, hasRequirements, BuildRequirements } from "./require
 import { rankTopologies, logPromptGap } from "./knowledgeGraph";
 import { DspTopology, DSP_TOPOLOGIES } from "./dspTopologies";
 import { findApprovedModuleForPrompt } from "./researchEngine";
+import { isSidechainEligible } from "./sidechainContract";
 
 /** Why a particular topology was chosen — the "engineering brain" made
  *  visible: the design name, the one-line rationale, and the wording it read. */
@@ -593,7 +594,10 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
   // real phrasing like "a sidechain compressor" or "ducking the bass from
   // the kick" has other words in between and didn't match that narrower
   // shape at all.
-  const wantsSidechain = /sidechain\s*(?:input|key|comp)|external\s*(?:key|sidechain)|duck(?:s|ing)?\b.*\b(?:from|to)\b/i.test(prompt) && spec.family === "dynamics";
+  const wantsSidechain =
+    spec.family !== "pitch" &&
+    isSidechainEligible(spec.family, prompt) &&
+    /side[ -]?chain|external\s*(?:key|detector)|keyed|duck(?:s|ing)?\b.*\b(?:from|to)\b/i.test(prompt);
 
   // The same gap once more, for the beat-locked autotune. "autotune"/"pitch"
   // already route to the pitch family, but requirements.ts has no dimension
@@ -667,10 +671,39 @@ export function buildOfflinePlugin(prompt: string, specIn?: AudioPluginSpec | nu
     engineeringChoice = convolution;
   } else if (wantsSidechain) {
     const sidechain = DSP_TOPOLOGIES.find((t) => t.id === "comp_sidechain_ext")!;
-    parameters = toLiveParams(sidechain.parameters);
-    dspFunction = sidechain.body;
-    structure = sidechain.title;
-    friendly = "an external sidechain compressor -- its detector follows a separate key input instead of the main signal";
+    if (spec.family === "eq" || spec.family === "filter" || /\bdynamic\s+(?:eq|filter)\b/i.test(prompt)) {
+      parameters = toLiveParams([
+        { id: "cutoff", name: "Cutoff", min: 80, max: 12000, defaultValue: 1600, unit: "Hz" },
+        { id: "sensitivity", name: "Sensitivity", min: 0, max: 1, defaultValue: 0.65, unit: "ratio" },
+        { id: "attack", name: "Attack", min: 1, max: 100, defaultValue: 12, unit: "ms" },
+        { id: "release", name: "Release", min: 20, max: 800, defaultValue: 180, unit: "ms" },
+        { id: "mix", name: "Mix", min: 0, max: 1, defaultValue: 1, unit: "ratio" },
+      ]);
+      dspFunction = `if (!state.init) { state.env = 0; state.lp = 0; state.init = true; }
+let key = inputKey !== undefined ? inputKey : inputSample;
+let sensitivity = params.sensitivity !== undefined ? params.sensitivity : 0.65;
+let attack = Math.max(1, params.attack !== undefined ? params.attack : 12);
+let release = Math.max(20, params.release !== undefined ? params.release : 180);
+let target = Math.abs(key);
+let a = 1 - Math.exp(-1 / (attack * 0.001 * 44100));
+let r = 1 - Math.exp(-1 / (release * 0.001 * 44100));
+state.env += (target > state.env ? a : r) * (target - state.env);
+let baseCutoff = params.cutoff !== undefined ? params.cutoff : 1600;
+let movingCutoff = Math.max(40, Math.min(18000, baseCutoff * (1 + state.env * sensitivity * 7)));
+let coeff = 1 - Math.exp(-2 * Math.PI * movingCutoff / 44100);
+state.lp += coeff * (inputSample - state.lp);
+let mix = params.mix !== undefined ? params.mix : 1;
+return state.lp * mix + inputSample * (1 - mix);`;
+      structure = "External-key dynamic filter (sidechain envelope drives cutoff)";
+      friendly = "a dynamic EQ/filter whose cutoff follows a verified external key, with internal detection when disconnected";
+    } else {
+      parameters = toLiveParams(sidechain.parameters);
+      dspFunction = sidechain.body;
+      structure = sidechain.title;
+      friendly = /\bgate\b/i.test(prompt)
+        ? "an externally keyed dynamics gate/ducker whose detector follows a separate key input"
+        : "an external sidechain compressor -- its detector follows a separate key input instead of the main signal";
+    }
     engineeringChoice = sidechain;
   } else if (wantsBeatLockedKey) {
     const beatLocked = DSP_TOPOLOGIES.find((t) => t.id === "pitch_beat_locked_autotune")!;

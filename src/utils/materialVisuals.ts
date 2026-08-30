@@ -49,6 +49,9 @@ const MATERIAL_BY_CATEGORY: Record<AudioPlugin["category"], MaterialId> = {
 /** Deterministic per-plugin material selection -- same plugin identity
  *  always resolves to the same material, every render, every session. */
 export function resolveMaterial(plugin: AudioPlugin): MaterialId {
+  // A gated plugin has already resolved this renderer-neutral token. Prefer
+  // it so web preview and native export cannot drift after generation.
+  if (plugin.resolvedUi?.theme.material) return plugin.resolvedUi.theme.material;
   const attr = plugin.buildReport?.attributes?.[0];
   if (attr && MATERIAL_BY_ATTRIBUTE[attr]) return MATERIAL_BY_ATTRIBUTE[attr];
   return MATERIAL_BY_CATEGORY[plugin.category] || "vintage-cream";

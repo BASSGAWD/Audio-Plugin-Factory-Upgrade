@@ -44,6 +44,8 @@ const IDLE_PROBE: LocalProbe = { checking: false, ok: false, models: [], message
 interface ModelPickerProps {
   /** null while the /api/health check is still in flight. */
   hasGeminiKey: boolean | null;
+  /** Server-reported credential availability; never infer this from a model name. */
+  remoteProviderHealth?: Partial<Record<"gemini" | "openai" | "anthropic" | "online_free", boolean>> | null;
   offlineForced: boolean;
   /** Called when the user picks an engine; App owns the offlineForced state. */
   onEngineChange: (change: { offlineForced: boolean; engine: EngineId }) => void;
@@ -57,6 +59,7 @@ interface ModelPickerProps {
 
 export default function ModelPicker({
   hasGeminiKey,
+  remoteProviderHealth,
   offlineForced,
   onEngineChange,
   onConfigChange,
@@ -90,12 +93,8 @@ export default function ModelPicker({
     [probeProvider]
   );
 
-  // Probe once on mount so the trigger's status dot is honest before the
-  // menu is ever opened, and re-probe every time it opens.
-  useEffect(() => {
-    probeAll(getLLMConfig());
-  }, [probeAll]);
-
+  // Local model servers are optional. Probe only when the user opens the
+  // picker instead of issuing localhost requests during every offline preview.
   useEffect(() => {
     if (!open) return;
     const fresh = getLLMConfig();
@@ -146,9 +145,10 @@ export default function ModelPicker({
 
   const dotFor = (engine: EngineId): { color: string; pulse: boolean } => {
     if (engine === "offline") return { color: "bg-emerald-500", pulse: false };
-    if (engine === "gemini") {
-      if (hasGeminiKey === null) return { color: "bg-amber-500", pulse: true };
-      return hasGeminiKey ? { color: "bg-emerald-500", pulse: false } : { color: "bg-red-500", pulse: false };
+    if (engine === "gemini" || engine === "openai" || engine === "anthropic" || engine === "online_free") {
+      const available = engine === "gemini" ? (remoteProviderHealth?.gemini ?? hasGeminiKey) : remoteProviderHealth?.[engine];
+      if (available === null || available === undefined) return { color: "bg-amber-500", pulse: true };
+      return available ? { color: "bg-emerald-500", pulse: false } : { color: "bg-red-500", pulse: false };
     }
     if (engine === "fusion") {
       if (fusionChecking) return { color: "bg-amber-500", pulse: true };
@@ -161,11 +161,15 @@ export default function ModelPicker({
 
   const statusLineFor = (engine: EngineId): string => {
     if (engine === "offline") return "Instant deterministic builds — runs entirely in your browser.";
-    if (engine === "gemini") {
-      if (hasGeminiKey === null) return "Checking server key…";
-      return hasGeminiKey
-        ? "Cloud reasoning via the secure server proxy."
-        : "No API key — set GEMINI_API_KEY in .env.local. Builds fall back to the offline compiler.";
+    if (engine === "gemini" || engine === "openai" || engine === "anthropic" || engine === "online_free") {
+      const available = engine === "gemini" ? (remoteProviderHealth?.gemini ?? hasGeminiKey) : remoteProviderHealth?.[engine];
+      const name = engine === "gemini" ? "Gemini" : engine === "openai" ? "OpenAI" : engine === "anthropic" ? "Anthropic" : "Online Free";
+      if (available === null || available === undefined) return `Server health has not checked ${name} yet.`;
+      return available
+        ? engine === "online_free"
+          ? `Rotates strictly free cloud models through the secure gateway; falls back to the offline compiler when exhausted.`
+          : `${name} is configured on the server; requests use the secure gateway.`
+        : `${name} is not configured on this server. Select a local engine or ask an administrator to add its API key.`;
     }
     if (engine === "fusion") {
       if (fusionChecking) return "Checking both engines…";
@@ -188,13 +192,19 @@ export default function ModelPicker({
   };
 
   const currentModelName =
-    cfg.provider === "ollama" ? cfg.ollamaModel : cfg.provider === "lm_studio" ? cfg.lmStudioModel : "";
+    cfg.provider === "ollama" ? cfg.ollamaModel : cfg.provider === "lm_studio" ? cfg.lmStudioModel : cfg.provider === "openai" ? (cfg.openaiModel || "gpt-5-nano") : cfg.provider === "anthropic" ? (cfg.anthropicModel || "claude-haiku-4-5") : "";
 
   const triggerLabel =
     activeEngine === "offline"
       ? "Offline Compiler"
       : activeEngine === "gemini"
       ? "Gemini Cloud"
+      : activeEngine === "openai"
+      ? `OpenAI · ${cfg.openaiModel || "gpt-5-nano"}`
+      : activeEngine === "anthropic"
+      ? `Claude · ${cfg.anthropicModel || "claude-haiku-4-5"}`
+      : activeEngine === "online_free"
+      ? `Online Free · ${cfg.onlineFreeActiveModel || "Auto"}`
       : activeEngine === "fusion"
       ? "Fusion · Ollama + LM Studio"
       : `${activeEngine === "ollama" ? "Ollama" : "LM Studio"} · ${prettyModelName(currentModelName)}`;
@@ -206,6 +216,9 @@ export default function ModelPicker({
   const OPTIONS: Array<{ id: EngineId; name: string; icon: React.ElementType }> = [
     { id: "offline", name: "Offline Compiler", icon: Zap },
     { id: "gemini", name: "Gemini Cloud", icon: Cloud },
+    { id: "online_free", name: "Online Free (rotating)", icon: Cloud },
+    { id: "openai", name: "OpenAI GPT", icon: Cloud },
+    { id: "anthropic", name: "Anthropic Claude", icon: Cloud },
     { id: "ollama", name: "Ollama (local)", icon: Cpu },
     { id: "lm_studio", name: "LM Studio (local)", icon: Server },
   ];
@@ -247,6 +260,7 @@ export default function ModelPicker({
         </div>
         <p className="pl-[22px] mt-0.5 text-[10px] leading-snug text-neutral-500">{statusLineFor(opt.id)}</p>
         {isActive && (opt.id === "ollama" || opt.id === "lm_studio") && renderModelChooser(opt.id)}
+        {isActive && (opt.id === "openai" || opt.id === "anthropic") && renderRemoteModelChooser(opt.id)}
         {isActive && opt.id === "fusion" && (
           <div className="space-y-1">
             {renderModelChooser("ollama")}
@@ -295,6 +309,26 @@ export default function ModelPicker({
             aria-label={`${provider === "ollama" ? "Ollama" : "LM Studio"} model name`}
           />
         )}
+      </div>
+    );
+  };
+
+  const renderRemoteModelChooser = (provider: "openai" | "anthropic") => {
+    const value = provider === "openai" ? (cfg.openaiModel || "gpt-5-nano") : (cfg.anthropicModel || "claude-haiku-4-5");
+    const choices = provider === "openai"
+      ? ["gpt-5-nano", "gpt-5.6-luna", "gpt-5.6-terra"]
+      : ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"];
+    return (
+      <div className="mt-1.5 pl-7 pr-1" onClick={(e) => e.stopPropagation()}>
+        <label className="block text-[8px] font-mono font-bold uppercase tracking-wider text-neutral-500 mb-1">Model</label>
+        <select
+          value={value}
+          onChange={(e) => persist(provider === "openai" ? { ...cfg, openaiModel: e.target.value } : { ...cfg, anthropicModel: e.target.value })}
+          className="w-full bg-neutral-950 border border-neutral-800 hover:border-neutral-700 focus:border-orange-700 outline-none rounded-lg px-2 py-1.5 text-[11px] text-neutral-200 cursor-pointer"
+          aria-label={`${provider === "openai" ? "OpenAI" : "Anthropic"} model`}
+        >
+          {choices.map((model) => <option key={model} value={model}>{model}</option>)}
+        </select>
       </div>
     );
   };

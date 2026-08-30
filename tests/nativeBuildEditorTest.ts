@@ -112,6 +112,11 @@ function braceParenBalance(s: string): { bracesOk: boolean; parensOk: boolean } 
   check("LookAndFeel.cpp: has a branch for silvercap", /style == "silvercap"/.test(cpp));
   check("LookAndFeel.cpp: always includes modern_pointer as the safety-net fallback branch", /style == "modern_pointer"/.test(cpp));
   check("LookAndFeel.cpp: falls back to base LookAndFeel_V4 for unrecognized style tags", /LookAndFeel_V4::drawRotarySlider/.test(cpp));
+  check(
+    "LookAndFeel.cpp: fallback receives named rotary angles",
+    /float rotaryStartAngle, float rotaryEndAngle/.test(cpp) &&
+      /sliderPosProportional, rotaryStartAngle, rotaryEndAngle, slider/.test(cpp)
+  );
 }
 {
   // Two different style sets must produce genuinely different generated
@@ -162,6 +167,42 @@ const skin = { bgColor: "#12161D", accentColor: "#f97316", textColor: "#F4F7FB" 
   check("PluginEditor.cpp: wires setDoubleClickReturnValue with the param's own default", /setDoubleClickReturnValue \(true, 10\)/.test(cpp));
   check("PluginEditor.cpp: enables velocity-based mode for fast/slow-drag sensitivity", /setVelocityBasedMode \(true\)/.test(cpp));
   check("PluginEditor.cpp: enables a popup value display", /setPopupDisplayEnabled \(true, true, this\)/.test(cpp));
+}
+
+/* ---- semantic grouping/layout shared with the web generation pipeline ---- */
+{
+  const semanticParams: NativeParameter[] = [
+    { id: "drive", name: "Drive", min: 0, max: 10, defaultValue: 5, x: 40, y: 70, w: 120, h: 100, uiGroup: "character", uiGroupLabel: "Character" },
+    { id: "tone", name: "Tone", min: 0, max: 1, defaultValue: .5, x: 180, y: 70, w: 120, h: 100, uiGroup: "tone", uiGroupLabel: "Tone" },
+  ];
+  const h = generatePluginEditorHeader("Grouped");
+  const cpp = generatePluginEditorCpp("Grouped", semanticParams, { bgColor: "#111111", accentColor: "#f97316", textColor: "#ffffff" }, "distortion");
+  check("PluginEditor.h owns semantic section primitives", /OwnedArray<juce::GroupComponent> semanticGroups/.test(h));
+  check("PluginEditor.cpp renders shared semantic labels", /CHARACTER/.test(cpp) && /TONE/.test(cpp));
+  check("PluginEditor.cpp uses generation-pipeline coordinates", /Rectangle<int> cell \(40, 70, 120, 100\)/.test(cpp));
+}
+
+/* ---- native controls preserve semantic visual primitives ---- */
+{
+  const visualParams: NativeParameter[] = [
+    { id: "enabled", name: "Enabled", min: 0, max: 1, defaultValue: 1, controlType: "toggle" },
+    { id: "meter", name: "Meter", min: -60, max: 0, defaultValue: -12, controlType: "meter" },
+    { id: "curve", name: "Curve", min: 0, max: 1, defaultValue: 0, controlType: "eq" },
+    { id: "pad", name: "Pad", min: 0, max: 127, defaultValue: 0, controlType: "pad" },
+    { id: "head", name: "Head", min: 0, max: 1, defaultValue: 0, controlType: "amp" },
+    { id: "cab", name: "Cab", min: 0, max: 1, defaultValue: 0, controlType: "cab" },
+    { id: "mic", name: "Mic", min: 0, max: 1, defaultValue: 0, controlType: "mic" },
+  ];
+  const h = generatePluginEditorHeader("Visuals");
+  const cpp = generatePluginEditorCpp("Visuals", visualParams);
+  check("JUCE declares dedicated native primitive inventories", /OwnedArray<juce::ToggleButton> toggles/.test(h) && /OwnedArray<juce::TextButton> pads/.test(h) && /OwnedArray<juce::Component> visualComponents/.test(h));
+  check("JUCE uses attached ToggleButton instead of rotary slider", /ToggleButton \("Enabled"\)/.test(cpp) && /ButtonAttachment/.test(cpp));
+  check("JUCE uses pad button, segmented meter, and curve EQ", /TextButton \("Pad"\)/.test(cpp) && /segment < 12/.test(cpp) && /Curve-led EQ monitor/.test(cpp));
+  check("JUCE paints amp/cab and mic native visuals", /amp hardware faceplate/.test(cpp) && /cab hardware faceplate/.test(cpp) && /Mic-position target/.test(cpp));
+  check("JUCE meter reads processor levels only from its UI timer", /void timerCallback\(\) override[\s\S]*processor\.getMeterLevels \(meterLeft, meterRight\)/.test(cpp));
+  check("JUCE meter timer runs even when decorative motion is disabled", /if \(type == "meter" \|\| \(allowMotion && type == "eq"\)\) startTimerHz/.test(cpp));
+  check("JUCE reduced-motion gate only advances decorative phase", /if \(decorativeMotionAllowed\)\s*phase \+=/.test(cpp));
+  check("JUCE visual keeps a processor reference owned for no longer than the editor", /RecipeVisualComponent \(processorRef, "meter"/.test(cpp));
 }
 {
   // Different categories with NO explicit ampKnobStyle must resolve to

@@ -14,7 +14,8 @@ type Stage = "idle" | "scaffolding" | "building" | "success" | "failed";
 export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPanelProps) {
   const [stage, setStage] = useState<Stage>("idle");
   const [log, setLog] = useState("");
-  const [vst3Path, setVst3Path] = useState<string | null>(null);
+  const [completedBuildId, setCompletedBuildId] = useState<string | null>(null);
+  const [artifactName, setArtifactName] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
@@ -39,7 +40,8 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
         if (data.status !== "running") {
           clearInterval(pollRef.current);
           pollRef.current = null;
-          setVst3Path(data.vst3Path || null);
+          setCompletedBuildId(data.status === "success" ? buildId : null);
+          setArtifactName(data.artifactName || null);
           setStage(data.status === "success" ? "success" : "failed");
           triggerToast(
             data.status === "success"
@@ -59,7 +61,8 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
   const handleBuild = async () => {
     setStage("scaffolding");
     setLog("");
-    setVst3Path(null);
+    setCompletedBuildId(null);
+    setArtifactName(null);
     setErrorMsg(null);
     setWarning(null);
 
@@ -84,10 +87,13 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
           plugin: {
             name: plugin.name,
             category: plugin.category,
+            family: plugin.family,
             attributes: plugin.buildReport?.attributes,
             parameters: plugin.parameters,
             dspFunction: plugin.dspFunction,
             customSkin: plugin.customSkin,
+            resolvedUi: plugin.resolvedUi,
+            routing: plugin.routing,
           },
           llmConfig: buildConfig,
         }),
@@ -106,7 +112,7 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
         headers: { "Content-Type": "application/json" },
         // llmConfig enables the compile -> analyze -> fix -> recompile loop:
         // real compiler errors go back to the local model between passes.
-        body: JSON.stringify({ projectDir: scaffoldData.projectDir, llmConfig: buildConfig }),
+        body: JSON.stringify({ scaffoldId: scaffoldData.scaffoldId, llmConfig: buildConfig }),
       });
       const buildData = await buildRes.json();
       if (!buildRes.ok) throw new Error(buildData.error || "Failed to start build.");
@@ -120,12 +126,12 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
   };
 
   const handleReveal = async () => {
-    if (!vst3Path) return;
+    if (!completedBuildId) return;
     try {
       await fetch("/api/native/reveal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ vst3Path }),
+        body: JSON.stringify({ buildId: completedBuildId }),
       });
     } catch (err: any) {
       triggerToast(`Couldn't open Explorer: ${err.message}`);
@@ -133,9 +139,9 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
   };
 
   const handleInstall = async () => {
-    if (!vst3Path) return;
+    if (!completedBuildId) return;
     const confirmed = window.confirm(
-      `Copy this plugin into your system VST3 folder (Program Files\\Common Files\\VST3) so your DAW can find it?\n\n${vst3Path}`
+      `Copy ${artifactName || "this plugin"} into your system VST3 folder so your DAW can find it?`
     );
     if (!confirmed) return;
 
@@ -144,11 +150,11 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
       const res = await fetch("/api/native/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ vst3Path }),
+        body: JSON.stringify({ buildId: completedBuildId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Install failed.");
-      triggerToast(`Installed to ${data.installedTo}. Rescan plugins in your DAW to pick it up.`);
+      triggerToast(`${data.artifactName || "Plugin"} installed. Rescan plugins in your DAW to pick it up.`);
     } catch (err: any) {
       triggerToast(`Install failed: ${err.message}`);
     } finally {
@@ -168,10 +174,13 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
           </div>
           <h2 className="text-lg font-extrabold text-neutral-150 tracking-tight flex items-center gap-1.5">
             <span>Compile a real, loadable VST3</span>
-            <Info
-              className="w-3.5 h-3.5 text-neutral-500 cursor-help"
+            <span
+              className="inline-flex cursor-help"
               title="Writes a real JUCE + CMake project and runs a real compiler. Local dev server only (needs CMake + a C++ toolchain). First build fetches and compiles JUCE itself, so expect 5-15+ minutes; later builds are incremental."
-            />
+              aria-label="Native build requirements"
+            >
+              <Info className="w-3.5 h-3.5 text-neutral-500" aria-hidden="true" />
+            </span>
           </h2>
           <p className="text-xs text-neutral-400 leading-normal max-w-2xl">Compiles "{plugin.name}" into an actual .vst3 you can load in a DAW.</p>
         </div>
@@ -232,9 +241,9 @@ export default function NativeBuildPanel({ plugin, triggerToast }: NativeBuildPa
             {log || "No build output yet."}
           </pre>
 
-          {stage === "success" && vst3Path && (
+          {stage === "success" && completedBuildId && (
             <div className="space-y-2">
-              <div className="text-[11px] font-mono text-emerald-400 break-all">{vst3Path}</div>
+              <div className="text-[11px] font-mono text-emerald-400 break-all">{artifactName || "VST3 artifact ready"}</div>
               <div className="flex gap-2">
                 <button
                   onClick={handleReveal}

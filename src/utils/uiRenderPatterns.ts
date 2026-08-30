@@ -125,13 +125,13 @@ export function resolveKnobStyle(raw: string | undefined | null): KnobRenderStyl
 /** Generalizes ampTolexPattern (leather/carbon/tweed/wood/snakeskin/
  *  metalgrid) to a control-agnostic PANEL background usable on any plugin,
  *  plus 2 new originals for non-amp "studio gear" looks. */
-export type PanelTextureStyle = "brushed_metal" | "leather_grain" | "carbon_weave" | "tweed_weave" | "wood_grain" | "matte_poly";
+export type PanelTextureStyle = "brushed_metal" | "leather_grain" | "carbon_weave" | "tweed_weave" | "wood_grain" | "matte_poly" | "glass";
 
 export interface PanelTextureRecipe {
   style: PanelTextureStyle;
   label: string;
   baseColor: string;
-  microStructure: { kind: "diagonal_weave" | "brushed_lines" | "noise_specks" | "wood_bands"; scalePx: number; opacity: number };
+  microStructure: { kind: "diagonal_weave" | "brushed_lines" | "noise_specks" | "wood_bands" | "glass_glare"; scalePx: number; opacity: number };
 }
 
 export const PANEL_TEXTURE_RECIPES: Record<PanelTextureStyle, PanelTextureRecipe> = {
@@ -141,6 +141,7 @@ export const PANEL_TEXTURE_RECIPES: Record<PanelTextureStyle, PanelTextureRecipe
   tweed_weave: { style: "tweed_weave", label: "Tweed Weave", baseColor: "#c9a227", microStructure: { kind: "diagonal_weave", scalePx: 4, opacity: 0.22 } },
   wood_grain: { style: "wood_grain", label: "Wood Grain", baseColor: "#4a2f1c", microStructure: { kind: "wood_bands", scalePx: 10, opacity: 0.16 } },
   matte_poly: { style: "matte_poly", label: "Matte Polymer", baseColor: "#1c1e22", microStructure: { kind: "noise_specks", scalePx: 1.5, opacity: 0.05 } },
+  glass: { style: "glass", label: "Optical Glass", baseColor: "#101b2a", microStructure: { kind: "glass_glare", scalePx: 28, opacity: 0.2 } },
 };
 
 /* ------------------------------------------------------------------ */
@@ -246,6 +247,12 @@ export function panelTextureCss(style: PanelTextureStyle): { backgroundColor: st
   const dark = `rgba(0,0,0,${(opacity * 1.35).toFixed(3)})`;
 
   switch (kind) {
+    case "glass_glare":
+      return {
+        backgroundColor: r.baseColor,
+        backgroundImage: `linear-gradient(118deg, rgba(255,255,255,${opacity}) 0%, transparent 24%, rgba(80,180,255,${(opacity * .45).toFixed(3)}) 52%, transparent 76%)`,
+        backgroundSize: "100% 100%",
+      };
     case "diagonal_weave":
       // Two opposed 45-degree gradients read as an interlaced weave --
       // the tweed/carbon look.
@@ -430,6 +437,7 @@ export function toCssKnobStyle(recipe: KnobRenderRecipe, accentColor: string): C
  *  C++ expression yielding the knob's normalized 0..1 value at paint time
  *  (JUCE's Slider LookAndFeel callback supplies this as `sliderPosProportional`). */
 export function toJuceKnobPaintCode(recipe: KnobRenderRecipe, propertyTag: string): string {
+  const cppFloat = (value: number) => `${value}${Number.isInteger(value) ? ".0" : ""}f`;
   const stops = recipe.bodyGradient.stops;
   const cx = "bounds.getCentreX()";
   const cy = "bounds.getCentreY()";
@@ -441,15 +449,15 @@ export function toJuceKnobPaintCode(recipe: KnobRenderRecipe, propertyTag: strin
 
   const indicatorDraw =
     recipe.indicator.kind === "dashring"
-      ? `        const float arcStart = juce::degreesToRadians (${recipe.sweep.startAngleDeg}.0f);
-        const float arcEnd = juce::degreesToRadians (${recipe.sweep.startAngleDeg}.0f + sliderPosProportional * (${recipe.sweep.endAngleDeg}.0f - ${recipe.sweep.startAngleDeg}.0f));
+      ? `        const float arcStart = juce::degreesToRadians (${cppFloat(recipe.sweep.startAngleDeg)});
+        const float arcEnd = juce::degreesToRadians (${cppFloat(recipe.sweep.startAngleDeg)} + sliderPosProportional * (${cppFloat(recipe.sweep.endAngleDeg)} - ${cppFloat(recipe.sweep.startAngleDeg)}));
         juce::Path ring;
         ring.addCentredArc (${cx}, ${cy}, r * 0.9f, r * 0.9f, 0.0f, arcStart, arcEnd, true);
         g.setColour (accentColour);
-        g.strokePath (ring, juce::PathStrokeType (r * ${recipe.indicator.widthFraction}f));`
-      : `        const float angle = juce::degreesToRadians (${recipe.sweep.startAngleDeg}.0f + sliderPosProportional * (${recipe.sweep.endAngleDeg}.0f - ${recipe.sweep.startAngleDeg}.0f));
+        g.strokePath (ring, juce::PathStrokeType (r * ${cppFloat(recipe.indicator.widthFraction)}));`
+      : `        const float angle = juce::degreesToRadians (${cppFloat(recipe.sweep.startAngleDeg)} + sliderPosProportional * (${cppFloat(recipe.sweep.endAngleDeg)} - ${cppFloat(recipe.sweep.startAngleDeg)}));
         juce::Path pointer;
-        pointer.addRectangle (-r * ${recipe.indicator.widthFraction}f * 0.5f, -r * ${recipe.indicator.lengthFraction}f, r * ${recipe.indicator.widthFraction}f * 0.5f, r * ${recipe.indicator.lengthFraction}f);
+        pointer.addRectangle (-r * ${cppFloat(recipe.indicator.widthFraction)} * 0.5f, -r * ${cppFloat(recipe.indicator.lengthFraction)}, r * ${cppFloat(recipe.indicator.widthFraction)} * 0.5f, r * ${cppFloat(recipe.indicator.lengthFraction)});
         g.setColour (${recipe.indicator.colorFromAccent ? "accentColour" : `juce::Colour::fromString ("ff${(recipe.indicator.fixedColor || "#d4af37").replace("#", "")}")`});
         g.fillPath (pointer, juce::AffineTransform::rotation (angle).translated (${cx}, ${cy}));`;
 
@@ -459,8 +467,8 @@ export function toJuceKnobPaintCode(recipe: KnobRenderRecipe, propertyTag: strin
         const float r = ${radius};
         g.setGradientFill (${gradientCall});
         g.fillEllipse (bounds);
-        g.setColour (juce::Colours::black.withAlpha (${Math.min(0.9, Math.abs(recipe.rim.shadeDelta) / 40).toFixed(2)}f));
-        g.drawEllipse (bounds, ${Math.max(1, Math.round(recipe.rim.outerWidthFraction * 28))}.0f);
+        g.setColour (juce::Colours::black.withAlpha (${cppFloat(Number(Math.min(0.9, Math.abs(recipe.rim.shadeDelta) / 40).toFixed(2)))}));
+        g.drawEllipse (bounds, ${cppFloat(Math.max(1, Math.round(recipe.rim.outerWidthFraction * 28)))});
 ${indicatorDraw}
     }`;
 }
@@ -474,17 +482,22 @@ ${indicatorDraw}
  * its own). The texture is additive microstructure, not a replacement fill.
  */
 export function toJucePanelPaintCode(recipe: PanelTextureRecipe, baseColorHex?: string): string {
+  const cppFloat = (value: number) => `${value}${Number.isInteger(value) ? ".0" : ""}f`;
   const base = (baseColorHex || recipe.baseColor).replace("#", "");
   const structureDraw = (() => {
     switch (recipe.microStructure.kind) {
+      case "glass_glare":
+        return `    juce::ColourGradient glassGlare (juce::Colours::white.withAlpha (${cppFloat(recipe.microStructure.opacity)}), 0.0f, 0.0f, juce::Colours::skyblue.withAlpha (0.03f), (float) getWidth(), (float) getHeight(), false);
+    g.setGradientFill (glassGlare);
+    g.fillRect (getLocalBounds());`;
       case "brushed_lines":
-        return `    for (float lx = 0; lx < (float) getWidth(); lx += ${recipe.microStructure.scalePx}.0f)
+        return `    for (float lx = 0; lx < (float) getWidth(); lx += ${cppFloat(recipe.microStructure.scalePx)})
         g.drawVerticalLine ((int) lx, 0.0f, (float) getHeight());`;
       case "diagonal_weave":
-        return `    for (float d = -(float) getHeight(); d < (float) getWidth(); d += ${recipe.microStructure.scalePx}.0f)
+        return `    for (float d = -(float) getHeight(); d < (float) getWidth(); d += ${cppFloat(recipe.microStructure.scalePx)})
         g.drawLine (d, 0.0f, d + (float) getHeight(), (float) getHeight(), 1.0f);`;
       case "wood_bands":
-        return `    for (float wy = 0; wy < (float) getHeight(); wy += ${recipe.microStructure.scalePx}.0f)
+        return `    for (float wy = 0; wy < (float) getHeight(); wy += ${cppFloat(recipe.microStructure.scalePx)})
         g.drawHorizontalLine ((int) wy, 0.0f, (float) getWidth());`;
       case "noise_specks":
       default: {
@@ -495,11 +508,11 @@ export function toJucePanelPaintCode(recipe: PanelTextureRecipe, baseColorHex?: 
         for (let i = 0; i < recipe.style.length; i++) seed = (seed * 31 + recipe.style.charCodeAt(i)) >>> 0;
         return `    juce::Random rng (0x${seed.toString(16)});
     for (int i = 0; i < 200; ++i)
-        g.fillRect (rng.nextFloat() * (float) getWidth(), rng.nextFloat() * (float) getHeight(), ${recipe.microStructure.scalePx}.0f, ${recipe.microStructure.scalePx}.0f);`;
+        g.fillRect (rng.nextFloat() * (float) getWidth(), rng.nextFloat() * (float) getHeight(), ${cppFloat(recipe.microStructure.scalePx)}, ${cppFloat(recipe.microStructure.scalePx)});`;
       }
     }
   })();
   return `    g.fillAll (juce::Colour::fromString ("ff${base}"));
-    g.setColour (juce::Colours::black.withAlpha (${recipe.microStructure.opacity}f));
+    g.setColour (juce::Colours::black.withAlpha (${cppFloat(recipe.microStructure.opacity)}));
 ${structureDraw}`;
 }

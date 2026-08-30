@@ -97,6 +97,7 @@ export default function MemoryCore({
   const [testResult, setTestResult] = useState<string>("");
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
   const [isDiscovering, setIsDiscovering] = useState<boolean>(false);
+  const [remoteHealth, setRemoteHealth] = useState<Partial<Record<"gemini" | "openai" | "anthropic" | "online_free", boolean>> | null>(null);
 
   // ---- 2. Memory Journal States ----
   const [mistakes, setMistakes] = useState<MistakeMemory[]>([]);
@@ -209,6 +210,23 @@ export default function MemoryCore({
       localStorage.setItem(STORAGE_KEY_MEMORIES_RESEARCH, JSON.stringify(initialResearch));
     }
   }, []);
+
+  // Managed-provider health is checked only while this explicit settings tab
+  // is open. Unlike optional localhost engines, this does not probe a local
+  // service during app startup.
+  useEffect(() => {
+    if (activeTab !== "engine") return;
+    let cancelled = false;
+    fetch("/api/llm/health")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("health unavailable")))
+      .then((health) => {
+        if (!cancelled) setRemoteHealth(health.providers ?? {});
+      })
+      .catch(() => {
+        if (!cancelled) setRemoteHealth({});
+      });
+    return () => { cancelled = true; };
+  }, [activeTab]);
 
   // Monitor latest error dynamically to capture mistakes
   useEffect(() => {
@@ -551,6 +569,13 @@ export default function MemoryCore({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div
+                onClick={() => saveConfig({ ...llmConfig, provider: "online_free" })}
+                className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between h-[130px] shadow-lg ${llmConfig.provider === "online_free" ? "bg-emerald-950/30 border-emerald-500" : "bg-neutral-900/40 border-emerald-900/60 hover:border-emerald-700"}`}
+              >
+                <div><div className="flex items-center justify-between"><span className="font-black text-xs text-emerald-200 uppercase tracking-wider">Online Free</span><span className={`w-2.5 h-2.5 rounded-full ${remoteHealth === null ? "bg-amber-500" : remoteHealth.online_free ? "bg-emerald-500" : "bg-red-500"}`} /></div><p className="text-[9.5px] text-neutral-400 mt-1.5 leading-relaxed">Rotates strictly free cloud models. If capacity is exhausted, builds continue with the offline compiler—never a paid model.</p></div>
+                <span className="text-[8.5px] font-mono text-emerald-400 font-bold">AUTO · FREE CLOUD + OFFLINE FALLBACK</span>
+              </div>
               {/* Gemini Trigger */}
               <div
                 onClick={() => saveConfig({ ...llmConfig, provider: "gemini" })}
@@ -570,6 +595,22 @@ export default function MemoryCore({
                   </p>
                 </div>
                 <span className="text-[8.5px] font-mono text-orange-400 font-bold">API Route: Cloud Proxy Managed</span>
+              </div>
+
+              <div
+                onClick={() => saveConfig({ ...llmConfig, provider: "openai" })}
+                className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between h-[130px] shadow-lg ${llmConfig.provider === "openai" ? "bg-[#ea580c]/10 border-orange-600" : "bg-neutral-900/40 border-neutral-850 hover:border-neutral-700"}`}
+              >
+                <div><div className="flex items-center justify-between"><span className="font-black text-xs text-white uppercase tracking-wider">OpenAI GPT</span><span className={`w-2.5 h-2.5 rounded-full ${remoteHealth === null ? "bg-amber-500" : remoteHealth.openai ? "bg-emerald-500" : "bg-red-500"}`} /></div><p className="text-[9.5px] text-neutral-400 mt-1.5 leading-relaxed">Server-managed OpenAI access. {remoteHealth === null ? "Checking server health…" : remoteHealth.openai ? "Configured on this server." : "Not configured on this server."}</p></div>
+                <span className="text-[8.5px] font-mono text-orange-400 font-bold">API Route: /api/llm/chat</span>
+              </div>
+
+              <div
+                onClick={() => saveConfig({ ...llmConfig, provider: "anthropic" })}
+                className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between h-[130px] shadow-lg ${llmConfig.provider === "anthropic" ? "bg-[#ea580c]/10 border-orange-600" : "bg-neutral-900/40 border-neutral-850 hover:border-neutral-700"}`}
+              >
+                <div><div className="flex items-center justify-between"><span className="font-black text-xs text-white uppercase tracking-wider">Anthropic Claude</span><span className={`w-2.5 h-2.5 rounded-full ${remoteHealth === null ? "bg-amber-500" : remoteHealth.anthropic ? "bg-emerald-500" : "bg-red-500"}`} /></div><p className="text-[9.5px] text-neutral-400 mt-1.5 leading-relaxed">Server-managed Claude access. {remoteHealth === null ? "Checking server health…" : remoteHealth.anthropic ? "Configured on this server." : "Not configured on this server."}</p></div>
+                <span className="text-[8.5px] font-mono text-orange-400 font-bold">API Route: /api/llm/chat</span>
               </div>
 
               {/* Ollama Trigger */}
@@ -615,8 +656,22 @@ export default function MemoryCore({
               </div>
             </div>
 
-            {/* Config inputs for selected option */}
-            {llmConfig.provider !== "gemini" && (
+            {(llmConfig.provider === "openai" || llmConfig.provider === "anthropic") && (
+              <div className="bg-neutral-900/60 p-5 rounded-2xl border border-neutral-850 max-w-3xl animate-fadeIn">
+                <label className="text-[10px] uppercase font-mono font-bold text-neutral-400 block mb-2">Server gateway model</label>
+                <select
+                  value={llmConfig.provider === "openai" ? (llmConfig.openaiModel || "gpt-5-nano") : (llmConfig.anthropicModel || "claude-haiku-4-5")}
+                  onChange={(e) => saveConfig(llmConfig.provider === "openai" ? { ...llmConfig, openaiModel: e.target.value } : { ...llmConfig, anthropicModel: e.target.value })}
+                  className="w-full bg-neutral-950 border border-neutral-800 text-xs px-3 py-2.5 rounded-lg text-white focus:border-orange-550 outline-none"
+                >
+                  {(llmConfig.provider === "openai" ? ["gpt-5-nano", "gpt-5.6-luna", "gpt-5.6-terra"] : ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]).map((model) => <option key={model} value={model}>{model}</option>)}
+                </select>
+                <p className="text-[10px] text-neutral-500 mt-3">No key is stored here. A request only succeeds when this provider is configured on the application server.</p>
+              </div>
+            )}
+
+            {/* Config inputs for selected local option */}
+            {(llmConfig.provider === "ollama" || llmConfig.provider === "lm_studio") && (
               <div className="bg-neutral-900/60 p-5 rounded-2xl border border-neutral-850 space-y-4 max-w-3xl animate-fadeIn">
                 <span className="text-[9.5px] font-mono font-bold text-neutral-400 uppercase tracking-widest block border-b border-neutral-800 pb-1.5">
                   Configure Local Connection parameters

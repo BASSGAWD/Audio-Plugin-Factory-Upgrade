@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AudioPlugin } from "../types";
 import { resolveCustomSkinStyle } from "../utils/customSkin";
-import { resolveMaterial, materialFilterDefs, MaterialContext } from "../utils/materialVisuals";
+import { resolveMaterial, materialFilterDefs, MaterialContext, shadowOffset, highlightOffset } from "../utils/materialVisuals";
 import { panelTextureCss } from "../utils/uiRenderPatterns";
 import { buildPluginManual, hasSeenGuide, markGuideSeen, ManualContext } from "../utils/featureManifest";
 import { identityPanelStyle, resolveVisualIdentity } from "../utils/visualIdentity";
@@ -252,7 +252,11 @@ const ScrewHead: React.FC<{ corner: "tl" | "tr" | "bl" | "br"; angle: number; si
         width: size,
         height: size,
         background: "radial-gradient(circle at 35% 30%, #86868f, #303036 65%, #131315)",
-        boxShadow: "0 1px 2px rgba(0,0,0,0.65), inset 0 0.5px 1px rgba(255,255,255,0.18)",
+        // Cast shadow + top-lit inset now derive their direction from the
+        // shared light model (shadowOffset/highlightOffset) instead of a
+        // fixed straight-down/straight-up pair -- consistent with every
+        // other lit surface on the faceplate.
+        boxShadow: `${shadowOffset(1.5).x}px ${shadowOffset(1.5).y}px 2px rgba(0,0,0,0.65), inset ${highlightOffset(0.7).x}px ${highlightOffset(0.7).y}px 1px rgba(255,255,255,0.18)`,
       }}
     >
       <div
@@ -290,7 +294,8 @@ function TopRail({ motif, heightPx }: { motif: string; heightPx: number }) {
         height: heightPx,
         background: "linear-gradient(180deg, rgba(0,0,0,0.34), rgba(0,0,0,0.04))",
         borderBottom: "1px solid rgba(0,0,0,0.35)",
-        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)",
+        // Top-lit inset direction now derives from the shared light model.
+        boxShadow: `inset ${highlightOffset(1.2).x}px ${highlightOffset(1.2).y}px 0 rgba(255,255,255,0.05)`,
       }}
     >
       <div className="absolute flex gap-1" style={{ top: Math.max(2, heightPx / 2.6), left: "50%", transform: "translateX(-50%)" }}>
@@ -372,7 +377,8 @@ function SemanticControlSections({ plugin }: { plugin: AudioPlugin }) {
             left: section.left, top: section.top, width: section.width, height: section.height,
             border: "1px solid color-mix(in srgb, currentColor 14%, transparent)",
             background: "linear-gradient(180deg, rgba(255,255,255,.035), rgba(0,0,0,.07))",
-            boxShadow: "inset 0 1px 0 rgba(255,255,255,.035)",
+            // Top-lit inset direction now derives from the shared light model.
+            boxShadow: `inset ${highlightOffset(1.2).x}px ${highlightOffset(1.2).y}px 0 rgba(255,255,255,.035)`,
           }}
         >
           <span style={{ position: "absolute", left: 8, top: 4, fontSize: 7, fontWeight: 700, letterSpacing: ".14em", textTransform: "uppercase", opacity: .48 }}>
@@ -569,6 +575,23 @@ export default function GenerativeFaceplate({ plugin, analyserNode, isPlaying, c
       {chassisProfile.railHeightPx > 0 && <TopRail motif={identity.hardwareMotif} heightPx={chassisProfile.railHeightPx} />}
       <ChassisDetails plugin={plugin} fontFamily={skinStyle.fontFamily} textColor={skinStyle.color} modelLabel={identity.modelLabel} tokens={identity.styleTokens} profile={chassisProfile} screwAngles={screwAngles} />
       <SemanticControlSections plugin={plugin} />
+      {/* Whole-unit vignette: the panel/art/chassis read as one lit object
+          (brightest where the shared light source faces it, darkening
+          toward the far corner) instead of each layer (art, rail, screws,
+          sections) being independently flat-lit. Positioned via
+          highlightOffset so its bright center lands in the same
+          upper-left bias KnobControl's own cap gradient (cx=38%/cy=30%)
+          already uses -- highlightOffset(40) lands within a couple points
+          of that same 38%/30%. Sits above the decorative layers but below
+          `children` (the actual controls) so it never dims a knob or
+          reduces control legibility. */}
+      <div
+        aria-hidden="true"
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          background: `radial-gradient(ellipse 120% 100% at ${(50 + highlightOffset(40).x).toFixed(1)}% ${(50 + highlightOffset(40).y).toFixed(1)}%, transparent 45%, rgba(0,0,0,0.22) 100%)`,
+        }}
+      />
       <MaterialContext.Provider value={materialCtx}>
         <VisualIdentityContext.Provider value={identity}>
         <ResolvedKnobContext.Provider value={resolvedKnobs}>

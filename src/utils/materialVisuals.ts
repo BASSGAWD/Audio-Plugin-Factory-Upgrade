@@ -118,6 +118,53 @@ const CONTRAST_INTERCEPT = -0.55;
 const LIGHT_AZIMUTH = 235;
 const LIGHT_ELEVATION = 55;
 
+/**
+ * Track 3d: the rest of the app (chassis screws/rail, knob bevels, meter
+ * shadows, the rig's head-on-cab cast shadow) previously each hand-picked
+ * their own directional CSS offset independently -- none of them derived
+ * from LIGHT_AZIMUTH/LIGHT_ELEVATION above, and at least one
+ * (customSkin.ts's "shadow" glow preset, `6px 10px 22px`) pointed the
+ * OPPOSITE way from this material lighting. This is the azimuth/elevation
+ * -> 2D CSS-offset conversion the codebase didn't have yet.
+ *
+ * Direction TOWARD the light, projected onto the 2D screen plane (x right,
+ * y down, matching CSS/SVG) -- cos(LIGHT_ELEVATION) is folded in so a
+ * grazing-angle light (elevation near 0) casts a longer, more dramatic
+ * offset than a near-overhead one (elevation near 90), matching how real
+ * directional lighting behaves. Computed once: both angles are fixed
+ * module constants, not resolved per-plugin.
+ */
+const LIGHT_DIR_X = Math.cos((LIGHT_AZIMUTH * Math.PI) / 180) * Math.cos((LIGHT_ELEVATION * Math.PI) / 180);
+const LIGHT_DIR_Y = Math.sin((LIGHT_AZIMUTH * Math.PI) / 180) * Math.cos((LIGHT_ELEVATION * Math.PI) / 180);
+
+/** A highlight (a bump's lit face, a knob rim's bright edge, an inset
+ *  top-light) sits on the side FACING the light -- offset toward it.
+ *  `distance` is the magnitude in px; direction is fixed. At
+ *  LIGHT_AZIMUTH=235/LIGHT_ELEVATION=55 this resolves to upper-left
+ *  (negative x, negative y), matching KnobControl's existing
+ *  cx=38%/cy=30% highlight bias this light direction was originally
+ *  chosen to match. */
+export function highlightOffset(distance: number): { x: number; y: number } {
+  return { x: LIGHT_DIR_X * distance, y: LIGHT_DIR_Y * distance };
+}
+
+/** A cast shadow falls AWAY from the light -- offset opposite it (lower-right
+ *  at the current fixed light direction). */
+export function shadowOffset(distance: number): { x: number; y: number } {
+  return { x: -LIGHT_DIR_X * distance, y: -LIGHT_DIR_Y * distance };
+}
+
+/** Convenience formatters for the common "just give me an `Npx Mpx` pair for
+ *  a box-shadow/text-shadow string" case. */
+export function highlightOffsetCss(distance: number): string {
+  const { x, y } = highlightOffset(distance);
+  return `${x.toFixed(1)}px ${y.toFixed(1)}px`;
+}
+export function shadowOffsetCss(distance: number): string {
+  const { x, y } = shadowOffset(distance);
+  return `${x.toFixed(1)}px ${y.toFixed(1)}px`;
+}
+
 /** The <filter> id a given (material, seed) pair resolves to. Exported
  *  separately from materialFilterDefs so a control (which only needs to
  *  WRITE `filter="url(#...)"`) and the one place that mounts the actual

@@ -1,5 +1,6 @@
 import { PluginParameter } from "../types";
 import { AmpHeadControl, CabinetControl, MicPositionControl } from "./PluginControl";
+import { shadowOffset } from "../utils/materialVisuals";
 
 interface RigStackProps {
   ampParam?: PluginParameter;
@@ -62,10 +63,13 @@ export default function RigStack({ ampParam, cabParam, micParam, allParams, onCh
           className="relative w-full"
           style={{
             marginTop: ampParam ? -6 : 0,
-            // Head casts a shadow down onto the cab it's sitting on -- a
-            // hand-picked offset for now; Stage 3d's shadowOffset() helper
-            // (unified light-direction model) replaces this once it lands.
-            boxShadow: ampParam ? "0 8px 14px -6px rgba(0,0,0,0.55)" : undefined,
+            // Head casts a shadow down onto the cab it's sitting on --
+            // direction now derives from the shared light model
+            // (shadowOffset) instead of a hand-picked straight-down
+            // offset, consistent with every other cast shadow on the
+            // faceplate. -6 blur-radius spread (negative 3rd value) keeps
+            // this a tight contact shadow, not a diffuse drop shadow.
+            boxShadow: ampParam ? `${shadowOffset(8).x}px ${shadowOffset(8).y}px 14px -6px rgba(0,0,0,0.55)` : undefined,
           }}
         >
           <CabinetControl param={cabParam} allParams={allParams} onChange={onChange} />

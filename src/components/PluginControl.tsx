@@ -4,7 +4,7 @@ import { computeFilterCurve, computeEqCurve, findEqBands, xPixelToHz, yPixelToDb
 import { applyFineAdjust, wheelStepDelta, wheelDirection, clampToRange } from "../utils/controlInteraction";
 import { METER_BALLISTICS, MeterBallistics, ballisticsStep } from "../utils/uiRenderPatterns";
 import { useNonPassiveWheel } from "../hooks/useNonPassiveWheel";
-import { MaterialContext, materialFilterId, materialTextureDataUri } from "../utils/materialVisuals";
+import { MaterialContext, materialFilterId, materialTextureDataUri, shadowOffset, highlightOffset } from "../utils/materialVisuals";
 import { ManualContext } from "../utils/featureManifest";
 import { effectiveKnobToken, evaluateEqIdentityMotion, identityKnobStyle } from "../utils/visualIdentity";
 import { KNOB_RECIPES } from "../utils/uiRenderPatterns";
@@ -192,6 +192,20 @@ function KnobControl({ param, onChange }: ControlProps) {
         onDoubleClick={handleReset}
         title="Drag up/down (shift = fine, wheel = step, double-click = reset)"
       >
+        {/* Drilled-hole mount: a recessed ring sunk into the panel BEHIND
+            the knob's own rim (rendered first so the SVG paints over it),
+            so the knob reads as sitting IN a hole cut for it rather than
+            floating on top of a flat panel. Shadow direction derives from
+            the shared light model, same as every other recess on the
+            faceplate. */}
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 rounded-full pointer-events-none"
+          style={{
+            background: "radial-gradient(circle at 50% 50%, transparent 58%, rgba(0,0,0,0.35) 68%, rgba(0,0,0,0.14) 82%, transparent 92%)",
+            boxShadow: `inset ${shadowOffset(2.2).x}px ${shadowOffset(2.2).y}px 4px rgba(0,0,0,0.5)`,
+          }}
+        />
         <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible">
           <defs>
             {/* Domed brushed-metal cap: light from top-left. */}
@@ -207,8 +221,13 @@ function KnobControl({ param, onChange }: ControlProps) {
             <filter id={`sh-${uid}`} x="-40%" y="-40%" width="180%" height="180%">
               {/* Cast shadow onto the panel -- strengthened (from dy=2.5/
                   stdDeviation=2.5) so the knob visibly sits ABOVE the
-                  faceplate instead of looking painted flush onto it. */}
-              <feDropShadow dx="0" dy="3.5" stdDeviation="3.2" floodColor="#000" floodOpacity="0.6" />
+                  faceplate instead of looking painted flush onto it.
+                  Direction now derives from the shared light model
+                  (shadowOffset) instead of a fixed straight-down dy, so it
+                  falls the same way every other lit surface on the
+                  faceplate does. distance=6.1 preserves the original
+                  drop's ~3.5px magnitude (sqrt(x^2+y^2)) at the new angle. */}
+              <feDropShadow dx={shadowOffset(6.1).x} dy={shadowOffset(6.1).y} stdDeviation="3.2" floodColor="#000" floodOpacity="0.6" />
             </filter>
             {/* Soft glossy highlight, screen-blended onto the cap so it
                 brightens the material underneath instead of flattening it
@@ -363,7 +382,11 @@ function MeterControl({ param, analyserNode, isPlaying }: ControlProps) {
     </svg>
   ) : (
     <div className="w-6 h-16 rounded-md bg-neutral-950 border border-neutral-800 relative overflow-hidden flex flex-col-reverse gap-[1.5px] p-1"
-      style={{ boxShadow: "inset 0 1.5px 3px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.03)" }}>
+      // Recess shadow direction now derives from the shared light model
+      // (shadowOffset) instead of a fixed straight-down inset, so it's
+      // shaded consistently with every other recessed surface on the
+      // faceplate.
+      style={{ boxShadow: `inset ${shadowOffset(1.7).x}px ${shadowOffset(1.7).y}px 3px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.03)` }}>
       {Array.from({ length: METER_SEGMENTS }).map((_, i) => {
         const lit = pct * METER_SEGMENTS > i;
         const color = meterSegmentColor(i);

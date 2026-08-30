@@ -5,7 +5,8 @@
  * Company-ready OrangeJUCE API contracts for health, organizations, projects, plugin generation, benchmarking, and artifacts.
  * OpenAPI spec version: 0.2.0
  */
+import type { Organization } from './organization';
 
-export interface HealthStatus {
-  status: string;
-}
+export type ListOrganizations200 = {
+  organizations: Organization[];
+};
